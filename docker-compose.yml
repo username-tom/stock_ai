@@ -1,0 +1,35 @@
+version: '3.9'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - IB_HOST=${IB_HOST:-host.docker.internal}
+      - IB_PORT=${IB_PORT:-7497}
+      - IB_CLIENT_ID=${IB_CLIENT_ID:-1}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - DATABASE_URL=sqlite+aiosqlite:///./stock_ai.db
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:80
+      - REPORTS_DIR=/app/reports_output
+    volumes:
+      - backend_data:/app/reports_output
+      - db_data:/app
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_data:
+  db_data:
