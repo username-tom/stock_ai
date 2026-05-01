@@ -2,11 +2,13 @@ from app.services.strategies.base import BaseStrategy
 from app.services.strategies.moving_avg import MovingAverageCrossover
 from app.services.strategies.rsi import RSIStrategy
 from app.services.strategies.bollinger import BollingerBandsStrategy
+from app.services.strategies.macd import MACDStrategy
 
 STRATEGY_MAP: dict[str, type[BaseStrategy]] = {
     "sma_crossover": MovingAverageCrossover,
     "rsi": RSIStrategy,
     "bollinger_bands": BollingerBandsStrategy,
+    "macd": MACDStrategy,
 }
 
 
@@ -34,6 +36,7 @@ __all__ = [
     "MovingAverageCrossover",
     "RSIStrategy",
     "BollingerBandsStrategy",
+    "MACDStrategy",
     "STRATEGY_MAP",
     "get_strategy",
     "list_strategies",

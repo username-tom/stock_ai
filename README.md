@@ -44,7 +44,7 @@ stock_ai/
 │   │       ├── ib_service.py     # Interactive Brokers (ib_insync)
 │   │       ├── backtester.py     # Backtest engine (pandas)
 │   │       ├── reporter.py       # HTML report generator (matplotlib)
-│   │       └── strategies/       # SMA Crossover, RSI, Bollinger Bands
+│   │       └── strategies/       # SMA Crossover, RSI, Bollinger Bands, MACD
 │   ├── tests/                # pytest unit tests (23 tests)
 │   ├── requirements.txt
 │   ├── Dockerfile
@@ -127,6 +127,7 @@ npm run dev        # http://localhost:5173
 | **SMA/EMA Crossover** | Trend following | `fast_period`, `slow_period`, `ma_type` (SMA/EMA) |
 | **RSI** | Mean reversion | `period`, `oversold`, `overbought` |
 | **Bollinger Bands** | Mean reversion | `period`, `std_dev` |
+| **MACD** | Trend following | `fast_period`, `slow_period`, `signal_period` |
 
 ---
 
@@ -161,7 +162,7 @@ cd backend
 pytest tests/ -v
 ```
 
-23 unit tests covering the backtesting engine and all three strategies.
+28 unit tests covering the backtesting engine and all four strategies.
 
 ---
 

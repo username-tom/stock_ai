@@ -7,6 +7,7 @@ from app.services.strategies import get_strategy, list_strategies, STRATEGY_MAP
 from app.services.strategies.moving_avg import MovingAverageCrossover
 from app.services.strategies.rsi import RSIStrategy
 from app.services.strategies.bollinger import BollingerBandsStrategy
+from app.services.strategies.macd import MACDStrategy
 
 
 def _make_ohlcv(n=200, seed=42) -> pd.DataFrame:
@@ -32,9 +33,9 @@ def _make_ohlcv(n=200, seed=42) -> pd.DataFrame:
 
 def test_list_strategies():
     strategies = list_strategies()
-    assert len(strategies) == 3
+    assert len(strategies) == 4
     types = {s["type"] for s in strategies}
-    assert types == {"sma_crossover", "rsi", "bollinger_bands"}
+    assert types == {"sma_crossover", "rsi", "bollinger_bands", "macd"}
 
 
 def test_get_strategy_unknown():
@@ -131,3 +132,42 @@ class TestBollingerBands:
         params = BollingerBandsStrategy.get_default_params()
         assert params["period"] == 20
         assert params["std_dev"] == 2.0
+
+
+# ------------------------------------------------------------------ #
+# MACD Strategy
+# ------------------------------------------------------------------ #
+
+class TestMACDStrategy:
+    def test_macd_columns_exist(self):
+        df = _make_ohlcv()
+        strategy = MACDStrategy(fast_period=12, slow_period=26, signal_period=9)
+        result = strategy.generate_signals(df)
+        assert "macd" in result.columns
+        assert "macd_signal" in result.columns
+        assert "macd_hist" in result.columns
+
+    def test_signal_values_are_valid(self):
+        df = _make_ohlcv()
+        strategy = MACDStrategy()
+        result = strategy.generate_signals(df)
+        assert set(result["signal"].unique()).issubset({-1, 0, 1})
+
+    def test_signals_produced(self):
+        df = _make_ohlcv(n=300)
+        strategy = MACDStrategy()
+        result = strategy.generate_signals(df)
+        assert result["signal"].abs().sum() > 0
+
+    def test_default_params(self):
+        params = MACDStrategy.get_default_params()
+        assert params["fast_period"] == 12
+        assert params["slow_period"] == 26
+        assert params["signal_period"] == 9
+
+    def test_get_strategy_factory(self):
+        s = get_strategy("macd", fast_period=12, slow_period=26, signal_period=9)
+        assert isinstance(s, MACDStrategy)
+        assert s.fast_period == 12
+        assert s.slow_period == 26
+        assert s.signal_period == 9
