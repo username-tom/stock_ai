@@ -63,8 +63,8 @@ const PRICE_OVERLAYS = {
 
 /** Registered subplot types. */
 const SUBPLOT_DEFS = [
-  { id: 'volume', label: 'Volume',    defaultEnabled: true,  panelHeight: 85  },
-  { id: 'rsi',    label: 'RSI (14)',  defaultEnabled: true,  panelHeight: 100 },
+  { id: 'volume', label: 'Volume',   defaultEnabled: true,  panelHeight: 85  },
+  { id: 'rsi',    label: 'RSI (14)', defaultEnabled: true,  panelHeight: 100 },
   { id: 'macd',   label: 'MACD',     defaultEnabled: false, panelHeight: 100 },
 ]
 

@@ -126,16 +126,16 @@ export function enrichData(data) {
   const rsiValues = hasRSI ? null : computeRSI(closes)
   const macdValues = hasMACD ? null : computeMACD(closes)
 
-  const fmt = (v, dp = 2) => (v != null ? parseFloat(v.toFixed(dp)) : null)
+  const roundTo = (v, decimalPlaces = 2) => (v != null ? parseFloat(v.toFixed(decimalPlaces)) : null)
 
   return data.map((d, i) => ({
     ...d,
-    ...(rsiValues ? { rsi: fmt(rsiValues[i]) } : {}),
+    ...(rsiValues ? { rsi: roundTo(rsiValues[i]) } : {}),
     ...(macdValues
       ? {
-          macd: fmt(macdValues.macd[i], 4),
-          macd_signal: fmt(macdValues.macd_signal[i], 4),
-          macd_hist: fmt(macdValues.macd_hist[i], 4),
+          macd: roundTo(macdValues.macd[i], 4),
+          macd_signal: roundTo(macdValues.macd_signal[i], 4),
+          macd_hist: roundTo(macdValues.macd_hist[i], 4),
         }
       : {}),
   }))
