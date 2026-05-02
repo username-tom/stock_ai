@@ -22,6 +22,21 @@ def _fetch_data(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
+def _derive_position(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a ``position`` column derived from ``signal`` changes.
+
+    Mirrors the crossover logic used by the built-in strategies: the position
+    changes only when the signal *changes* (e.g. 0 → 1 means buy, 1 → -1 means
+    sell).  This lets custom scripts omit the ``position`` column while still
+    driving the same trade-execution loop.
+    """
+    df = df.copy()
+    df["position"] = df["signal"].diff()
+    df.loc[df["signal"].shift(1) == df["signal"], "position"] = 0
+    df["position"] = df["position"].fillna(0)
+    return df
+
+
 def _calculate_metrics(
     equity: pd.Series,
     trades: list[dict],
@@ -76,10 +91,15 @@ def run_backtest(
     end_date: str,
     initial_capital: float = 10_000.0,
     commission: float = 0.001,
+    script_code: str | None = None,
     **strategy_params,
 ) -> dict[str, Any]:
     """
     Run a full backtest.
+
+    When *script_code* is provided the custom Python script is used to generate
+    signals instead of a built-in strategy.  In this case *strategy_type* is
+    still stored for labelling purposes (use ``"custom_script"``).
 
     Returns a dict with:
       - metrics (performance summary)
@@ -87,10 +107,17 @@ def run_backtest(
       - trades (list of executed round-trip trades)
       - ohlcv (price data for charting)
     """
-    strategy = get_strategy(strategy_type, **strategy_params)
-
     df = _fetch_data(symbol, start_date, end_date)
-    df = strategy.generate_signals(df)
+
+    if script_code is not None:
+        from app.services.script_executor import execute_script
+        df = execute_script(script_code, df, **strategy_params)
+        # Derive position column if the script didn't add one
+        if "position" not in df.columns:
+            df = _derive_position(df)
+    else:
+        strategy = get_strategy(strategy_type, **strategy_params)
+        df = strategy.generate_signals(df)
 
     cash = initial_capital
     shares = 0.0

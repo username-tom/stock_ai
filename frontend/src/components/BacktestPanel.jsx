@@ -1,13 +1,13 @@
 import { useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { getStrategies, runBacktest } from '../api/client'
+import { getStrategies, runBacktest, getScripts } from '../api/client'
 import EquityChart from './charts/EquityChart'
 import PriceChart from './charts/PriceChart'
 import {
   ArrowPathIcon,
-  ChevronDownIcon,
   CheckCircleIcon,
   ExclamationTriangleIcon,
+  CodeBracketIcon,
 } from '@heroicons/react/24/outline'
 
 function MetricCard({ label, value, sub, positive }) {
@@ -40,10 +40,17 @@ const STRATEGY_PARAM_UI = {
   ],
 }
 
+const CUSTOM_SCRIPT_KEY = '__custom_script__'
+
 export default function BacktestPanel() {
   const { data: stratData } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
+  })
+
+  const { data: scriptsData } = useQuery({
+    queryKey: ['scripts'],
+    queryFn: getScripts,
   })
 
   const [form, setForm] = useState({
@@ -55,8 +62,12 @@ export default function BacktestPanel() {
     commission: 0.001,
   })
   const [stratParams, setStratParams] = useState({ fast_period: 10, slow_period: 30, ma_type: 'SMA' })
+  const [selectedScriptId, setSelectedScriptId] = useState(null)
   const [result, setResult] = useState(null)
   const [activeTab, setActiveTab] = useState('equity')
+
+  const isCustomScript = form.strategy_type === CUSTOM_SCRIPT_KEY
+  const scripts = scriptsData?.scripts ?? []
 
   const mutation = useMutation({
     mutationFn: (payload) => runBacktest(payload),
@@ -65,17 +76,29 @@ export default function BacktestPanel() {
 
   const handleStrategyChange = (type) => {
     setForm(f => ({ ...f, strategy_type: type }))
-    const defaults = {}
-    ;(STRATEGY_PARAM_UI[type] || []).forEach(p => { defaults[p.key] = p.default })
-    setStratParams(defaults)
+    if (type !== CUSTOM_SCRIPT_KEY) {
+      const defaults = {}
+      ;(STRATEGY_PARAM_UI[type] || []).forEach(p => { defaults[p.key] = p.default })
+      setStratParams(defaults)
+    }
   }
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    mutation.mutate({ ...form, strategy_params: stratParams })
+    if (isCustomScript) {
+      if (!selectedScriptId) return
+      mutation.mutate({
+        ...form,
+        strategy_type: 'custom_script',
+        script_id: selectedScriptId,
+        strategy_params: {},
+      })
+    } else {
+      mutation.mutate({ ...form, strategy_params: stratParams })
+    }
   }
 
-  const paramFields = STRATEGY_PARAM_UI[form.strategy_type] || []
+  const paramFields = isCustomScript ? [] : (STRATEGY_PARAM_UI[form.strategy_type] || [])
 
   return (
     <div className="p-6 space-y-6">
@@ -109,13 +132,51 @@ export default function BacktestPanel() {
               onChange={e => handleStrategyChange(e.target.value)}
             >
               {(stratData?.strategies || []).map(s => (
-                <option key={s.type} value={s.type}>{s.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</option>
+                <option key={s.type} value={s.type}>
+                  {s.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                </option>
               ))}
+              <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
             </select>
           </div>
 
-          {/* Strategy parameters */}
-          {paramFields.length > 0 && (
+          {/* Custom script selector */}
+          {isCustomScript && (
+            <div className="border border-dark-500 rounded-lg p-3 space-y-3 bg-dark-900/30">
+              <div className="flex items-center gap-1.5 text-xs text-slate-400 uppercase tracking-wider">
+                <CodeBracketIcon className="h-3.5 w-3.5" />
+                Custom Script
+              </div>
+              {scripts.length === 0 ? (
+                <div className="text-xs text-amber-400/80">
+                  No scripts saved yet. Create one in the{' '}
+                  <a href="/scripts" className="underline">Scripts</a> panel.
+                </div>
+              ) : (
+                <div>
+                  <label className="label">Select Script</label>
+                  <select
+                    className="input"
+                    value={selectedScriptId ?? ''}
+                    onChange={e => setSelectedScriptId(e.target.value ? parseInt(e.target.value) : null)}
+                  >
+                    <option value="">— choose a script —</option>
+                    {scripts.map(s => (
+                      <option key={s.id} value={s.id}>{s.name}</option>
+                    ))}
+                  </select>
+                  {selectedScriptId && scripts.find(s => s.id === selectedScriptId)?.description && (
+                    <div className="mt-1.5 text-xs text-slate-500">
+                      {scripts.find(s => s.id === selectedScriptId).description}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Strategy parameters (built-in only) */}
+          {!isCustomScript && paramFields.length > 0 && (
             <div className="border border-dark-500 rounded-lg p-3 space-y-3 bg-dark-900/30">
               <div className="text-xs text-slate-500 uppercase tracking-wider">Strategy Parameters</div>
               {paramFields.map(f => (
@@ -191,7 +252,7 @@ export default function BacktestPanel() {
           <button
             type="submit"
             className="btn-primary w-full justify-center"
-            disabled={mutation.isPending}
+            disabled={mutation.isPending || (isCustomScript && !selectedScriptId)}
           >
             {mutation.isPending ? (
               <>
