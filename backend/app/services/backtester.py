@@ -4,22 +4,10 @@ from __future__ import annotations
 import math
 import numpy as np
 import pandas as pd
-import yfinance as yf
 from typing import Any
 
+from app.services.data_provider import DataSource, fetch_ohlcv
 from app.services.strategies import get_strategy
-
-
-def _fetch_data(symbol: str, start: str, end: str) -> pd.DataFrame:
-    """Download OHLCV data via yfinance."""
-    df = yf.download(symbol, start=start, end=end, progress=False, auto_adjust=True)
-    if df.empty:
-        raise ValueError(f"No data found for {symbol} between {start} and {end}.")
-    df.index = pd.to_datetime(df.index)
-    # Flatten MultiIndex columns if present (yfinance may return them)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
-    return df
 
 
 def _derive_position(df: pd.DataFrame) -> pd.DataFrame:
@@ -89,6 +77,7 @@ def run_backtest(
     initial_capital: float = 10_000.0,
     commission: float = 0.001,
     script_code: str | None = None,
+    data_source: DataSource = "yfinance",
     **strategy_params,
 ) -> dict[str, Any]:
     """
@@ -98,13 +87,18 @@ def run_backtest(
     signals instead of a built-in strategy.  In this case *strategy_type* is
     still stored for labelling purposes (use ``"custom_script"``).
 
+    The *data_source* parameter selects where OHLCV data is fetched from.
+    Supported values: ``"yfinance"`` (default), ``"stooq"``, ``"ib"``.
+    When ``"ib"`` is requested but IB is not connected, the engine falls back
+    to ``"yfinance"`` automatically.
+
     Returns a dict with:
       - metrics (performance summary)
       - equity_curve (list of {date, value})
       - trades (list of executed round-trip trades)
       - ohlcv (price data for charting)
     """
-    df = _fetch_data(symbol, start_date, end_date)
+    df = fetch_ohlcv(symbol, start_date, end_date, source=data_source)
 
     if script_code is not None:
         from app.services.script_executor import execute_script
@@ -195,6 +189,7 @@ def run_backtest(
         "symbol": symbol,
         "strategy_type": strategy_type,
         "strategy_params": strategy_params,
+        "data_source": data_source,
         "start_date": start_date,
         "end_date": end_date,
         "initial_capital": initial_capital,

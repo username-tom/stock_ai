@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from app.services.backtester import _calculate_metrics, run_backtest
 
@@ -69,7 +69,7 @@ class TestRunBacktest:
         return _make_ohlcv()
 
     def test_sma_crossover(self):
-        with patch("app.services.backtester.yf.download", side_effect=self._fake_download):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
             result = run_backtest(
                 symbol="AAPL",
                 strategy_type="sma_crossover",
@@ -87,7 +87,7 @@ class TestRunBacktest:
         assert len(result["equity_curve"]) > 0
 
     def test_rsi_strategy(self):
-        with patch("app.services.backtester.yf.download", side_effect=self._fake_download):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
             result = run_backtest(
                 symbol="MSFT",
                 strategy_type="rsi",
@@ -102,7 +102,7 @@ class TestRunBacktest:
         assert isinstance(result["metrics"]["total_trades"], int)
 
     def test_bollinger_strategy(self):
-        with patch("app.services.backtester.yf.download", side_effect=self._fake_download):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
             result = run_backtest(
                 symbol="TSLA",
                 strategy_type="bollinger_bands",
@@ -117,7 +117,7 @@ class TestRunBacktest:
         assert "open" in first and "close" in first
 
     def test_unknown_strategy_raises(self):
-        with patch("app.services.backtester.yf.download", side_effect=self._fake_download):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
             with pytest.raises(ValueError, match="Unknown strategy"):
                 run_backtest(
                     symbol="AAPL",
@@ -127,7 +127,7 @@ class TestRunBacktest:
                 )
 
     def test_equity_curve_length_matches_ohlcv(self):
-        with patch("app.services.backtester.yf.download", side_effect=self._fake_download):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
             result = run_backtest(
                 symbol="AAPL",
                 strategy_type="sma_crossover",
@@ -136,3 +136,24 @@ class TestRunBacktest:
                 initial_capital=10_000,
             )
         assert len(result["equity_curve"]) == len(result["ohlcv"])
+
+    def test_data_source_included_in_result(self):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
+            result = run_backtest(
+                symbol="AAPL",
+                strategy_type="sma_crossover",
+                start_date="2022-01-01",
+                end_date="2022-12-31",
+                data_source="stooq",
+            )
+        assert result["data_source"] == "stooq"
+
+    def test_default_data_source_is_yfinance(self):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
+            result = run_backtest(
+                symbol="AAPL",
+                strategy_type="sma_crossover",
+                start_date="2022-01-01",
+                end_date="2022-12-31",
+            )
+        assert result["data_source"] == "yfinance"
