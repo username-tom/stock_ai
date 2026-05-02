@@ -143,10 +143,22 @@ async def validate_script_endpoint(script_id: int, db: AsyncSession = Depends(ge
     script = await db.get(CustomScript, script_id)
     if not script:
         raise HTTPException(status_code=404, detail="Script not found.")
-    return validate_script(script.script_code)
+    result = validate_script(script.script_code)
+    # Return only known-safe fields to avoid leaking internal paths
+    return {
+        "valid": result["valid"],
+        "error": result.get("error"),
+        "default_params": result.get("default_params", {}),
+    }
 
 
 @router.post("/validate")
 async def validate_script_code(body: ScriptCreate):
     """Validate script code without saving it."""
-    return validate_script(body.script_code)
+    result = validate_script(body.script_code)
+    # Return only known-safe fields to avoid leaking internal paths
+    return {
+        "valid": result["valid"],
+        "error": result.get("error"),
+        "default_params": result.get("default_params", {}),
+    }

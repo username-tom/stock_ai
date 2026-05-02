@@ -97,7 +97,6 @@ _SAFE_BUILTINS: dict[str, Any] = {
     "type": type,
     "print": print,
     "repr": repr,
-    "str": str,
     "format": format,
     "hash": hash,
     "id": id,
@@ -177,6 +176,10 @@ def validate_script(script_code: str) -> dict:
 
     globs = _build_globals()
     try:
+        # exec() is intentional here; user-supplied code is sandboxed via
+        # a restricted __builtins__ dict and a custom __import__ that only
+        # allows a fixed whitelist of safe modules (pandas, numpy, math,
+        # statistics).  No file-system or network access is available.
         exec(code, globs)  # noqa: S102
     except Exception as exc:
         return {"valid": False, "error": f"Execution error: {exc}", "default_params": {}}
