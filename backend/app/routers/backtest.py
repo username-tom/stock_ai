@@ -14,6 +14,7 @@ from app.models.custom_script import CustomScript
 from app.services.backtester import run_backtest
 from app.services.reporter import generate_html_report
 from app.services.strategies import list_strategies
+from app.services.data_provider import DataSource, list_data_sources
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -30,12 +31,27 @@ class BacktestRequest(BaseModel):
     initial_capital: float = Field(default=10000.0, ge=1000)
     commission: float = Field(default=0.001, ge=0, le=0.05)
     strategy_params: dict = Field(default_factory=dict)
+    data_source: DataSource = Field(
+        default="yfinance",
+        description=(
+            "Historical data source for the backtest. "
+            "Options: 'yfinance' (Yahoo Finance, default), 'stooq' (Stooq.com), "
+            "'ib' (Interactive Brokers – falls back to yfinance when not connected)."
+        ),
+        example="yfinance",
+    )
 
 
 @router.get("/strategies")
 async def get_strategies():
     """List all available strategies with their default parameters."""
     return {"strategies": list_strategies()}
+
+
+@router.get("/data-sources")
+async def get_data_sources():
+    """List all supported data sources and their availability."""
+    return {"data_sources": list_data_sources()}
 
 
 @router.post("/run")
@@ -69,6 +85,7 @@ async def run_backtest_endpoint(
             initial_capital=req.initial_capital,
             commission=req.commission,
             script_code=script_code,
+            data_source=req.data_source,
             **req.strategy_params,
         )
     except ValueError as exc:

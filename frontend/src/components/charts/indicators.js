@@ -1,0 +1,142 @@
+/**
+ * Client-side technical indicator computation.
+ *
+ * All functions operate on plain number arrays and return new arrays of the
+ * same length, using `null` for positions where there is not enough history
+ * to produce a value.
+ *
+ * `enrichData` is the public entry point used by SubplotChart.  It adds RSI
+ * and MACD fields to each data point, but only when those values are not
+ * already present from backend-computed strategy output.
+ */
+
+/**
+ * Compute Exponential Moving Average (EMA).
+ * Seeded from the SMA of the first `period` values.
+ *
+ * @param {(number|null)[]} values
+ * @param {number} period
+ * @returns {(number|null)[]}
+ */
+export function computeEMA(values, period) {
+  const k = 2 / (period + 1)
+  const result = new Array(values.length).fill(null)
+  let count = 0
+  let sum = 0
+  let prev = null
+
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]
+    if (v == null) continue
+
+    if (prev === null) {
+      // Seed phase: accumulate SMA
+      sum += v
+      count++
+      if (count === period) {
+        prev = sum / period
+        result[i] = prev
+      }
+    } else {
+      prev = v * k + prev * (1 - k)
+      result[i] = prev
+    }
+  }
+  return result
+}
+
+/**
+ * Compute RSI using Wilder's smoothing method.
+ *
+ * @param {(number|null)[]} closes
+ * @param {number} [period=14]
+ * @returns {(number|null)[]}
+ */
+export function computeRSI(closes, period = 14) {
+  const result = new Array(closes.length).fill(null)
+  if (closes.length < period + 1) return result
+
+  let avgGain = 0
+  let avgLoss = 0
+
+  for (let i = 1; i <= period; i++) {
+    if (closes[i] == null || closes[i - 1] == null) continue
+    const diff = closes[i] - closes[i - 1]
+    if (diff > 0) avgGain += diff
+    else avgLoss += -diff
+  }
+  avgGain /= period
+  avgLoss /= period
+
+  const toRSI = (gain, loss) => (loss === 0 ? 100 : 100 - 100 / (1 + gain / loss))
+
+  result[period] = toRSI(avgGain, avgLoss)
+
+  for (let i = period + 1; i < closes.length; i++) {
+    if (closes[i] == null || closes[i - 1] == null) continue
+    const diff = closes[i] - closes[i - 1]
+    const gain = diff > 0 ? diff : 0
+    const loss = diff < 0 ? -diff : 0
+    avgGain = (avgGain * (period - 1) + gain) / period
+    avgLoss = (avgLoss * (period - 1) + loss) / period
+    result[i] = toRSI(avgGain, avgLoss)
+  }
+  return result
+}
+
+/**
+ * Compute MACD line, signal line, and histogram.
+ *
+ * @param {(number|null)[]} closes
+ * @param {number} [fast=12]
+ * @param {number} [slow=26]
+ * @param {number} [signalPeriod=9]
+ * @returns {{ macd: (number|null)[], macd_signal: (number|null)[], macd_hist: (number|null)[] }}
+ */
+export function computeMACD(closes, fast = 12, slow = 26, signalPeriod = 9) {
+  const emaFast = computeEMA(closes, fast)
+  const emaSlow = computeEMA(closes, slow)
+  const macd = closes.map((_, i) =>
+    emaFast[i] != null && emaSlow[i] != null ? emaFast[i] - emaSlow[i] : null
+  )
+  const macd_signal = computeEMA(macd, signalPeriod)
+  const macd_hist = macd.map((v, i) =>
+    v != null && macd_signal[i] != null ? v - macd_signal[i] : null
+  )
+  return { macd, macd_signal, macd_hist }
+}
+
+/**
+ * Enrich an OHLCV data array with RSI and MACD values.
+ *
+ * Backend-computed values (e.g. from the RSI or MACD strategy) take precedence
+ * — if the data already contains non-null `rsi` or `macd` values, those fields
+ * are left untouched.
+ *
+ * @param {{ close: number, [key: string]: any }[]} data
+ * @returns {object[]}
+ */
+export function enrichData(data) {
+  if (!data || data.length === 0) return data
+
+  const closes = data.map(d => d.close)
+  const hasRSI = data.some(d => d.rsi != null)
+  const hasMACD = data.some(d => d.macd != null)
+
+  const rsiValues = hasRSI ? null : computeRSI(closes)
+  const macdValues = hasMACD ? null : computeMACD(closes)
+
+  const roundTo = (v, decimalPlaces = 2) => (v != null ? parseFloat(v.toFixed(decimalPlaces)) : null)
+
+  return data.map((d, i) => ({
+    ...d,
+    ...(rsiValues ? { rsi: roundTo(rsiValues[i]) } : {}),
+    ...(macdValues
+      ? {
+          macd: roundTo(macdValues.macd[i], 4),
+          macd_signal: roundTo(macdValues.macd_signal[i], 4),
+          macd_hist: roundTo(macdValues.macd_hist[i], 4),
+        }
+      : {}),
+  }))
+}
