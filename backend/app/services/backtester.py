@@ -25,15 +25,12 @@ def _fetch_data(symbol: str, start: str, end: str) -> pd.DataFrame:
 def _derive_position(df: pd.DataFrame) -> pd.DataFrame:
     """Add a ``position`` column derived from ``signal`` changes.
 
-    Mirrors the crossover logic used by the built-in strategies: the position
-    changes only when the signal *changes* (e.g. 0 → 1 means buy, 1 → -1 means
-    sell).  This lets custom scripts omit the ``position`` column while still
-    driving the same trade-execution loop.
+    A non-zero position value signals a trade trigger: positive means switch
+    to long, negative means exit long.  Using ``diff()`` naturally produces 0
+    when the signal is unchanged, so no further filtering is needed.
     """
     df = df.copy()
-    df["position"] = df["signal"].diff()
-    df.loc[df["signal"].shift(1) == df["signal"], "position"] = 0
-    df["position"] = df["position"].fillna(0)
+    df["position"] = df["signal"].diff().fillna(0)
     return df
 
 

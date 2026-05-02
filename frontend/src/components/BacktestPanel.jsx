@@ -158,7 +158,7 @@ export default function BacktestPanel() {
                   <select
                     className="input"
                     value={selectedScriptId ?? ''}
-                    onChange={e => setSelectedScriptId(e.target.value ? parseInt(e.target.value) : null)}
+                    onChange={e => setSelectedScriptId(e.target.value ? parseInt(e.target.value, 10) : null)}
                   >
                     <option value="">— choose a script —</option>
                     {scripts.map(s => (
@@ -198,7 +198,7 @@ export default function BacktestPanel() {
                       value={stratParams[f.key] ?? f.default}
                       onChange={e => setStratParams(p => ({
                         ...p,
-                        [f.key]: f.step ? parseFloat(e.target.value) : parseInt(e.target.value),
+                        [f.key]: f.step ? parseFloat(e.target.value) : parseInt(e.target.value, 10),
                       }))}
                     />
                   )}

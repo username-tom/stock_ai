@@ -107,7 +107,7 @@ export default function ScriptsPanel() {
       setValidationResult(null)
       setSaveMsg(null)
     }
-  }, [selectedScript]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedScript])
 
   const saveMut = useMutation({
     mutationFn: ({ id, payload }) => updateScript(id, payload),
