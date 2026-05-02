@@ -4,6 +4,7 @@ import Dashboard from './components/Dashboard'
 import BacktestPanel from './components/BacktestPanel'
 import ReportsPanel from './components/ReportsPanel'
 import TradingPanel from './components/TradingPanel'
+import ScriptsPanel from './components/ScriptsPanel'
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="/backtest" element={<BacktestPanel />} />
           <Route path="/reports" element={<ReportsPanel />} />
           <Route path="/trading" element={<TradingPanel />} />
+          <Route path="/scripts" element={<ScriptsPanel />} />
         </Routes>
       </Layout>
     </BrowserRouter>

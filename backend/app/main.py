@@ -7,7 +7,7 @@ import os
 
 from app.config import settings
 from app.database import init_db
-from app.routers import trading, backtest, market_data, ws
+from app.routers import trading, backtest, market_data, ws, scripts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ app.include_router(trading.router)
 app.include_router(backtest.router)
 app.include_router(market_data.router)
 app.include_router(ws.router)
+app.include_router(scripts.router)
 
 # Serve HTML reports as static files
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)

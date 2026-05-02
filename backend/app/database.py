@@ -17,5 +17,5 @@ async def get_db():
 
 async def init_db():
     async with engine.begin() as conn:
-        from app.models import trade, strategy, report  # noqa: F401
+        from app.models import trade, strategy, report, custom_script  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
