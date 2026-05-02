@@ -68,7 +68,8 @@ def _fetch_stooq(symbol: str, start: str, end: str) -> pd.DataFrame:
             raise ValueError(f"stooq: no data found for {symbol!r} between {start} and {end}.")
         df = pd.read_csv(io.StringIO(text), parse_dates=["Date"], index_col="Date")
         # Stooq column names are Title-Case; normalise to match yfinance style
-        df.columns = [c.strip().capitalize() for c in df.columns]
+        # Use .title() to correctly handle multi-word columns (e.g. 'Adj Close')
+        df.columns = [c.strip().title() for c in df.columns]
         if df.empty:
             raise ValueError(f"stooq: empty response for {symbol!r} between {start} and {end}.")
         df.index = pd.to_datetime(df.index)
@@ -86,8 +87,6 @@ def _fetch_ib(symbol: str, start: str, end: str) -> pd.DataFrame:
     Requires an active IB connection (ib_service.is_connected == True).
     Raises ``ValueError`` when IB is not connected so callers can fall back.
     """
-    import asyncio
-
     if not IB_AVAILABLE:
         raise ValueError("ib_insync is not installed – IB data source unavailable.")
     if not ib_service.is_connected:
@@ -95,6 +94,7 @@ def _fetch_ib(symbol: str, start: str, end: str) -> pd.DataFrame:
 
     # IB historical data is fetched asynchronously; run it in a new event loop
     # when called from a synchronous context (e.g. backtester thread).
+    import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -106,7 +106,7 @@ def _fetch_ib(symbol: str, start: str, end: str) -> pd.DataFrame:
                 )
                 df = future.result(timeout=60)
         else:
-            df = loop.run_until_complete(_ib_to_dataframe(symbol, start, end))
+            df = asyncio.run(_ib_to_dataframe(symbol, start, end))
     except Exception as exc:
         raise ValueError(f"IB historical data fetch failed for {symbol!r}: {exc}") from exc
 

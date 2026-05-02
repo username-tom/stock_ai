@@ -138,7 +138,7 @@ class TestRunBacktest:
         assert len(result["equity_curve"]) == len(result["ohlcv"])
 
     def test_data_source_included_in_result(self):
-        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()) as mock_fetch:
             result = run_backtest(
                 symbol="AAPL",
                 strategy_type="sma_crossover",
@@ -147,9 +147,10 @@ class TestRunBacktest:
                 data_source="stooq",
             )
         assert result["data_source"] == "stooq"
+        mock_fetch.assert_called_once_with("AAPL", "2022-01-01", "2022-12-31", source="stooq")
 
     def test_default_data_source_is_yfinance(self):
-        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()):
+        with patch("app.services.backtester.fetch_ohlcv", return_value=_make_ohlcv()) as mock_fetch:
             result = run_backtest(
                 symbol="AAPL",
                 strategy_type="sma_crossover",
@@ -157,3 +158,4 @@ class TestRunBacktest:
                 end_date="2022-12-31",
             )
         assert result["data_source"] == "yfinance"
+        mock_fetch.assert_called_once_with("AAPL", "2022-01-01", "2022-12-31", source="yfinance")
