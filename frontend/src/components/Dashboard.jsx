@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getQuote, getHistory } from '../api/client'
-import PriceChart from './charts/PriceChart'
+import SubplotChart from './charts/SubplotChart'
 import { ArrowUpIcon, ArrowDownIcon, SignalIcon } from '@heroicons/react/24/solid'
 
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
@@ -160,7 +160,7 @@ export default function Dashboard() {
             Loading chart…
           </div>
         ) : (
-          <PriceChart data={histData?.data ?? []} height={280} />
+          <SubplotChart data={histData?.data ?? []} height={220} />
         )}
       </div>
     </div>

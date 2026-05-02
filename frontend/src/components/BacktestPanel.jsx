@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { getStrategies, runBacktest, getScripts } from '../api/client'
 import EquityChart from './charts/EquityChart'
-import PriceChart from './charts/PriceChart'
+import SubplotChart from './charts/SubplotChart'
 import {
   ArrowPathIcon,
   CheckCircleIcon,
@@ -351,7 +351,7 @@ export default function BacktestPanel() {
                 )}
 
                 {activeTab === 'price' && (
-                  <PriceChart data={result.result?.ohlcv ?? []} height={300} />
+                  <SubplotChart data={result.result?.ohlcv ?? []} height={240} />
                 )}
 
                 {activeTab === 'trades' && (
