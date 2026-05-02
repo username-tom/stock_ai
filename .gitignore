@@ -29,6 +29,7 @@ frontend/.env
 frontend/.env.local
 
 # IDE
+.vs/
 .vscode/
 .idea/
 *.swp
