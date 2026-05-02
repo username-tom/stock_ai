@@ -4,7 +4,7 @@ import {
   ArrowPathIcon,
   DocumentChartBarIcon,
   BoltIcon,
-  Cog6ToothIcon,
+  CodeBracketIcon,
 } from '@heroicons/react/24/outline'
 
 const navItems = [
@@ -12,6 +12,7 @@ const navItems = [
   { to: '/backtest', label: 'Backtest', icon: ArrowPathIcon },
   { to: '/reports', label: 'Reports', icon: DocumentChartBarIcon },
   { to: '/trading', label: 'Trading', icon: BoltIcon },
+  { to: '/scripts', label: 'Scripts', icon: CodeBracketIcon },
 ]
 
 export default function Layout({ children }) {

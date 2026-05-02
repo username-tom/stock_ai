@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models.report import BacktestReport
+from app.models.custom_script import CustomScript
 from app.services.backtester import run_backtest
 from app.services.reporter import generate_html_report
 from app.services.strategies import list_strategies
@@ -19,7 +20,11 @@ router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 class BacktestRequest(BaseModel):
     symbol: str = Field(..., example="AAPL")
-    strategy_type: str = Field(..., example="sma_crossover")
+    strategy_type: str = Field(default="sma_crossover", example="sma_crossover")
+    script_id: int | None = Field(
+        default=None,
+        description="ID of a saved custom script to use instead of a built-in strategy.",
+    )
     start_date: str = Field(..., example="2022-01-01")
     end_date: str = Field(..., example="2023-12-31")
     initial_capital: float = Field(default=10000.0, ge=1000)
@@ -38,16 +43,32 @@ async def run_backtest_endpoint(
     req: BacktestRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Run a backtest and persist the report."""
+    """Run a backtest and persist the report.
+
+    Supply either a ``strategy_type`` (built-in) or a ``script_id`` (custom
+    Python script).  When ``script_id`` is given it takes precedence and the
+    strategy type is recorded as ``custom_script``.
+    """
+    script_code: str | None = None
+    effective_strategy_type = req.strategy_type
+
+    if req.script_id is not None:
+        script = await db.get(CustomScript, req.script_id)
+        if not script:
+            raise HTTPException(status_code=404, detail=f"Custom script {req.script_id} not found.")
+        script_code = script.script_code
+        effective_strategy_type = "custom_script"
+
     try:
         result = await asyncio.to_thread(
             run_backtest,
             symbol=req.symbol.upper(),
-            strategy_type=req.strategy_type,
+            strategy_type=effective_strategy_type,
             start_date=req.start_date,
             end_date=req.end_date,
             initial_capital=req.initial_capital,
             commission=req.commission,
+            script_code=script_code,
             **req.strategy_params,
         )
     except ValueError as exc:
@@ -56,10 +77,16 @@ async def run_backtest_endpoint(
         raise HTTPException(status_code=500, detail=f"Backtest error: {exc}")
 
     m = result["metrics"]
-    name = (
-        f"{req.symbol.upper()}_{req.strategy_type}_"
-        f"{req.start_date}_to_{req.end_date}"
-    )
+    if req.script_id is not None:
+        name = (
+            f"{req.symbol.upper()}_script{req.script_id}_"
+            f"{req.start_date}_to_{req.end_date}"
+        )
+    else:
+        name = (
+            f"{req.symbol.upper()}_{effective_strategy_type}_"
+            f"{req.start_date}_to_{req.end_date}"
+        )
 
     # Generate HTML report
     try:
@@ -71,7 +98,7 @@ async def run_backtest_endpoint(
     report = BacktestReport(
         name=name,
         symbol=req.symbol.upper(),
-        strategy_type=req.strategy_type,
+        strategy_type=effective_strategy_type,
         parameters=req.strategy_params,
         start_date=req.start_date,
         end_date=req.end_date,
