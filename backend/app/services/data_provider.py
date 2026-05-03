@@ -66,6 +66,10 @@ def _fetch_stooq(symbol: str, start: str, end: str) -> pd.DataFrame:
         text = response.text.strip()
         if not text or text.startswith("No data"):
             raise ValueError(f"stooq: no data found for {symbol!r} between {start} and {end}.")
+        if "apikey" in text.lower() or text.startswith("Get your"):
+            raise ValueError(
+                "stooq: API key required. Stooq now requires authentication for data downloads."
+            )
         df = pd.read_csv(io.StringIO(text), parse_dates=["Date"], index_col="Date")
         # Stooq column names are Title-Case; normalise to match yfinance style
         # Use .title() to correctly handle multi-word columns (e.g. 'Adj Close')
