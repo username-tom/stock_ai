@@ -1,5 +1,5 @@
 import {
-  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ComposedChart, Line, Bar, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
 import { enrichData } from './indicators'
@@ -16,36 +16,257 @@ const SIGNAL_COLOR = '#f97316'
 const BUY_COLOR = '#4ade80'
 const SELL_COLOR = '#f87171'
 
+// ---------------------------------------------------------------------------
+// 1D Yahoo-style chart
+// ---------------------------------------------------------------------------
+
+function OneDayTooltip({ active, payload, label, prevClose }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (!d) return null
+  const chg = prevClose != null ? d.close - prevClose : null
+  const chgPct = prevClose != null ? (chg / prevClose) * 100 : null
+  const pos = chg == null || chg >= 0
+  return (
+    <div className="bg-[#1e293b] border border-[#334155] rounded-lg p-3 text-xs shadow-xl space-y-1 min-w-[170px]">
+      <div className="text-slate-400 font-medium">{label}</div>
+      <div className="flex justify-between gap-4">
+        <span className="text-slate-500">Price</span>
+        <span className="text-slate-100 font-bold font-mono">${d.close?.toFixed(2)}</span>
+      </div>
+      {chg != null && (
+        <div className="flex justify-between gap-4">
+          <span className="text-slate-500">Change</span>
+          <span className={`font-mono font-semibold ${pos ? 'text-emerald-400' : 'text-red-400'}`}>
+            {pos ? '+' : ''}{chg.toFixed(2)} ({pos ? '+' : ''}{chgPct.toFixed(2)}%)
+          </span>
+        </div>
+      )}
+      {d.volume != null && (
+        <div className="flex justify-between gap-4">
+          <span className="text-slate-500">Vol</span>
+          <span className="text-slate-400 font-mono">
+            {d.volume >= 1e6 ? `${(d.volume / 1e6).toFixed(2)}M` : `${(d.volume / 1e3).toFixed(0)}K`}
+          </span>
+        </div>
+      )}
+      {d.rsi != null && <div className="flex justify-between gap-4"><span className="text-slate-500">RSI</span><span className="text-purple-400">{d.rsi?.toFixed(2)}</span></div>}
+      {d.macd != null && <div className="flex justify-between gap-4"><span className="text-slate-500">MACD</span><span className="text-blue-400">{d.macd?.toFixed(4)}</span></div>}
+    </div>
+  )
+}
+
+function OneDayChart({ data, height, indicators, prevClose }) {
+  if (!data.length) return null
+
+  const enriched = enrichData(data)
+
+  // Determine line color: green if last close >= prevClose, else red
+  const lastClose = enriched[enriched.length - 1]?.close
+  const isUp = prevClose == null || lastClose >= prevClose
+  const lineColor = isUp ? '#22c55e' : '#ef4444'
+  const fillColor = isUp ? '#22c55e' : '#ef4444'
+
+  // Dates are "MM/DD HH:MM" — extract the time portion for session logic
+  const timeOf = (d) => d.date?.slice(6) ?? ''   // "HH:MM"
+  const dayOf  = (d) => d.date?.slice(0, 5) ?? '' // "MM/DD"
+
+  // Unique trading days in the data
+  const days = [...new Set(enriched.map(dayOf))]
+
+  // Hourly X-axis ticks: bars whose time ends in ":00"
+  const hourTicks = enriched
+    .filter(d => timeOf(d).endsWith(':00'))
+    .map(d => d.date)
+
+  // Tick label: show "MM/DD" at midnight/first bar of each day, else "HH:MM"
+  const formatTick = (val) => {
+    const t = val?.slice(6) ?? ''
+    if (t === '00:00' || t === '04:00') return val?.slice(0, 5) ?? ''
+    return t
+  }
+
+  // Pre/post market areas per day
+  const sessionAreas = []
+  const dayLines = []
+  days.forEach((day, i) => {
+    const dayData = enriched.filter(d => dayOf(d) === day)
+    if (i > 0) dayLines.push(dayData[0].date)
+    const pre  = dayData.filter(d => timeOf(d) < '09:30')
+    const post = dayData.filter(d => timeOf(d) >= '16:00')
+    if (pre.length)  sessionAreas.push({ x1: pre[0].date,  x2: pre[pre.length - 1].date })
+    if (post.length) sessionAreas.push({ x1: post[0].date, x2: post[post.length - 1].date })
+  })
+
+  // Session open/close boundary markers
+  const sessionBoundaries = []
+  days.forEach(day => {
+    const dayData = enriched.filter(d => dayOf(d) === day)
+    const openBar  = dayData.find(d => timeOf(d) >= '09:30')
+    const closeBar = [...dayData].reverse().find(d => timeOf(d) < '16:00')
+    if (openBar)  sessionBoundaries.push(openBar.date)
+    if (closeBar && closeBar.date !== openBar?.date) sessionBoundaries.push(closeBar.date)
+  })
+
+  // Volume max for secondary Y domain
+  const maxVol = Math.max(...enriched.map(d => d.volume ?? 0))
+
+  const hasRSI    = (indicators.rsi    !== false) && enriched.some(d => d.rsi     != null)
+  const hasMACD   = (indicators.macd   !== false) && enriched.some(d => d.macd    != null)
+  const hasBB     = (indicators.bb     !== false) && enriched.some(d => d.upper   != null)
+  const hasFastMA = (indicators.fastMa !== false) && enriched.some(d => d.fast_ma != null)
+  const hasSlowMA = (indicators.slowMa !== false) && enriched.some(d => d.slow_ma != null)
+
+  const oscHeight = 90
+  const gradId = `1d-grad-${isUp ? 'up' : 'dn'}`
+
+  const xAxisProps = {
+    dataKey: 'date',
+    ticks: hourTicks,
+    tickFormatter: formatTick,
+    tick: { fill: '#64748b', fontSize: 10 },
+    tickLine: false,
+    axisLine: { stroke: '#1e293b' },
+    interval: 0,
+  }
+
+  return (
+    <div className="space-y-0.5">
+      {/* Price + Volume panel */}
+      <ResponsiveContainer width="100%" height={height}>
+        <ComposedChart data={enriched} margin={{ top: 8, right: 64, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%"  stopColor={fillColor} stopOpacity={0.25} />
+              <stop offset="95%" stopColor={fillColor} stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid horizontal={false} vertical={false} />
+          <XAxis {...xAxisProps} />
+          <YAxis
+            yAxisId="price"
+            orientation="right"
+            domain={['auto', 'auto']}
+            tick={{ fill: '#64748b', fontSize: 10 }}
+            tickLine={false}
+            axisLine={false}
+            width={58}
+            tickFormatter={v => `$${v.toFixed(2)}`}
+          />
+          <YAxis yAxisId="vol" orientation="left" domain={[0, maxVol * 5]} hide />
+          <Tooltip content={<OneDayTooltip prevClose={prevClose} />} />
+
+          {/* Off-hours shading */}
+          {sessionAreas.map((a, i) => (
+            <ReferenceArea key={`off-${i}`} yAxisId="price" x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.7} />
+          ))}
+
+          {/* Day separator lines */}
+          {dayLines.map((x, i) => (
+            <ReferenceLine key={`day-${i}`} yAxisId="price" x={x} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+          ))}
+
+          {/* Previous close reference */}
+          {prevClose != null && (
+            <ReferenceLine
+              yAxisId="price"
+              y={prevClose}
+              stroke="#64748b"
+              strokeDasharray="4 3"
+              strokeWidth={1}
+              label={{ value: `Prev ${prevClose.toFixed(2)}`, position: 'right', fill: '#64748b', fontSize: 9 }}
+            />
+          )}
+
+          <Bar yAxisId="vol" dataKey="volume" fill="#475569" opacity={0.35} isAnimationActive={false} />
+          <Area
+            yAxisId="price"
+            type="monotone"
+            dataKey="close"
+            stroke="none"
+            fill={`url(#${gradId})`}
+            dot={false}
+            isAnimationActive={false}
+            legendType="none"
+            tooltipType="none"
+          />
+          <Line yAxisId="price" type="monotone" dataKey="close" stroke={lineColor} strokeWidth={1.5} dot={false} isAnimationActive={false} name="Close" />
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="mid"   stroke={BB_MID}   strokeWidth={0.8} strokeDasharray="2 2" dot={false} isAnimationActive={false} />}
+          {hasFastMA && <Line yAxisId="price" type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
+          {hasSlowMA && <Line yAxisId="price" type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
+        </ComposedChart>
+      </ResponsiveContainer>
+
+      {/* RSI panel */}
+      {hasRSI && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart data={enriched} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
+            <Tooltip formatter={(v) => v?.toFixed(2)} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-r-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.7} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-r-${i}`} x={x} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <ReferenceLine y={70} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={30} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+
+      {/* MACD panel */}
+      {hasMACD && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart data={enriched} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => v?.toFixed(2)} />
+            <Tooltip formatter={(v) => v?.toFixed(4)} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-m-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.7} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-m-${i}`} x={x} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.7} />
+            <Bar dataKey="macd_hist" fill="#4ade80" opacity={0.5} isAnimationActive={false} label={false} />
+            <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Session shading helpers for 5d
+// ---------------------------------------------------------------------------
+
 /**
- * For 1d (HH:MM) and 5d (MM/DD HH:MM) data, compute:
- *  - areas: off-market regions to shade (pre/post market)
- *  - dayLines: x values where a new trading day begins (5d only)
+ * For 5d (MM/DD HH:MM) data, compute off-market areas and day separator lines.
  */
 function buildSessionAreas(sampled, period) {
-  if (period !== '1d' && period !== '5d') return { areas: [], dayLines: [] }
+  if (period !== '5d') return { areas: [], dayLines: [] }
 
   const areas = []
   const dayLines = []
-
-  if (period === '1d') {
-    const pre  = sampled.filter(d => d.date < '09:30')
-    const post = sampled.filter(d => d.date >= '16:00')
+  const days = [...new Set(sampled.map(d => d.date.slice(0, 5)))]
+  days.forEach((day, i) => {
+    const dayData = sampled.filter(d => d.date.startsWith(day))
+    if (!dayData.length) return
+    if (i > 0) dayLines.push(dayData[0].date)
+    const pre  = dayData.filter(d => d.date < `${day} 09:30`)
+    const post = dayData.filter(d => d.date >= `${day} 16:00`)
     if (pre.length)  areas.push({ x1: pre[0].date,  x2: pre[pre.length - 1].date })
     if (post.length) areas.push({ x1: post[0].date, x2: post[post.length - 1].date })
-  } else {
-    // 5d: dates are "MM/DD HH:MM"
-    const days = [...new Set(sampled.map(d => d.date.slice(0, 5)))]
-    days.forEach((day, i) => {
-      const dayData = sampled.filter(d => d.date.startsWith(day))
-      if (!dayData.length) return
-      if (i > 0) dayLines.push(dayData[0].date)
-      const pre  = dayData.filter(d => d.date < `${day} 09:30`)
-      const post = dayData.filter(d => d.date >= `${day} 16:00`)
-      if (pre.length)  areas.push({ x1: pre[0].date,  x2: pre[pre.length - 1].date })
-      if (post.length) areas.push({ x1: post[0].date, x2: post[post.length - 1].date })
-    })
-  }
-
+  })
   return { areas, dayLines }
 }
 
@@ -73,12 +294,17 @@ function PriceTooltip({ active, payload, label }) {
   )
 }
 
-export default function SubplotChart({ data = [], height = 240, indicators = {}, period = '' }) {
+export default function SubplotChart({ data = [], height = 240, indicators = {}, period = '', prevClose }) {
   if (!data.length) return (
     <div className="flex items-center justify-center h-40 text-slate-500 text-sm">
       No price data available
     </div>
   )
+
+  // 1D gets its own Yahoo-style chart
+  if (period === '1d') {
+    return <OneDayChart data={data} height={height} indicators={indicators} prevClose={prevClose} />
+  }
 
   const enriched = enrichData(data)
   const step = Math.max(1, Math.floor(enriched.length / 300))

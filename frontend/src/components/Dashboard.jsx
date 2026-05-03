@@ -496,7 +496,7 @@ export default function Dashboard() {
             Loading chart…
           </div>
         ) : (
-          <SubplotChart data={histData?.data ?? []} height={220} indicators={indicators} period={chartPeriod} />
+          <SubplotChart data={histData?.data ?? []} height={220} indicators={indicators} period={chartPeriod} prevClose={histData?.prev_close} />
         )}
       </div>
 

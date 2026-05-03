@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import zoneinfo
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,7 +37,7 @@ _YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 
 # period string → Yahoo "range" param ("2w" fetched as 1mo then trimmed)
 _PERIOD_RANGE_MAP: dict[str, str] = {
-    "1d":  "1d",  "5d":  "5d",  "2w":  "1mo",
+    "1d":  "2d",  "5d":  "5d",  "2w":  "1mo",
     "1mo": "1mo", "3mo": "3mo", "6mo": "6mo",
     "1y":  "1y",  "2y":  "2y",  "5y":  "5y",  "max": "max",
 }
@@ -177,13 +178,15 @@ async def get_bulk_quotes(symbols: list[str]) -> dict[str, dict]:
     return {sym: data for sym, data in results if data is not None}
 
 
+_ET = zoneinfo.ZoneInfo("America/New_York")
+
 def _fmt_ts(ts: int, intraday: bool, period: str) -> str:
     """Format a Unix timestamp to a display string for the chart X-axis."""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    tz = _ET
+    dt = datetime.fromtimestamp(ts, tz=tz)
     if not intraday:
         return dt.strftime("%Y-%m-%d")
-    if period == "1d":
-        return dt.strftime("%H:%M")
+    # 1d spans 2 calendar days so include the date for uniqueness
     return dt.strftime("%m/%d %H:%M")
 
 
@@ -210,6 +213,9 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     closes  = indicators.get("close",  [])
     volumes = indicators.get("volume", [])
 
+    meta = chart.get("meta", {})
+    prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+
     records = []
     for i, ts in enumerate(timestamps):
         c = closes[i] if i < len(closes) else None
@@ -227,12 +233,20 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     if not records:
         raise ValueError(f"No OHLCV data returned for {sym}")
 
+    # "1d" is fetched as 2d – trim to the last 360 bars (30 h × 12 five-minute bars)
+    if period == "1d":
+        records = records[-360:]
+
     # "2w" is fetched as 1mo daily – trim to the last 14 trading days
     if period == "2w":
         records = records[-14:]
 
-    await _cache.set(cache_key, records)
-    return records
+    result = {"data": records}
+    if period == "1d" and prev_close is not None:
+        result["prev_close"] = round(float(prev_close), 4)
+
+    await _cache.set(cache_key, result)
+    return result
 
 
 # Liquid large-cap universe used for the movers screen

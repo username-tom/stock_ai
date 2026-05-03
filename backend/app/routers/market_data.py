@@ -44,8 +44,8 @@ async def get_history(
 ):
     """Return OHLCV history for *symbol* (cached up to 15 min)."""
     try:
-        records = await market_service.get_history(symbol, period)
-        return {"symbol": symbol.upper(), "interval": interval, "data": records}
+        result = await market_service.get_history(symbol, period)
+        return {"symbol": symbol.upper(), "interval": interval, **result}
     except Exception as exc:
         logger.error("history failed for %s: %s", symbol.upper(), exc)
         raise HTTPException(status_code=404, detail=f"No data for {symbol.upper()}: {exc}")
