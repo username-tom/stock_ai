@@ -1,6 +1,6 @@
 import {
   ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine,
+  ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
 import { enrichData } from './indicators'
 
@@ -15,6 +15,39 @@ const MACD_COLOR = '#60a5fa'
 const SIGNAL_COLOR = '#f97316'
 const BUY_COLOR = '#4ade80'
 const SELL_COLOR = '#f87171'
+
+/**
+ * For 1d (HH:MM) and 5d (MM/DD HH:MM) data, compute:
+ *  - areas: off-market regions to shade (pre/post market)
+ *  - dayLines: x values where a new trading day begins (5d only)
+ */
+function buildSessionAreas(sampled, period) {
+  if (period !== '1d' && period !== '5d') return { areas: [], dayLines: [] }
+
+  const areas = []
+  const dayLines = []
+
+  if (period === '1d') {
+    const pre  = sampled.filter(d => d.date < '09:30')
+    const post = sampled.filter(d => d.date >= '16:00')
+    if (pre.length)  areas.push({ x1: pre[0].date,  x2: pre[pre.length - 1].date })
+    if (post.length) areas.push({ x1: post[0].date, x2: post[post.length - 1].date })
+  } else {
+    // 5d: dates are "MM/DD HH:MM"
+    const days = [...new Set(sampled.map(d => d.date.slice(0, 5)))]
+    days.forEach((day, i) => {
+      const dayData = sampled.filter(d => d.date.startsWith(day))
+      if (!dayData.length) return
+      if (i > 0) dayLines.push(dayData[0].date)
+      const pre  = dayData.filter(d => d.date < `${day} 09:30`)
+      const post = dayData.filter(d => d.date >= `${day} 16:00`)
+      if (pre.length)  areas.push({ x1: pre[0].date,  x2: pre[pre.length - 1].date })
+      if (post.length) areas.push({ x1: post[0].date, x2: post[post.length - 1].date })
+    })
+  }
+
+  return { areas, dayLines }
+}
 
 const sharedXAxis = (
   <XAxis
@@ -40,7 +73,7 @@ function PriceTooltip({ active, payload, label }) {
   )
 }
 
-export default function SubplotChart({ data = [], height = 240, indicators = {} }) {
+export default function SubplotChart({ data = [], height = 240, indicators = {}, period = '' }) {
   if (!data.length) return (
     <div className="flex items-center justify-center h-40 text-slate-500 text-sm">
       No price data available
@@ -50,6 +83,8 @@ export default function SubplotChart({ data = [], height = 240, indicators = {} 
   const enriched = enrichData(data)
   const step = Math.max(1, Math.floor(enriched.length / 300))
   const sampled = enriched.filter((_, i) => i % step === 0)
+
+  const { areas: sessionAreas, dayLines } = buildSessionAreas(sampled, period)
 
   const hasRSI  = (indicators.rsi    !== false) && sampled.some(d => d.rsi     != null)
   const hasMACD = (indicators.macd   !== false) && sampled.some(d => d.macd    != null)
@@ -80,6 +115,12 @@ export default function SubplotChart({ data = [], height = 240, indicators = {} 
             tickFormatter={v => `$${v.toFixed(0)}`}
           />
           <Tooltip content={<PriceTooltip />} />
+          {sessionAreas.map((a, i) => (
+            <ReferenceArea key={`off-p-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+          ))}
+          {dayLines.map((d, i) => (
+            <ReferenceLine key={`day-p-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+          ))}
           <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={false} name="Close" isAnimationActive={false} />
           {hasBB && <Line type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Upper" isAnimationActive={false} />}
           {hasBB && <Line type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Lower" isAnimationActive={false} />}
@@ -97,6 +138,12 @@ export default function SubplotChart({ data = [], height = 240, indicators = {} 
             {sharedXAxis}
             <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
             <Tooltip formatter={(v) => v?.toFixed(2)} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-r-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-r-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
             <ReferenceLine y={70} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={30} stroke={BUY_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} name="RSI" isAnimationActive={false} />
@@ -112,6 +159,12 @@ export default function SubplotChart({ data = [], height = 240, indicators = {} 
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => v?.toFixed(2)} />
             <Tooltip formatter={(v) => v?.toFixed(4)} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-m-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-m-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.7} />
             <Bar dataKey="macd_hist" fill="#4ade80" opacity={0.5} name="Histogram"
               label={false}
