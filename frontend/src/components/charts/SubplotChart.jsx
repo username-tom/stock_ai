@@ -16,6 +16,20 @@ const SIGNAL_COLOR = '#f97316'
 const BUY_COLOR = '#4ade80'
 const SELL_COLOR = '#f87171'
 
+// Custom dot renderer: draws triangle up (buy) or down (sell) on signal bars
+const SignalDot = (props) => {
+  const { cx, cy, payload } = props
+  if (!payload?.signal || payload.signal === 0) return null
+  const isBuy = payload.signal === 1
+  const size = 7
+  const color = isBuy ? BUY_COLOR : SELL_COLOR
+  // triangle points: tip at signal side, base opposite
+  const points = isBuy
+    ? `${cx},${cy - size} ${cx - size},${cy + size * 0.6} ${cx + size},${cy + size * 0.6}`
+    : `${cx},${cy + size} ${cx - size},${cy - size * 0.6} ${cx + size},${cy - size * 0.6}`
+  return <polygon points={points} fill={color} stroke="none" opacity={0.9} />
+}
+
 // ---------------------------------------------------------------------------
 // 1D Yahoo-style chart
 // ---------------------------------------------------------------------------
@@ -306,10 +320,17 @@ function PriceTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
+  const signalLabel = d.signal === 1 ? '▲ BUY' : d.signal === -1 ? '▼ SELL' : null
   return (
     <div className="bg-dark-700 border border-dark-500 rounded-lg p-3 text-xs shadow-xl space-y-0.5 min-w-[160px]">
       <div className="text-slate-400 font-medium mb-1">{label}</div>
       <div className="flex justify-between gap-4"><span className="text-slate-500">Close</span><span className="text-slate-200 font-bold">${d.close}</span></div>
+      {signalLabel && (
+        <div className="flex justify-between gap-4">
+          <span className="text-slate-500">Signal</span>
+          <span className={d.signal === 1 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>{signalLabel}</span>
+        </div>
+      )}
       {d.rsi != null && <div className="flex justify-between gap-4"><span className="text-slate-500">RSI</span><span className="text-purple-400">{d.rsi?.toFixed(2)}</span></div>}
       {d.macd != null && <div className="flex justify-between gap-4"><span className="text-slate-500">MACD</span><span className="text-blue-400">{d.macd?.toFixed(4)}</span></div>}
     </div>
@@ -330,7 +351,8 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
 
   const enriched = enrichData(data)
   const step = Math.max(1, Math.floor(enriched.length / 300))
-  const sampled = enriched.filter((_, i) => i % step === 0)
+  // Always keep signal bars so buy/sell markers are never dropped
+  const sampled = enriched.filter((_, i) => i % step === 0 || enriched[i].signal !== 0)
 
   const { areas: sessionAreas, dayLines } = buildSessionAreas(sampled, period)
 
@@ -369,7 +391,7 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
           {dayLines.map((d, i) => (
             <ReferenceLine key={`day-p-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
           ))}
-          <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={false} name="Close" isAnimationActive={false} />
+          <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={<SignalDot />} activeDot={{ r: 3 }} name="Close" isAnimationActive={false} />
           {hasBB && <Line type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Upper" isAnimationActive={false} />}
           {hasBB && <Line type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Lower" isAnimationActive={false} />}
           {hasBB && <Line type="monotone" dataKey="mid" stroke={BB_MID} strokeWidth={0.8} strokeDasharray="2 2" dot={false} name="BB Mid" isAnimationActive={false} />}

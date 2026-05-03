@@ -18,6 +18,7 @@ from app.services.backtester import run_backtest
 from app.services.reporter import generate_html_report
 from app.services.strategies import list_strategies
 from app.services.data_provider import DataSource, list_data_sources
+from app.services.script_executor import validate_script
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -117,6 +118,29 @@ async def run_backtest_endpoint(
         html_path = None
 
     # Persist summary to DB
+    # Build a frozen snapshot: the raw script with an appended get_default_params()
+    # that returns the exact merged params used for this run, so the downloaded
+    # file is fully self-contained and reproducible.
+    frozen_snapshot: str | None = None
+    if script_code is not None:
+        # Derive merged params the same way script_executor does
+        script_defaults = validate_script(script_code).get("default_params", {})
+        merged = {**script_defaults}
+        merged.update(
+            {k: v for k, v in req.strategy_params.items()
+             if v is not None and not (isinstance(v, str) and not str(v).strip())}
+        )
+        params_repr = repr(merged)
+        frozen_snapshot = (
+            f"{script_code.rstrip()}\n\n\n"
+            f"# ── Frozen parameters for this backtest run ──────────────────────────────\n"
+            f"# Symbol: {req.symbol.upper()}  |  {req.start_date} → {req.end_date}\n"
+            f"# Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+            f"# Do NOT edit below — these values were locked in when the report was saved.\n"
+            f"def get_default_params():  # noqa: F811\n"
+            f"    return {params_repr}\n"
+        )
+
     report = BacktestReport(
         name=name,
         symbol=req.symbol.upper(),
@@ -138,7 +162,7 @@ async def run_backtest_endpoint(
             "ohlcv": result["ohlcv"],
         },
         html_report_path=html_path,
-        script_snapshot=script_code,
+        script_snapshot=frozen_snapshot,
     )
     db.add(report)
     await db.commit()
@@ -150,7 +174,7 @@ async def run_backtest_endpoint(
         "metrics": m,
         "result": result,
         "html_report_path": html_path,
-        "script_snapshot": script_code,
+        "script_snapshot": frozen_snapshot,
     }
 
 

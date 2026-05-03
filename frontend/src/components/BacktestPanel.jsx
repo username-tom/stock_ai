@@ -10,7 +10,19 @@ import {
   CodeBracketIcon,
   ArrowTopRightOnSquareIcon,
   ArrowDownTrayIcon,
+  ChevronDownIcon,
 } from '@heroicons/react/24/outline'
+
+const WATCHLIST_KEY = 'dashboard_watchlist'
+const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
+
+function loadWatchlist() {
+  try {
+    const saved = localStorage.getItem(WATCHLIST_KEY)
+    if (saved) return JSON.parse(saved)
+  } catch {}
+  return DEFAULT_WATCHLIST
+}
 
 function MetricCard({ label, value, sub, positive }) {
   const colorClass =
@@ -32,7 +44,7 @@ function SummaryPanel({ result }) {
   const initialCap = r.initial_capital ?? 0
   const gainLoss = finalVal - initialCap
   const gainLossPct = m.total_return_pct ?? 0
-  const sharesHeld = r.final_shares ?? 0
+  const maxSharesHeld = r.max_shares_held ?? 0
   const cashRemaining = r.final_cash ?? 0
   const entryPrice = r.final_entry_price ?? null
   const lastTrade = r.trades?.length ? r.trades[r.trades.length - 1] : null
@@ -57,12 +69,12 @@ function SummaryPanel({ result }) {
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-dark-600">
         <div>
-          <div className="text-xs text-slate-500 mb-0.5">Shares Held</div>
+          <div className="text-xs text-slate-500 mb-0.5">Max Shares Held</div>
           <div className="text-sm font-semibold text-slate-200">
-            {sharesHeld > 0 ? fmt(sharesHeld, { maximumFractionDigits: 4 }) : '—'}
+            {maxSharesHeld > 0 ? fmt(maxSharesHeld, { maximumFractionDigits: 4 }) : '—'}
           </div>
-          {entryPrice && sharesHeld > 0 && (
-            <div className="text-xs text-slate-500">@ ${fmt(entryPrice, { maximumFractionDigits: 4 })}</div>
+          {entryPrice && maxSharesHeld > 0 && (
+            <div className="text-xs text-slate-500">last entry @ ${fmt(entryPrice, { maximumFractionDigits: 4 })}</div>
           )}
         </div>
         <div>
@@ -87,6 +99,32 @@ function SummaryPanel({ result }) {
         </div>
       </div>
     </div>
+  )
+}
+
+const REASON_COLORS = {
+  rsi:           'bg-purple-900/50 text-purple-300 border-purple-700/40',
+  rsi_exit:      'bg-purple-900/30 text-purple-400 border-purple-700/30',
+  bb:            'bg-blue-900/50 text-blue-300 border-blue-700/40',
+  bb_exit:       'bg-blue-900/30 text-blue-400 border-blue-700/30',
+  ma:            'bg-yellow-900/50 text-yellow-300 border-yellow-700/40',
+  ma_exit:       'bg-yellow-900/30 text-yellow-400 border-yellow-700/30',
+  macd:          'bg-cyan-900/50 text-cyan-300 border-cyan-700/40',
+  macd_exit:     'bg-cyan-900/30 text-cyan-400 border-cyan-700/30',
+  stop_loss:     'bg-red-900/60 text-red-300 border-red-700/50',
+  fallback_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
+  signal:        'bg-emerald-900/40 text-emerald-300 border-emerald-700/30',
+  strategy_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
+}
+
+function ReasonBadge({ value }) {
+  if (!value) return <span className="text-slate-600">—</span>
+  const cls = REASON_COLORS[value] ?? 'bg-slate-700/50 text-slate-400 border-slate-600/40'
+  const label = value.replace(/_/g, ' ')
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-medium leading-tight whitespace-nowrap ${cls}`}>
+      {label}
+    </span>
   )
 }
 
@@ -143,6 +181,18 @@ export default function BacktestPanel() {
   const [activeTab, setActiveTab] = useState('equity')
   const [progress, setProgress] = useState(0)
   const progressRef = useRef(null)
+  const symbolRef = useRef(null)
+
+  const [watchlist, setWatchlist] = useState(loadWatchlist)
+  const [symbolOpen, setSymbolOpen] = useState(false)
+  const [symbolFilter, setSymbolFilter] = useState('')
+
+  // Keep watchlist in sync when user edits it in another panel
+  useEffect(() => {
+    const sync = () => setWatchlist(loadWatchlist())
+    window.addEventListener('watchlist-updated', sync)
+    return () => window.removeEventListener('watchlist-updated', sync)
+  }, [])
 
   const isCustomScript = form.strategy_type === CUSTOM_SCRIPT_KEY
   const scripts = scriptsData?.scripts ?? []
@@ -157,18 +207,27 @@ export default function BacktestPanel() {
   const startProgress = (start, end) => {
     setProgress(0)
     const tradingDays = estimateTradingDays(start, end)
-    // Each tick advances 1%. Tick interval scales with date range so longer
-    // ranges animate more slowly (min 4 ms, max 40 ms per tick).
-    const tickMs = Math.min(40, Math.max(4, tradingDays * 8 / 100))
+    // Phase 1: 0 → 25%, speed proportional to date range (slowed by half vs before)
+    const phase1TickMs = Math.min(160, Math.max(16, tradingDays * 32 / 25))
     let current = 0
+    let phase = 1
     clearInterval(progressRef.current)
     progressRef.current = setInterval(() => {
       current += 1
-      // Plateau at 92% — jumps to 100% only when the real response arrives
-      const next = Math.min(current, 92)
-      setProgress(next)
-      if (next >= 92) clearInterval(progressRef.current)
-    }, tickMs)
+      if (phase === 1 && current >= 25) {
+        // Switch to phase 2: 25 → 99% over ~4 minutes (14400 ms / 74 steps ≈ 195 ms/tick)
+        phase = 2
+        clearInterval(progressRef.current)
+        progressRef.current = setInterval(() => {
+          current += 1
+          const next = Math.min(current, 99)
+          setProgress(next)
+          if (next >= 99) clearInterval(progressRef.current)
+        }, 14400 / 74)
+        return
+      }
+      setProgress(Math.min(current, 25))
+    }, phase1TickMs)
   }
 
   const finishProgress = () => {
@@ -227,14 +286,71 @@ export default function BacktestPanel() {
             Configuration
           </h2>
 
-          <div>
+          <div className="relative" ref={symbolRef}>
             <label className="label">Symbol</label>
-            <input
-              className="input"
-              value={form.symbol}
-              onChange={e => setForm(f => ({ ...f, symbol: e.target.value.toUpperCase() }))}
-              placeholder="AAPL"
-            />
+            <div className="relative">
+              <input
+                className="input pr-8"
+                value={symbolOpen ? symbolFilter : form.symbol}
+                onFocus={() => { setSymbolOpen(true); setSymbolFilter('') }}
+                onChange={e => {
+                  const v = e.target.value.toUpperCase()
+                  setSymbolFilter(v)
+                  setSymbolOpen(true)
+                  // also update form symbol as user types
+                  setForm(f => ({ ...f, symbol: v }))
+                }}
+                onBlur={() => setTimeout(() => setSymbolOpen(false), 150)}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') setSymbolOpen(false)
+                  if (e.key === 'Enter') setSymbolOpen(false)
+                }}
+                placeholder="Search or type symbol…"
+              />
+              <ChevronDownIcon
+                className={`absolute right-2 top-2.5 h-4 w-4 text-slate-400 pointer-events-none transition-transform ${symbolOpen ? 'rotate-180' : ''}`}
+              />
+            </div>
+            {symbolOpen && (() => {
+              const q = symbolFilter.trim().toUpperCase()
+              const filtered = watchlist.filter(s => !q || s.includes(q))
+              const showCustom = q && !watchlist.includes(q)
+              if (!filtered.length && !showCustom) return null
+              return (
+                <ul className="absolute z-50 mt-1 w-full bg-dark-800 border border-dark-500 rounded-lg shadow-xl max-h-56 overflow-y-auto">
+                  {filtered.map(sym => (
+                    <li key={sym}>
+                      <button
+                        type="button"
+                        onMouseDown={() => {
+                          setForm(f => ({ ...f, symbol: sym }))
+                          setSymbolOpen(false)
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm hover:bg-dark-600 transition-colors font-mono ${
+                          form.symbol === sym ? 'text-emerald-400 bg-dark-700' : 'text-slate-200'
+                        }`}
+                      >
+                        {sym}
+                      </button>
+                    </li>
+                  ))}
+                  {showCustom && (
+                    <li>
+                      <button
+                        type="button"
+                        onMouseDown={() => {
+                          setForm(f => ({ ...f, symbol: q }))
+                          setSymbolOpen(false)
+                        }}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-dark-600 transition-colors font-mono text-slate-400"
+                      >
+                        Use &ldquo;{q}&rdquo;
+                      </button>
+                    </li>
+                  )}
+                </ul>
+              )
+            })()}
           </div>
 
           <div>
@@ -400,17 +516,24 @@ export default function BacktestPanel() {
           {mutation.isPending && (
             <div className="space-y-1.5">
               <div className="flex justify-between text-xs text-slate-400">
-                <span>Running backtest…</span>
+                <span>{progress <= 25 ? 'Fetching & computing signals…' : 'Processing data…'}</span>
                 <span>{progress}%</span>
               </div>
               <div className="w-full h-2 bg-dark-700 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-emerald-500 rounded-full transition-all duration-200 ease-linear"
-                  style={{ width: `${progress}%` }}
+                  className="h-full rounded-full transition-all duration-200 ease-linear"
+                  style={{
+                    width: `${progress}%`,
+                    background: progress <= 50
+                      ? 'linear-gradient(90deg, #10b981, #34d399)'
+                      : 'linear-gradient(90deg, #34d399, #6ee7b7)',
+                  }}
                 />
               </div>
-              <div className="text-xs text-slate-500">
-                {estimateTradingDays(form.start_date, form.end_date).toLocaleString()} trading days
+              <div className="flex justify-between text-xs text-slate-600">
+                <span>Signals</span>
+                <span className="text-slate-500">|</span>
+                <span>Processing</span>
               </div>
             </div>
           )}
@@ -459,6 +582,7 @@ export default function BacktestPanel() {
               )}
               {mutation.data?.script_snapshot && (
                 <button
+                  type="button"
                   onClick={() => {
                     const blob = new Blob([mutation.data.script_snapshot], { type: 'text/plain' })
                     const url = URL.createObjectURL(blob)
@@ -480,7 +604,35 @@ export default function BacktestPanel() {
 
         {/* Results */}
         <div className="xl:col-span-2 space-y-5">
-          {result ? (
+          {mutation.isPending && result ? (
+            <div className="space-y-5 animate-pulse">
+              <div className="card bg-dark-900/60 border border-dark-500 space-y-3">
+                <div className="h-4 w-36 bg-dark-600 rounded" />
+                <div className="h-8 w-48 bg-dark-600 rounded" />
+                <div className="h-4 w-32 bg-dark-700 rounded" />
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-dark-600">
+                  {[...Array(4)].map((_, i) => (
+                    <div key={i} className="space-y-1.5">
+                      <div className="h-3 w-20 bg-dark-700 rounded" />
+                      <div className="h-5 w-16 bg-dark-600 rounded" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {[...Array(8)].map((_, i) => (
+                  <div key={i} className="metric-card space-y-2">
+                    <div className="h-3 w-20 bg-dark-700 rounded" />
+                    <div className="h-6 w-24 bg-dark-600 rounded" />
+                  </div>
+                ))}
+              </div>
+              <div className="card">
+                <div className="h-4 w-32 bg-dark-700 rounded mb-4" />
+                <div className="h-64 bg-dark-700 rounded-lg" />
+              </div>
+            </div>
+          ) : result ? (
             <>
               {/* Summary header */}
               <SummaryPanel result={result} />
@@ -563,6 +715,8 @@ export default function BacktestPanel() {
                           <th>Entry $</th>
                           <th>Exit $</th>
                           <th>Qty</th>
+                          <th>Buy Reason</th>
+                          <th>Sell Reason</th>
                           <th>P&amp;L</th>
                         </tr>
                       </thead>
@@ -574,6 +728,8 @@ export default function BacktestPanel() {
                             <td className="font-mono">${t.entry_price}</td>
                             <td className="font-mono">${t.exit_price}</td>
                             <td>{t.quantity}</td>
+                            <td><ReasonBadge value={t.entry_reason} /></td>
+                            <td><ReasonBadge value={t.exit_reason} /></td>
                             <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
                               {t.pnl >= 0 ? '+' : ''}${t.pnl?.toFixed(2)}
                             </td>

@@ -120,6 +120,7 @@ def run_backtest(
     equity_values: list[float] = []
     entry_price: float | None = None
     entry_date: str | None = None
+    entry_reason: str | None = None
 
     stop_loss_mult = (1.0 - stop_loss_pct / 100.0) if stop_loss_pct > 0 else None
 
@@ -145,6 +146,7 @@ def run_backtest(
                     "exit_price": round(price, 4),
                     "quantity": shares,
                     "pnl": round(pnl, 2),
+                    "entry_reason": entry_reason or "signal",
                     "exit_reason": "stop_loss",
                 }
             )
@@ -152,6 +154,7 @@ def run_backtest(
             shares = 0.0
             entry_price = None
             entry_date = None
+            entry_reason = None
             portfolio_value = cash
             equity_values.append(portfolio_value)
             continue
@@ -165,6 +168,7 @@ def run_backtest(
                 shares = shares_to_buy
                 entry_price = price
                 entry_date = str(date.date())
+                entry_reason = str(row.get("signal_source", "")) or "signal"
 
         elif position_change < 0 and shares > 0:
             # SELL
@@ -180,6 +184,7 @@ def run_backtest(
                     "exit_price": round(price, 4),
                     "quantity": shares,
                     "pnl": round(pnl, 2),
+                    "entry_reason": entry_reason or "signal",
                     "exit_reason": exit_reason,
                 }
             )
@@ -187,6 +192,7 @@ def run_backtest(
             shares = 0.0
             entry_price = None
             entry_date = None
+            entry_reason = None
 
         portfolio_value = cash + shares * price
         equity_values.append(portfolio_value)
@@ -194,6 +200,7 @@ def run_backtest(
     final_shares = shares
     final_cash = cash
     final_entry_price = entry_price
+    max_shares_held = max((t["quantity"] for t in trades), default=0)
 
     equity_series = pd.Series(equity_values, index=df.index)
     metrics = _calculate_metrics(equity_series, trades, initial_capital)
@@ -249,4 +256,5 @@ def run_backtest(
         "final_shares": round(final_shares, 6),
         "final_cash": round(final_cash, 2),
         "final_entry_price": round(final_entry_price, 4) if final_entry_price else None,
+        "max_shares_held": round(max_shares_held, 6),
     }

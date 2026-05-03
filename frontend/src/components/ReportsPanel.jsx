@@ -7,6 +7,10 @@ import {
   TrashIcon,
   ArrowTopRightOnSquareIcon,
   ChevronRightIcon,
+  ArrowDownTrayIcon,
+  CodeBracketIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
 } from '@heroicons/react/24/outline'
 
 function MetricBadge({ value, isPositive }) {
@@ -19,9 +23,36 @@ function MetricBadge({ value, isPositive }) {
   )
 }
 
+const REASON_COLORS = {
+  rsi:           'bg-purple-900/50 text-purple-300 border-purple-700/40',
+  rsi_exit:      'bg-purple-900/30 text-purple-400 border-purple-700/30',
+  bb:            'bg-blue-900/50 text-blue-300 border-blue-700/40',
+  bb_exit:       'bg-blue-900/30 text-blue-400 border-blue-700/30',
+  ma:            'bg-yellow-900/50 text-yellow-300 border-yellow-700/40',
+  ma_exit:       'bg-yellow-900/30 text-yellow-400 border-yellow-700/30',
+  macd:          'bg-cyan-900/50 text-cyan-300 border-cyan-700/40',
+  macd_exit:     'bg-cyan-900/30 text-cyan-400 border-cyan-700/30',
+  stop_loss:     'bg-red-900/60 text-red-300 border-red-700/50',
+  fallback_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
+  signal:        'bg-emerald-900/40 text-emerald-300 border-emerald-700/30',
+  strategy_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
+}
+
+function ReasonBadge({ value }) {
+  if (!value) return <span className="text-slate-600">—</span>
+  const cls = REASON_COLORS[value] ?? 'bg-slate-700/50 text-slate-400 border-slate-600/40'
+  const label = value.replace(/_/g, ' ')
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-medium leading-tight whitespace-nowrap ${cls}`}>
+      {label}
+    </span>
+  )
+}
+
 export default function ReportsPanel() {
   const qc = useQueryClient()
   const [selected, setSelected] = useState(null)
+  const [scriptOpen, setScriptOpen] = useState(false)
 
   const { data: listData, isLoading } = useQuery({
     queryKey: ['reports'],
@@ -73,7 +104,7 @@ export default function ReportsPanel() {
           {reports.map(r => (
             <button
               key={r.id}
-              onClick={() => setSelected(r.id)}
+              onClick={() => { setSelected(r.id); setScriptOpen(false) }}
               className={`w-full text-left p-3 rounded-lg border transition-all ${
                 selected === r.id
                   ? 'border-emerald-600/50 bg-emerald-600/10'
@@ -119,6 +150,24 @@ export default function ReportsPanel() {
                         <ArrowTopRightOnSquareIcon className="h-4 w-4" />
                         HTML Report
                       </a>
+                    )}
+                    {detail.script_snapshot && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const blob = new Blob([detail.script_snapshot], { type: 'text/plain' })
+                          const url = URL.createObjectURL(blob)
+                          const a = document.createElement('a')
+                          a.href = url
+                          a.download = `${detail.name ?? 'backtest_script'}.py`
+                          a.click()
+                          URL.revokeObjectURL(url)
+                        }}
+                        className="btn-secondary text-xs"
+                      >
+                        <ArrowDownTrayIcon className="h-4 w-4" />
+                        Script
+                      </button>
                     )}
                     <button
                       onClick={() => deleteMut.mutate(detail.id)}
@@ -185,7 +234,7 @@ export default function ReportsPanel() {
                         <tr>
                           <th>Entry</th><th>Exit</th>
                           <th>Entry $</th><th>Exit $</th>
-                          <th>Qty</th><th>P&amp;L</th>
+                          <th>Qty</th><th>Buy Reason</th><th>Sell Reason</th><th>P&amp;L</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -196,6 +245,8 @@ export default function ReportsPanel() {
                             <td className="font-mono">${t.entry_price}</td>
                             <td className="font-mono">${t.exit_price}</td>
                             <td>{t.quantity}</td>
+                            <td><ReasonBadge value={t.entry_reason} /></td>
+                            <td><ReasonBadge value={t.exit_reason} /></td>
                             <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
                               {t.pnl >= 0 ? '+' : ''}${t.pnl?.toFixed(2)}
                             </td>
@@ -204,6 +255,60 @@ export default function ReportsPanel() {
                       </tbody>
                     </table>
                   </div>
+                </div>
+              )}
+              {/* Script snapshot */}
+              {detail.script_snapshot && (
+                <div className="card">
+                  <button
+                    type="button"
+                    onClick={() => setScriptOpen(o => !o)}
+                    className="w-full flex items-center justify-between text-sm font-medium text-slate-200 hover:text-slate-100 transition-colors"
+                  >
+                    <span className="flex items-center gap-2">
+                      <CodeBracketIcon className="h-4 w-4 text-slate-400" />
+                      Script used for this backtest
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation()
+                          const blob = new Blob([detail.script_snapshot], { type: 'text/plain' })
+                          const url = URL.createObjectURL(blob)
+                          const a = document.createElement('a')
+                          a.href = url
+                          a.download = `${detail.name ?? 'backtest_script'}.py`
+                          a.click()
+                          URL.revokeObjectURL(url)
+                        }}
+                        className="btn-secondary text-xs flex items-center gap-1 py-0.5 px-2"
+                      >
+                        <ArrowDownTrayIcon className="h-3.5 w-3.5" />
+                        Download
+                      </button>
+                      {scriptOpen
+                        ? <ChevronUpIcon className="h-4 w-4 text-slate-400" />
+                        : <ChevronDownIcon className="h-4 w-4 text-slate-400" />}
+                    </span>
+                  </button>
+                  {scriptOpen && (
+                    <div className="mt-3 rounded-lg overflow-hidden border border-dark-600">
+                      <div className="flex items-center justify-between px-3 py-1.5 bg-dark-800 border-b border-dark-600">
+                        <span className="text-xs text-slate-500 font-mono">python</span>
+                        <button
+                          type="button"
+                          onClick={() => navigator.clipboard?.writeText(detail.script_snapshot)}
+                          className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <pre className="overflow-x-auto p-4 text-xs font-mono text-slate-300 bg-[#0f172a] leading-relaxed max-h-[480px] overflow-y-auto">
+                        <code>{detail.script_snapshot}</code>
+                      </pre>
+                    </div>
+                  )}
                 </div>
               )}
             </>
