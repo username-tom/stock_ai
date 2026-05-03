@@ -107,11 +107,64 @@ export function computeMACD(closes, fast = 12, slow = 26, signalPeriod = 9) {
 }
 
 /**
- * Enrich an OHLCV data array with RSI and MACD values.
+ * Compute Simple Moving Average (SMA).
  *
- * Backend-computed values (e.g. from the RSI or MACD strategy) take precedence
- * — if the data already contains non-null `rsi` or `macd` values, those fields
- * are left untouched.
+ * @param {(number|null)[]} values
+ * @param {number} period
+ * @returns {(number|null)[]}
+ */
+export function computeSMA(values, period) {
+  const result = new Array(values.length).fill(null)
+  let sum = 0
+  let count = 0
+  const window = []
+
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]
+    if (v == null) { window.push(null); continue }
+    window.push(v)
+    sum += v
+    count++
+    if (window.length > period) {
+      const removed = window.shift()
+      if (removed != null) { sum -= removed; count-- }
+    }
+    if (count === period) result[i] = sum / period
+  }
+  return result
+}
+
+/**
+ * Compute Bollinger Bands (20-period SMA ± 2 std dev).
+ *
+ * @param {(number|null)[]} closes
+ * @param {number} [period=20]
+ * @param {number} [multiplier=2]
+ * @returns {{ upper: (number|null)[], mid: (number|null)[], lower: (number|null)[] }}
+ */
+export function computeBollingerBands(closes, period = 20, multiplier = 2) {
+  const upper = new Array(closes.length).fill(null)
+  const mid   = new Array(closes.length).fill(null)
+  const lower = new Array(closes.length).fill(null)
+
+  for (let i = period - 1; i < closes.length; i++) {
+    const slice = closes.slice(i - period + 1, i + 1)
+    if (slice.some(v => v == null)) continue
+    const mean = slice.reduce((s, v) => s + v, 0) / period
+    const variance = slice.reduce((s, v) => s + (v - mean) ** 2, 0) / period
+    const stddev = Math.sqrt(variance)
+    mid[i]   = mean
+    upper[i] = mean + multiplier * stddev
+    lower[i] = mean - multiplier * stddev
+  }
+  return { upper, mid, lower }
+}
+
+/**
+ * Enrich an OHLCV data array with RSI, MACD, Bollinger Bands, and MAs.
+ *
+ * Backend-computed values take precedence — if the data already contains
+ * non-null values for a given indicator, those fields are left untouched.
  *
  * @param {{ close: number, [key: string]: any }[]} data
  * @returns {object[]}
@@ -120,11 +173,17 @@ export function enrichData(data) {
   if (!data || data.length === 0) return data
 
   const closes = data.map(d => d.close)
-  const hasRSI = data.some(d => d.rsi != null)
-  const hasMACD = data.some(d => d.macd != null)
+  const hasRSI    = data.some(d => d.rsi     != null)
+  const hasMACD   = data.some(d => d.macd    != null)
+  const hasBB     = data.some(d => d.upper   != null)
+  const hasFastMA = data.some(d => d.fast_ma != null)
+  const hasSlowMA = data.some(d => d.slow_ma != null)
 
-  const rsiValues = hasRSI ? null : computeRSI(closes)
-  const macdValues = hasMACD ? null : computeMACD(closes)
+  const rsiValues  = hasRSI    ? null : computeRSI(closes)
+  const macdValues = hasMACD   ? null : computeMACD(closes)
+  const bbValues   = hasBB     ? null : computeBollingerBands(closes)
+  const fastMA     = hasFastMA ? null : computeEMA(closes, 20)
+  const slowMA     = hasSlowMA ? null : computeEMA(closes, 50)
 
   const roundTo = (v, decimalPlaces = 2) => (v != null ? parseFloat(v.toFixed(decimalPlaces)) : null)
 
@@ -138,5 +197,14 @@ export function enrichData(data) {
           macd_hist: roundTo(macdValues.macd_hist[i], 4),
         }
       : {}),
+    ...(bbValues
+      ? {
+          upper: roundTo(bbValues.upper[i]),
+          mid:   roundTo(bbValues.mid[i]),
+          lower: roundTo(bbValues.lower[i]),
+        }
+      : {}),
+    ...(fastMA ? { fast_ma: roundTo(fastMA[i]) } : {}),
+    ...(slowMA ? { slow_ma: roundTo(slowMA[i]) } : {}),
   }))
 }

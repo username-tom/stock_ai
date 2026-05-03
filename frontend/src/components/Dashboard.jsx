@@ -95,9 +95,21 @@ function LivePriceTicker({ symbols }) {
   )
 }
 
+const INDICATOR_OPTIONS = [
+  { key: 'bb',     label: 'BB' },
+  { key: 'fastMa', label: 'Fast MA' },
+  { key: 'slowMa', label: 'Slow MA' },
+  { key: 'rsi',    label: 'RSI' },
+  { key: 'macd',   label: 'MACD' },
+]
+
 export default function Dashboard() {
   const [chartSymbol, setChartSymbol] = useState('AAPL')
   const [chartPeriod, setChartPeriod] = useState('1y')
+  const [indicators, setIndicators] = useState({ bb: true, fastMa: true, slowMa: true, rsi: true, macd: true })
+
+  const toggleIndicator = (key) =>
+    setIndicators(prev => ({ ...prev, [key]: !prev[key] }))
 
   const { data: quotesMap, isLoading: quotesLoading } = useQuery({
     queryKey: ['bulk-quotes', DEFAULT_WATCHLIST],
@@ -142,7 +154,7 @@ export default function Dashboard() {
 
       {/* Price chart */}
       <div className="card">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
             <h2 className="font-semibold text-slate-200">{chartSymbol} Price Chart</h2>
           </div>
@@ -162,12 +174,28 @@ export default function Dashboard() {
             ))}
           </div>
         </div>
+        {/* Indicator toggles */}
+        <div className="flex flex-wrap gap-1 mb-3">
+          {INDICATOR_OPTIONS.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => toggleIndicator(key)}
+              className={`px-2 py-0.5 text-xs rounded-md border transition-colors ${
+                indicators[key]
+                  ? 'bg-dark-600 border-emerald-600 text-emerald-400'
+                  : 'bg-dark-800 border-dark-500 text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         {histLoading ? (
           <div className="h-64 flex items-center justify-center text-slate-500 text-sm">
             Loading chart…
           </div>
         ) : (
-          <SubplotChart data={histData?.data ?? []} height={220} />
+          <SubplotChart data={histData?.data ?? []} height={220} indicators={indicators} />
         )}
       </div>
     </div>
