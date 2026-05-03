@@ -1,4 +1,4 @@
-import { useState } from 'react'
+﻿import { useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { getStrategies, runBacktest, getScripts } from '../api/client'
 import EquityChart from './charts/EquityChart'
@@ -54,14 +54,23 @@ export default function BacktestPanel() {
     queryFn: getScripts,
   })
 
+  const COMMISSION_PRESETS = [
+    { label: 'IB Fixed (~$0.005/share)', value: 0.005 },
+    { label: 'Low (0.1%)', value: 0.001 },
+    { label: 'Medium (0.2%)', value: 0.002 },
+    { label: 'Zero', value: 0 },
+    { label: 'Custom', value: null },
+  ]
+
   const [form, setForm] = useState({
     symbol: 'AAPL',
     strategy_type: 'sma_crossover',
     start_date: '2022-01-01',
     end_date: '2023-12-31',
     initial_capital: 10000,
-    commission: 0.001,
+    commission: 0.005,
   })
+  const [commissionPreset, setCommissionPreset] = useState('0.005')
   const [stratParams, setStratParams] = useState({ fast_period: 10, slow_period: 30, ma_type: 'SMA' })
   const [selectedScriptId, setSelectedScriptId] = useState(null)
   const [result, setResult] = useState(null)
@@ -250,14 +259,38 @@ export default function BacktestPanel() {
           </div>
 
           <div>
-            <label className="label">Commission (0.001 = 0.1%)</label>
-            <input
-              className="input"
-              type="number"
-              step="0.0001"
-              value={form.commission}
-              onChange={e => setForm(f => ({ ...f, commission: parseFloat(e.target.value) }))}
-            />
+            <label className="label">Commission</label>
+            <select
+              className="input mb-1.5"
+              value={commissionPreset}
+              onChange={e => {
+                setCommissionPreset(e.target.value)
+                if (e.target.value !== 'custom') {
+                  setForm(f => ({ ...f, commission: parseFloat(e.target.value) }))
+                }
+              }}
+            >
+              {COMMISSION_PRESETS.map(p => (
+                <option key={p.label} value={p.value === null ? 'custom' : String(p.value)}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            {commissionPreset === 'custom' && (
+              <input
+                className="input"
+                type="number"
+                step="0.0001"
+                placeholder="e.g. 0.001"
+                value={form.commission}
+                onChange={e => setForm(f => ({ ...f, commission: parseFloat(e.target.value) }))}
+              />
+            )}
+            {commissionPreset !== 'custom' && (
+              <div className="text-xs text-slate-500 mt-1">
+                {(form.commission * 100).toFixed(3)}% of trade value per leg
+              </div>
+            )}
           </div>
 
           <button
