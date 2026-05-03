@@ -100,6 +100,10 @@ def run_backtest(
     """
     df = fetch_ohlcv(symbol, start_date, end_date, source=data_source)
 
+    # stop_loss_pct is a universal safeguard param (0 = disabled)
+    _raw_slp = strategy_params.pop("stop_loss_pct", 0.0)
+    stop_loss_pct = float(_raw_slp) if str(_raw_slp).strip() != "" else 0.0
+
     if script_code is not None:
         from app.services.script_executor import execute_script
         df = execute_script(script_code, df, **strategy_params)
@@ -117,9 +121,40 @@ def run_backtest(
     entry_price: float | None = None
     entry_date: str | None = None
 
+    stop_loss_mult = (1.0 - stop_loss_pct / 100.0) if stop_loss_pct > 0 else None
+
     for date, row in df.iterrows():
         price = float(row["Close"])
         position_change = float(row.get("position", 0))
+
+        # Universal stop-loss safeguard (fires before strategy signals)
+        if (
+            stop_loss_mult is not None
+            and shares > 0
+            and entry_price is not None
+            and price <= entry_price * stop_loss_mult
+        ):
+            proceeds = shares * price * (1 - commission)
+            pnl = proceeds - (shares * entry_price * (1 + commission))
+            trades.append(
+                {
+                    "entry_date": entry_date,
+                    "exit_date": str(date.date()),
+                    "side": "BUY",
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(price, 4),
+                    "quantity": shares,
+                    "pnl": round(pnl, 2),
+                    "exit_reason": "stop_loss",
+                }
+            )
+            cash += proceeds
+            shares = 0.0
+            entry_price = None
+            entry_date = None
+            portfolio_value = cash
+            equity_values.append(portfolio_value)
+            continue
 
         if position_change > 0 and shares == 0:
             # BUY
@@ -135,6 +170,7 @@ def run_backtest(
             # SELL
             proceeds = shares * price * (1 - commission)
             pnl = proceeds - (shares * entry_price * (1 + commission))
+            exit_reason = str(row.get("signal_source", "")) or "strategy_exit"
             trades.append(
                 {
                     "entry_date": entry_date,
@@ -144,6 +180,7 @@ def run_backtest(
                     "exit_price": round(price, 4),
                     "quantity": shares,
                     "pnl": round(pnl, 2),
+                    "exit_reason": exit_reason,
                 }
             )
             cash += proceeds
@@ -153,6 +190,10 @@ def run_backtest(
 
         portfolio_value = cash + shares * price
         equity_values.append(portfolio_value)
+
+    final_shares = shares
+    final_cash = cash
+    final_entry_price = entry_price
 
     equity_series = pd.Series(equity_values, index=df.index)
     metrics = _calculate_metrics(equity_series, trades, initial_capital)
@@ -183,7 +224,15 @@ def run_backtest(
     for i, (d, r) in enumerate(df.iterrows()):
         for k in indicator_keys:
             val = r[k]
-            ohlcv[i][k] = round(float(val), 4) if pd.notna(val) else None
+            if not pd.notna(val):
+                ohlcv[i][k] = None
+            elif isinstance(val, str):
+                ohlcv[i][k] = val
+            else:
+                try:
+                    ohlcv[i][k] = round(float(val), 4)
+                except (TypeError, ValueError):
+                    ohlcv[i][k] = str(val)
 
     return {
         "symbol": symbol,
@@ -197,4 +246,7 @@ def run_backtest(
         "equity_curve": equity_curve,
         "trades": trades,
         "ohlcv": ohlcv,
+        "final_shares": round(final_shares, 6),
+        "final_cash": round(final_cash, 2),
+        "final_entry_price": round(final_entry_price, 4) if final_entry_price else None,
     }

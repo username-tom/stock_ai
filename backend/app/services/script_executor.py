@@ -221,9 +221,31 @@ def execute_script(script_code: str, df: pd.DataFrame, **params) -> pd.DataFrame
     exec(code, globs)  # noqa: S102
 
     generate_signals = globs["generate_signals"]
+
+    # Merge script defaults then overlay caller-supplied params, dropping
+    # empty-string values that the frontend sends for unfilled fields.
+    merged_params: dict = {}
+    if "get_default_params" in globs and callable(globs["get_default_params"]):
+        try:
+            merged_params.update(globs["get_default_params"]())
+        except Exception:
+            pass
+    merged_params.update(
+        {k: v for k, v in params.items()
+         if v is not None and not (isinstance(v, str) and not v.strip())}
+    )
+
     try:
-        output = generate_signals(df, **params)
+        output = generate_signals(df, **merged_params)
     except Exception as exc:
+        import traceback
+        logger.error(
+            "generate_signals() crashed.\n"
+            "  merged_params: %s\n"
+            "  traceback:\n%s",
+            merged_params,
+            traceback.format_exc(),
+        )
         raise ValueError(f"generate_signals() raised an error: {exc}") from exc
 
     if not isinstance(output, pd.DataFrame):

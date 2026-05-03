@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
+
+logger = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -89,8 +92,10 @@ async def run_backtest_endpoint(
             **req.strategy_params,
         )
     except ValueError as exc:
+        logger.exception("Backtest validation error for symbol=%s strategy=%s", req.symbol, effective_strategy_type)
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
+        logger.exception("Backtest unexpected error for symbol=%s strategy=%s", req.symbol, effective_strategy_type)
         raise HTTPException(status_code=500, detail=f"Backtest error: {exc}")
 
     m = result["metrics"]
@@ -133,6 +138,7 @@ async def run_backtest_endpoint(
             "ohlcv": result["ohlcv"],
         },
         html_report_path=html_path,
+        script_snapshot=script_code,
     )
     db.add(report)
     await db.commit()
@@ -144,6 +150,7 @@ async def run_backtest_endpoint(
         "metrics": m,
         "result": result,
         "html_report_path": html_path,
+        "script_snapshot": script_code,
     }
 
 
@@ -202,6 +209,7 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
         },
         "result_data": r.result_data,
         "html_report_path": r.html_report_path,
+        "script_snapshot": r.script_snapshot,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
 

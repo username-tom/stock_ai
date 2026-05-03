@@ -1,4 +1,4 @@
-﻿import { useState } from 'react'
+﻿import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { getStrategies, runBacktest, getScripts } from '../api/client'
 import EquityChart from './charts/EquityChart'
@@ -9,6 +9,7 @@ import {
   ExclamationTriangleIcon,
   CodeBracketIcon,
   ArrowTopRightOnSquareIcon,
+  ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline'
 
 function MetricCard({ label, value, sub, positive }) {
@@ -20,6 +21,71 @@ function MetricCard({ label, value, sub, positive }) {
       <div className="metric-label">{label}</div>
       <div className={`metric-value ${colorClass}`}>{value}</div>
       {sub && <div className="text-xs text-slate-500">{sub}</div>}
+    </div>
+  )
+}
+
+function SummaryPanel({ result }) {
+  const r = result?.result ?? {}
+  const m = result?.metrics ?? {}
+  const finalVal = m.final_value ?? 0
+  const initialCap = r.initial_capital ?? 0
+  const gainLoss = finalVal - initialCap
+  const gainLossPct = m.total_return_pct ?? 0
+  const sharesHeld = r.final_shares ?? 0
+  const cashRemaining = r.final_cash ?? 0
+  const entryPrice = r.final_entry_price ?? null
+  const lastTrade = r.trades?.length ? r.trades[r.trades.length - 1] : null
+  const lastEquity = r.equity_curve?.length ? r.equity_curve[r.equity_curve.length - 1] : null
+  const fmt = (n, opts) => Number(n).toLocaleString(undefined, opts)
+  return (
+    <div className="card bg-dark-900/60 border border-dark-500 space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-xs text-slate-500 uppercase tracking-wider mb-0.5">Portfolio Summary</div>
+          <div className="text-2xl font-bold text-slate-100">
+            ${fmt(finalVal, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+          <div className={`text-sm font-medium mt-0.5 ${gainLoss >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {gainLoss >= 0 ? '+' : ''}${fmt(gainLoss, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            {' '}({gainLossPct >= 0 ? '+' : ''}{Number(gainLossPct).toFixed(2)}%)
+          </div>
+        </div>
+        {lastEquity && (
+          <div className="text-xs text-slate-500">as of {lastEquity.date}</div>
+        )}
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-dark-600">
+        <div>
+          <div className="text-xs text-slate-500 mb-0.5">Shares Held</div>
+          <div className="text-sm font-semibold text-slate-200">
+            {sharesHeld > 0 ? fmt(sharesHeld, { maximumFractionDigits: 4 }) : '—'}
+          </div>
+          {entryPrice && sharesHeld > 0 && (
+            <div className="text-xs text-slate-500">@ ${fmt(entryPrice, { maximumFractionDigits: 4 })}</div>
+          )}
+        </div>
+        <div>
+          <div className="text-xs text-slate-500 mb-0.5">Cash Remaining</div>
+          <div className="text-sm font-semibold text-slate-200">
+            ${fmt(cashRemaining, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-slate-500 mb-0.5">Initial Capital</div>
+          <div className="text-sm font-semibold text-slate-200">${fmt(initialCap)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-slate-500 mb-0.5">Last Trade P&amp;L</div>
+          {lastTrade ? (
+            <div className={`text-sm font-semibold ${(lastTrade.pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {(lastTrade.pnl ?? 0) >= 0 ? '+' : ''}${Number(lastTrade.pnl ?? 0).toFixed(2)}
+            </div>
+          ) : (
+            <div className="text-sm font-semibold text-slate-500">—</div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -75,13 +141,48 @@ export default function BacktestPanel() {
   const [selectedScriptId, setSelectedScriptId] = useState(null)
   const [result, setResult] = useState(null)
   const [activeTab, setActiveTab] = useState('equity')
+  const [progress, setProgress] = useState(0)
+  const progressRef = useRef(null)
 
   const isCustomScript = form.strategy_type === CUSTOM_SCRIPT_KEY
   const scripts = scriptsData?.scripts ?? []
 
+  // Estimate trading days between two date strings to pace the progress bar
+  const estimateTradingDays = (start, end) => {
+    const ms = new Date(end) - new Date(start)
+    const calDays = ms / (1000 * 60 * 60 * 24)
+    return Math.max(1, Math.round(calDays * 5 / 7))
+  }
+
+  const startProgress = (start, end) => {
+    setProgress(0)
+    const tradingDays = estimateTradingDays(start, end)
+    // Each tick advances 1%. Tick interval scales with date range so longer
+    // ranges animate more slowly (min 4 ms, max 40 ms per tick).
+    const tickMs = Math.min(40, Math.max(4, tradingDays * 8 / 100))
+    let current = 0
+    clearInterval(progressRef.current)
+    progressRef.current = setInterval(() => {
+      current += 1
+      // Plateau at 92% — jumps to 100% only when the real response arrives
+      const next = Math.min(current, 92)
+      setProgress(next)
+      if (next >= 92) clearInterval(progressRef.current)
+    }, tickMs)
+  }
+
+  const finishProgress = () => {
+    clearInterval(progressRef.current)
+    setProgress(100)
+    setTimeout(() => setProgress(0), 600)
+  }
+
+  useEffect(() => () => clearInterval(progressRef.current), [])
+
   const mutation = useMutation({
     mutationFn: (payload) => runBacktest(payload),
-    onSuccess: (data) => setResult(data),
+    onSuccess: (data) => { finishProgress(); setResult(data) },
+    onError: () => finishProgress(),
   })
 
   const handleStrategyChange = (type) => {
@@ -97,6 +198,7 @@ export default function BacktestPanel() {
     e.preventDefault()
     if (isCustomScript) {
       if (!selectedScriptId) return
+      startProgress(form.start_date, form.end_date)
       mutation.mutate({
         ...form,
         strategy_type: 'custom_script',
@@ -104,6 +206,7 @@ export default function BacktestPanel() {
         strategy_params: {},
       })
     } else {
+      startProgress(form.start_date, form.end_date)
       mutation.mutate({ ...form, strategy_params: stratParams })
     }
   }
@@ -293,6 +396,25 @@ export default function BacktestPanel() {
             )}
           </div>
 
+          {/* Progress bar */}
+          {mutation.isPending && (
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs text-slate-400">
+                <span>Running backtest…</span>
+                <span>{progress}%</span>
+              </div>
+              <div className="w-full h-2 bg-dark-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 rounded-full transition-all duration-200 ease-linear"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+              <div className="text-xs text-slate-500">
+                {estimateTradingDays(form.start_date, form.end_date).toLocaleString()} trading days
+              </div>
+            </div>
+          )}
+
           <button
             type="submit"
             className="btn-primary w-full justify-center"
@@ -335,6 +457,23 @@ export default function BacktestPanel() {
                   HTML Report
                 </a>
               )}
+              {mutation.data?.script_snapshot && (
+                <button
+                  onClick={() => {
+                    const blob = new Blob([mutation.data.script_snapshot], { type: 'text/plain' })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = `${mutation.data.name ?? 'backtest_script'}.py`
+                    a.click()
+                    URL.revokeObjectURL(url)
+                  }}
+                  className="btn-secondary text-xs flex items-center gap-1"
+                >
+                  <ArrowDownTrayIcon className="h-4 w-4" />
+                  Script
+                </button>
+              )}
             </div>
           )}
         </form>
@@ -343,6 +482,8 @@ export default function BacktestPanel() {
         <div className="xl:col-span-2 space-y-5">
           {result ? (
             <>
+              {/* Summary header */}
+              <SummaryPanel result={result} />
               {/* Metrics grid */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <MetricCard

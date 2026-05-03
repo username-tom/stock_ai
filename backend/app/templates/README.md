@@ -52,6 +52,27 @@ Replicates the MACD (Moving Average Convergence Divergence) strategy.
 - Sell when MACD line crosses below signal line
 - Includes MACD histogram calculation
 
+### 6. Combined Strategy (`combined_strategy_template.py`)
+Combines MACD, Bollinger Bands, and RSI. Any of the three strategies can independently trigger a buy signal. A `signal_source` column records which strategy triggered each trade, and the matching strategy's sell condition is prioritised for the exit. A configurable stop-loss acts as a universal safeguard.
+
+**Parameters:**
+- `macd_fast` (default: 12) - MACD fast EMA period
+- `macd_slow` (default: 26) - MACD slow EMA period
+- `macd_signal` (default: 9) - MACD signal line EMA period
+- `bb_period` (default: 20) - Bollinger Bands SMA/std period
+- `bb_std_dev` (default: 2.0) - Bollinger Bands std-dev multiplier
+- `rsi_period` (default: 14) - RSI look-back period
+- `rsi_oversold` (default: 30.0) - RSI buy threshold
+- `rsi_overbought` (default: 70.0) - RSI sell threshold
+- `stop_loss_pct` (default: 5.0) - Unrealised loss % that forces a sell (0 = disabled)
+
+**Strategy Logic:**
+- **Buy**: first of MACD crossover-up / BB lower-band touch / RSI oversold fires
+- **Sell (priority 1 – stop-loss)**: close ≤ entry × (1 − stop_loss_pct / 100)
+- **Sell (priority 2 – primary exit)**: the exit condition of the strategy that entered the trade
+- **Sell (priority 3 – fallback)**: any of the three strategy sell conditions fires
+- `signal_source` column values: `"macd"`, `"bb"`, `"rsi"` (buy), `"macd_exit"`, `"bb_exit"`, `"rsi_exit"`, `"stop_loss"`, `"fallback_exit"` (sell)
+
 ### 5. Bollinger Bands Strategy (`bollinger_bands_template.py`)
 Replicates the Bollinger Bands mean-reversion strategy.
 
