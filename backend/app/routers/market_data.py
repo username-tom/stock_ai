@@ -68,3 +68,18 @@ async def get_movers(top_n: int = Query(default=10, ge=1, le=25)):
     except Exception as exc:
         logger.error("movers failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/news")
+async def get_news(
+    symbols: str = Query(..., description="Comma-separated watchlist symbols, e.g. AAPL,MSFT"),
+):
+    """Return merged financial news for watchlist symbols + general market topics (cached 15 min)."""
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not sym_list:
+        raise HTTPException(status_code=422, detail="No symbols provided.")
+    try:
+        return await market_service.get_news(sym_list)
+    except Exception as exc:
+        logger.error("news failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

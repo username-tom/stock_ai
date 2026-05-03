@@ -336,6 +336,149 @@ async def get_movers(top_n: int = 10) -> dict:
     return result
 
 
+NEWS_TTL = 900  # 15 minutes
+
+_YF_NEWS_URL = "https://query1.finance.yahoo.com/v1/finance/search"
+_YF_EARNINGS_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+
+
+async def _fetch_symbol_news(symbol: str, count: int = 5) -> list[dict]:
+    """Fetch recent news items for a single symbol from Yahoo Finance search API."""
+    client = _get_http_client()
+    try:
+        r = await client.get(
+            _YF_NEWS_URL,
+            params={"q": symbol, "newsCount": count, "quotesCount": 0, "lang": "en-US"},
+        )
+        r.raise_for_status()
+        items = r.json().get("news", [])
+        results = []
+        for item in items:
+            thumbnail = None
+            thumbs = item.get("thumbnail", {}).get("resolutions", [])
+            if thumbs:
+                thumbnail = thumbs[0].get("url")
+            results.append({
+                "id":          item.get("uuid"),
+                "title":       item.get("title"),
+                "url":         item.get("link"),
+                "source":      item.get("publisher"),
+                "published_at": item.get("providerPublishTime"),
+                "thumbnail":   thumbnail,
+                "related":     item.get("relatedTickers", []),
+                "tags":        [symbol],
+                "type":        "news",
+            })
+        return results
+    except Exception as exc:
+        logger.warning("news fetch failed for %s: %s", symbol, exc)
+        return []
+
+
+async def _fetch_earnings(symbol: str) -> dict | None:
+    """Fetch next earnings date for a symbol via Yahoo Finance quoteSummary."""
+    client = _get_http_client()
+    try:
+        url = _YF_EARNINGS_URL.format(symbol=symbol.upper())
+        r = await client.get(url, params={"modules": "calendarEvents"})
+        r.raise_for_status()
+        data = r.json()
+        cal = (
+            data.get("quoteSummary", {})
+            .get("result", [{}])[0]
+            .get("calendarEvents", {})
+        )
+        earnings_dates = cal.get("earnings", {}).get("earningsDate", [])
+        if not earnings_dates:
+            return None
+        raw_ts = earnings_dates[0].get("raw")
+        if raw_ts is None:
+            return None
+        dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+        # Only surface upcoming earnings within the next 30 days
+        now = datetime.now(tz=timezone.utc)
+        diff_days = (dt - now).days
+        if diff_days < 0 or diff_days > 30:
+            return None
+        return {
+            "id":          f"earnings:{symbol}:{raw_ts}",
+            "title":       f"{symbol} earnings expected {dt.strftime('%b %d, %Y')}",
+            "url":         f"https://finance.yahoo.com/calendar/earnings?symbol={symbol}",
+            "source":      "Yahoo Finance",
+            "published_at": int(now.timestamp()),
+            "thumbnail":   None,
+            "related":     [symbol],
+            "tags":        [symbol],
+            "type":        "earnings",
+            "days_until":  diff_days,
+        }
+    except Exception as exc:
+        logger.warning("earnings fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+# Any article whose title or source contains one of these terms (case-insensitive)
+# is excluded from the news feed.
+_BLOCKED_TERMS = {"cramer", "mad money"}
+
+
+def _is_blocked(item: dict) -> bool:
+    """Return True if the article should be excluded from the feed."""
+    text = ((item.get("title") or "") + " " + (item.get("source") or "")).lower()
+    return any(term in text for term in _BLOCKED_TERMS)
+
+
+async def get_news(watchlist: list[str], extra_topics: list[str] | None = None) -> dict:
+    """Return merged, deduplicated news for *watchlist* symbols + general market topics."""
+    cache_key = f"news:{','.join(sorted(watchlist))}"
+    cached = await _cache.get(cache_key, NEWS_TTL)
+    if cached is not None:
+        return cached
+
+    topics = list(watchlist) + (extra_topics or ["stock market", "S&P 500", "Federal Reserve", "earnings"])
+
+    # Fetch news for watchlist symbols (prioritised) + market topics
+    news_tasks = [_fetch_symbol_news(t, count=5) for t in topics]
+    earnings_tasks = [_fetch_earnings(s) for s in watchlist]
+
+    news_batches, earnings_results = await asyncio.gather(
+        asyncio.gather(*news_tasks),
+        asyncio.gather(*earnings_tasks),
+    )
+
+    seen_ids: set[str] = set()
+    merged: list[dict] = []
+
+    # Earnings notifications first
+    for earning in earnings_results:
+        if earning and earning["id"] not in seen_ids:
+            seen_ids.add(earning["id"])
+            merged.append(earning)
+
+    # Watchlist symbol news first (higher priority)
+    for i, batch in enumerate(news_batches[:len(watchlist)]):
+        for item in batch:
+            if item["id"] and item["id"] not in seen_ids and not _is_blocked(item):
+                seen_ids.add(item["id"])
+                # Mark watchlist-related items
+                item["watchlist_match"] = True
+                merged.append(item)
+
+    # General market topic news
+    for batch in news_batches[len(watchlist):]:
+        for item in batch:
+            if item["id"] and item["id"] not in seen_ids and not _is_blocked(item):
+                seen_ids.add(item["id"])
+                merged.append(item)
+
+    # Sort: earnings first, then by recency
+    merged.sort(key=lambda x: (x["type"] != "earnings", -(x.get("published_at") or 0)))
+
+    result = {"items": merged, "as_of": datetime.now(tz=timezone.utc).isoformat()}
+    await _cache.set(cache_key, result)
+    return result
+
+
 async def pre_warm(symbols: list[str], periods: list[str] | None = None) -> None:
     """Pre-populate the cache for *symbols* so the first dashboard load is fast."""
     periods = periods or ["1y"]
