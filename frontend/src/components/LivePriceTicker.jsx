@@ -118,7 +118,7 @@ export default function LivePriceTicker() {
         )}
       </div>
       <div className="flex-1 overflow-hidden">
-        <div className="flex gap-6 animate-marquee whitespace-nowrap">
+        <div className="flex gap-6 animate-marquee whitespace-nowrap" style={{ width: 'max-content' }}>
           {[...items, ...items].map((p, i) => (
             <span key={i} className="text-xs font-mono whitespace-nowrap text-slate-300">
               <span className="text-slate-400 font-semibold">{p.symbol} </span>
