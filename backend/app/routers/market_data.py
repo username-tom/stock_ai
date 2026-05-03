@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.services import market_service
+from app.services import market_service, symbol_registry
 
 logger = logging.getLogger(__name__)
 
@@ -49,3 +49,22 @@ async def get_history(
     except Exception as exc:
         logger.error("history failed for %s: %s", symbol.upper(), exc)
         raise HTTPException(status_code=404, detail=f"No data for {symbol.upper()}: {exc}")
+
+
+@router.get("/search")
+async def search_symbols(
+    q: str = Query(..., min_length=1, description="Symbol prefix or name substring"),
+    limit: int = Query(default=10, ge=1, le=25),
+):
+    """Search the local symbol registry by ticker prefix or company name."""
+    return symbol_registry.search(q, limit)
+
+
+@router.get("/movers")
+async def get_movers(top_n: int = Query(default=10, ge=1, le=25)):
+    """Return top daily gainers and losers from a liquid-stock universe (cached 5 min)."""
+    try:
+        return await market_service.get_movers(top_n)
+    except Exception as exc:
+        logger.error("movers failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

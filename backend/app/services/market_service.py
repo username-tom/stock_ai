@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from app.services import symbol_registry
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -106,9 +108,17 @@ async def get_quote(symbol: str) -> dict:
     last_price   = meta.get("regularMarketPrice")
     prev_close   = meta.get("chartPreviousClose") or meta.get("previousClose")
     change_pct   = round((last_price - prev_close) / prev_close * 100, 2) if prev_close and last_price else None
+    market_state = meta.get("marketState", "CLOSED")   # REGULAR | PRE | POST | CLOSED
+
+    reg_info     = symbol_registry.lookup(sym)
+    company_name = (
+        reg_info["name"] if reg_info
+        else meta.get("shortName") or meta.get("longName")
+    )
 
     result: dict = {
         "symbol":         sym,
+        "company_name":   company_name,
         "last_price":     last_price,
         "previous_close": prev_close,
         "open":           meta.get("regularMarketOpen"),
@@ -117,6 +127,7 @@ async def get_quote(symbol: str) -> dict:
         "volume":         meta.get("regularMarketVolume"),
         "market_cap":     None,
         "change_pct":     change_pct,
+        "market_state":   market_state,
     }
     await _cache.set(f"quote:{sym}", result)
     return result
@@ -173,6 +184,38 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
 
     await _cache.set(cache_key, records)
     return records
+
+
+# Liquid large-cap universe used for the movers screen
+_MOVERS_UNIVERSE = [
+    "AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","BRK-B","JPM","V",
+    "UNH","XOM","JNJ","WMT","MA","PG","HD","CVX","MRK","ABBV",
+    "LLY","AVGO","PEP","KO","COST","PFE","TMO","MCD","ACN","DHR",
+    "NKE","BAC","ADBE","INTC","CRM","DIS","NFLX","AMD","QCOM","TXN",
+    "SPY","QQQ","IWM","DIA","GLD","SLV","USO","TLT","HYG","VXX",
+]
+
+MOVERS_TTL = 300  # 5 minutes
+
+
+async def get_movers(top_n: int = 10) -> dict:
+    """Return the top N daily gainers and losers from a liquid-stock universe."""
+    cached = await _cache.get("movers", MOVERS_TTL)
+    if cached is not None:
+        return cached
+
+    quotes = await get_bulk_quotes(_MOVERS_UNIVERSE)
+    ranked = sorted(
+        [q for q in quotes.values() if q.get("change_pct") is not None],
+        key=lambda q: q["change_pct"],
+    )
+    result = {
+        "losers":  ranked[:top_n],
+        "gainers": list(reversed(ranked[-top_n:])),
+        "as_of":   datetime.now(tz=timezone.utc).isoformat(),
+    }
+    await _cache.set("movers", result)
+    return result
 
 
 async def pre_warm(symbols: list[str], periods: list[str] | None = None) -> None:

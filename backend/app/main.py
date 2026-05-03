@@ -9,7 +9,7 @@ import os
 from app.config import settings
 from app.database import init_db
 from app.routers import trading, backtest, market_data, ws, scripts
-from app.services import market_service
+from app.services import market_service, symbol_registry
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,8 +23,18 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database ready.")
     asyncio.create_task(market_service.pre_warm(DASHBOARD_SYMBOLS, periods=["1y"]))
+    asyncio.create_task(symbol_registry.ensure_registry())
+    asyncio.create_task(_daily_registry_refresh())
     yield
     logger.info("Application shutdown.")
+
+
+async def _daily_registry_refresh():
+    """Re-download the symbol registry every 24 h while the server is running."""
+    while True:
+        await asyncio.sleep(86_400)
+        logger.info("Daily symbol registry refresh …")
+        await symbol_registry.ensure_registry(force=True)
 
 
 app = FastAPI(

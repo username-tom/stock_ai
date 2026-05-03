@@ -8,6 +8,10 @@ export const getBulkQuotes = (symbols) =>
   api.get('/market-data/bulk-quotes', { params: { symbols: symbols.join(',') } }).then(r => r.data)
 export const getHistory = (symbol, period = '1y', interval = '1d') =>
   api.get(`/market-data/history/${symbol}`, { params: { period, interval } }).then(r => r.data)
+export const getMovers = (topN = 10) =>
+  api.get('/market-data/movers', { params: { top_n: topN } }).then(r => r.data)
+export const searchSymbols = (q, limit = 8) =>
+  api.get('/market-data/search', { params: { q, limit } }).then(r => r.data)
 
 // Backtest
 export const getStrategies = () => api.get('/backtest/strategies').then(r => r.data)
