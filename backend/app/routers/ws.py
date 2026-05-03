@@ -1,11 +1,12 @@
-"""WebSocket endpoint for real-time price streaming (yfinance polling)."""
+"""WebSocket endpoint for real-time price streaming (stooq-backed, TTL-cached)."""
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-import yfinance as yf
+
+from app.services import market_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websocket"])
@@ -15,43 +16,22 @@ router = APIRouter(tags=["websocket"])
 async def price_stream(websocket: WebSocket):
     """
     Accept a WebSocket connection.
-    Clients send JSON: {"symbols": ["AAPL", "MSFT"], "interval": 5}
-    The server streams price updates every `interval` seconds (default 10).
+    Clients send JSON: {"symbols": ["AAPL", "MSFT"], "interval": 15}
+    The server streams price updates every `interval` seconds (default 30).
     """
     await websocket.accept()
     symbols: list[str] = []
-    interval: int = 10
+    interval: int = 30
 
     try:
-        # Wait for the initial config message
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+        import json
         config = json.loads(raw)
         symbols = [s.upper() for s in config.get("symbols", [])]
-        interval = max(5, int(config.get("interval", 10)))
+        interval = max(15, int(config.get("interval", 30)))
 
         while True:
-            prices = {}
-            for sym in symbols:
-                try:
-                    ticker = yf.Ticker(sym)
-                    info = ticker.fast_info
-                    prices[sym] = {
-                        "symbol": sym,
-                        "price": info.last_price,
-                        "previous_close": info.previous_close,
-                        "change_pct": (
-                            round(
-                                (info.last_price - info.previous_close)
-                                / info.previous_close * 100,
-                                2,
-                            )
-                            if info.previous_close
-                            else None
-                        ),
-                    }
-                except Exception as exc:
-                    prices[sym] = {"symbol": sym, "error": str(exc)}
-
+            prices = await market_service.get_bulk_quotes(symbols)
             await websocket.send_json({"type": "prices", "data": prices})
             await asyncio.sleep(interval)
 

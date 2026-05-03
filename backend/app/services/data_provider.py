@@ -207,7 +207,16 @@ def fetch_ohlcv(
             logger.warning(
                 "IB data unavailable (%s); falling back to yfinance for %s.", exc, symbol
             )
+            source = "yfinance"
+
+    if source == "yfinance":
+        try:
             return _fetch_yfinance(symbol, start, end)
+        except ValueError as exc:
+            logger.warning(
+                "yfinance failed (%s); falling back to stooq for %s.", exc, symbol
+            )
+            return _fetch_stooq(symbol, start, end)
 
     return fetchers[source](symbol, start, end)
 

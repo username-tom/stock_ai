@@ -4,6 +4,8 @@ const api = axios.create({ baseURL: '/api' })
 
 // Market data
 export const getQuote = (symbol) => api.get(`/market-data/quote/${symbol}`).then(r => r.data)
+export const getBulkQuotes = (symbols) =>
+  api.get('/market-data/bulk-quotes', { params: { symbols: symbols.join(',') } }).then(r => r.data)
 export const getHistory = (symbol, period = '1y', interval = '1d') =>
   api.get(`/market-data/history/${symbol}`, { params: { period, interval } }).then(r => r.data)
 

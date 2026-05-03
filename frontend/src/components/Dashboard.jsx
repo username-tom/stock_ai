@@ -1,18 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getQuote, getHistory } from '../api/client'
+import { getBulkQuotes, getHistory } from '../api/client'
 import SubplotChart from './charts/SubplotChart'
 import { ArrowUpIcon, ArrowDownIcon, SignalIcon } from '@heroicons/react/24/solid'
 
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
 
-function QuoteCard({ symbol }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ['quote', symbol],
-    queryFn: () => getQuote(symbol),
-    refetchInterval: 30_000,
-  })
-
+function QuoteCard({ data, isLoading }) {
   if (isLoading)
     return (
       <div className="card animate-pulse">
@@ -21,16 +15,23 @@ function QuoteCard({ symbol }) {
       </div>
     )
 
-  const price = data?.last_price ?? data?.previous_close ?? 0
-  const prev = data?.previous_close ?? price
-  const changePct = prev ? ((price - prev) / prev) * 100 : 0
+  if (!data)
+    return (
+      <div className="card opacity-50">
+        <div className="text-xs text-slate-500">No data</div>
+      </div>
+    )
+
+  const price = data.last_price ?? data.previous_close ?? 0
+  const prev = data.previous_close ?? price
+  const changePct = data.change_pct ?? (prev ? ((price - prev) / prev) * 100 : 0)
   const positive = changePct >= 0
 
   return (
     <div className="card hover:border-dark-500/80 transition-all cursor-default">
       <div className="flex items-start justify-between">
         <div>
-          <div className="text-sm font-semibold text-slate-300">{symbol}</div>
+          <div className="text-sm font-semibold text-slate-300">{data.symbol}</div>
           <div className="text-xl font-bold font-mono mt-0.5">
             ${price.toFixed(2)}
           </div>
@@ -45,8 +46,8 @@ function QuoteCard({ symbol }) {
         </span>
       </div>
       <div className="flex gap-3 mt-2 text-xs text-slate-500">
-        <span>H: ${data?.day_high?.toFixed(2) ?? '—'}</span>
-        <span>L: ${data?.day_low?.toFixed(2) ?? '—'}</span>
+        <span>H: ${data.day_high?.toFixed(2) ?? '—'}</span>
+        <span>L: ${data.day_low?.toFixed(2) ?? '—'}</span>
       </div>
     </div>
   )
@@ -98,6 +99,12 @@ export default function Dashboard() {
   const [chartSymbol, setChartSymbol] = useState('AAPL')
   const [chartPeriod, setChartPeriod] = useState('1y')
 
+  const { data: quotesMap, isLoading: quotesLoading } = useQuery({
+    queryKey: ['bulk-quotes', DEFAULT_WATCHLIST],
+    queryFn: () => getBulkQuotes(DEFAULT_WATCHLIST),
+    refetchInterval: 60_000,
+  })
+
   const { data: histData, isLoading: histLoading } = useQuery({
     queryKey: ['history', chartSymbol, chartPeriod],
     queryFn: () => getHistory(chartSymbol, chartPeriod),
@@ -127,7 +134,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
           {DEFAULT_WATCHLIST.map(sym => (
             <div key={sym} onClick={() => setChartSymbol(sym)} className="cursor-pointer">
-              <QuoteCard symbol={sym} />
+              <QuoteCard data={quotesMap?.[sym]} isLoading={quotesLoading} />
             </div>
           ))}
         </div>

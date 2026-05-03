@@ -2,15 +2,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import os
 
 from app.config import settings
 from app.database import init_db
 from app.routers import trading, backtest, market_data, ws, scripts
+from app.services import market_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+DASHBOARD_SYMBOLS = ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA", "SPY"]
 
 
 @asynccontextmanager
@@ -18,6 +22,7 @@ async def lifespan(app: FastAPI):
     logger.info("Initialising database …")
     await init_db()
     logger.info("Database ready.")
+    asyncio.create_task(market_service.pre_warm(DASHBOARD_SYMBOLS, periods=["1y"]))
     yield
     logger.info("Application shutdown.")
 
@@ -34,7 +39,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -12,12 +12,12 @@ services:
       - IB_PORT=${IB_PORT:-7497}
       - IB_CLIENT_ID=${IB_CLIENT_ID:-1}
       - TRADING_MODE=${TRADING_MODE:-paper}
-      - DATABASE_URL=sqlite+aiosqlite:///./stock_ai.db
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/stock_ai.db
       - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:80
       - REPORTS_DIR=/app/reports_output
     volumes:
       - backend_data:/app/reports_output
-      - db_data:/app
+      - db_data:/app/data
     restart: unless-stopped
 
   frontend:
