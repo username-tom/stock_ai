@@ -138,7 +138,13 @@ async def run_backtest_endpoint(
     await db.commit()
     await db.refresh(report)
 
-    return {"id": report.id, "name": name, "metrics": m, "result": result}
+    return {
+        "id": report.id,
+        "name": name,
+        "metrics": m,
+        "result": result,
+        "html_report_path": html_path,
+    }
 
 
 @router.get("/reports")

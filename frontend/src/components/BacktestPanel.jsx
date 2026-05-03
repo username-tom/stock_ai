@@ -8,6 +8,7 @@ import {
   CheckCircleIcon,
   ExclamationTriangleIcon,
   CodeBracketIcon,
+  ArrowTopRightOnSquareIcon,
 } from '@heroicons/react/24/outline'
 
 function MetricCard({ label, value, sub, positive }) {
@@ -275,9 +276,22 @@ export default function BacktestPanel() {
           )}
 
           {mutation.isSuccess && (
-            <div className="flex items-center gap-2 p-3 bg-emerald-900/20 border border-emerald-700/30 rounded-lg text-sm text-emerald-400">
-              <CheckCircleIcon className="h-4 w-4" />
-              Backtest complete — report saved.
+            <div className="flex items-center justify-between gap-2 p-3 bg-emerald-900/20 border border-emerald-700/30 rounded-lg text-sm text-emerald-400">
+              <span className="flex items-center gap-2">
+                <CheckCircleIcon className="h-4 w-4" />
+                Backtest complete — report saved.
+              </span>
+              {mutation.data?.html_report_path && (
+                <a
+                  href={`/reports/${mutation.data.html_report_path.split('/').pop()}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-secondary text-xs flex items-center gap-1"
+                >
+                  <ArrowTopRightOnSquareIcon className="h-4 w-4" />
+                  HTML Report
+                </a>
+              )}
             </div>
           )}
         </form>
