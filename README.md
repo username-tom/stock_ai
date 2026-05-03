@@ -1,19 +1,6 @@
 # Stock AI – Automated Trading Platform
 
-A full-stack automated stock trading platform with Interactive Brokers integration, backtesting engine, report generation, and a modern dark-theme UI.
-
-## Screenshots
-
-### Dashboard
-![Dashboard](https://github.com/user-attachments/assets/2d7aa234-e4c5-4c93-8c9c-d37426102160)
-
-### Backtesting
-![Backtest](https://github.com/user-attachments/assets/3fff5064-b8b9-4682-8443-15ddd2dc51ca)
-
-### Trading
-![Trading](https://github.com/user-attachments/assets/7574045f-b9ea-43c1-a3e1-839640d6ed87)
-
----
+A full-stack automated trading platform with Interactive Brokers integration, backtesting engine, report generation, and a modern dark-theme UI.
 
 ## Features
 
