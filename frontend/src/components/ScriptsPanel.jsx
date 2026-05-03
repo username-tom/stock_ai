@@ -84,7 +84,7 @@ export default function ScriptsPanel() {
   const [showNewForm, setShowNewForm] = useState(false)
   const [newName, setNewName] = useState('')
 
-  const { data: scriptsData } = useQuery({
+  const { data: scriptsData, isLoading: scriptsLoading } = useQuery({
     queryKey: ['scripts'],
     queryFn: getScripts,
   })
@@ -234,7 +234,15 @@ export default function ScriptsPanel() {
             </div>
           )}
 
-          {scripts.length === 0 && !showNewForm && (
+          {scriptsLoading && (
+            <div className="space-y-1">
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="h-9 bg-dark-700 rounded-lg animate-pulse" />
+              ))}
+            </div>
+          )}
+
+          {!scriptsLoading && scripts.length === 0 && !showNewForm && (
             <div className="text-sm text-slate-500 py-4 text-center">
               No scripts yet. Create one to get started.
             </div>

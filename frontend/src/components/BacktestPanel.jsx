@@ -44,12 +44,12 @@ const STRATEGY_PARAM_UI = {
 const CUSTOM_SCRIPT_KEY = '__custom_script__'
 
 export default function BacktestPanel() {
-  const { data: stratData } = useQuery({
+  const { data: stratData, isLoading: stratLoading } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
   })
 
-  const { data: scriptsData } = useQuery({
+  const { data: scriptsData, isLoading: scriptsLoading } = useQuery({
     queryKey: ['scripts'],
     queryFn: getScripts,
   })
@@ -127,18 +127,22 @@ export default function BacktestPanel() {
 
           <div>
             <label className="label">Strategy</label>
-            <select
-              className="input"
-              value={form.strategy_type}
-              onChange={e => handleStrategyChange(e.target.value)}
-            >
-              {(stratData?.strategies || []).map(s => (
-                <option key={s.type} value={s.type}>
-                  {s.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                </option>
-              ))}
-              <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
-            </select>
+            {stratLoading ? (
+              <div className="input animate-pulse bg-dark-700 text-transparent">Loading…</div>
+            ) : (
+              <select
+                className="input"
+                value={form.strategy_type}
+                onChange={e => handleStrategyChange(e.target.value)}
+              >
+                {(stratData?.strategies || []).map(s => (
+                  <option key={s.type} value={s.type}>
+                    {s.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                  </option>
+                ))}
+                <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
+              </select>
+            )}
           </div>
 
           {/* Custom script selector */}
@@ -148,7 +152,13 @@ export default function BacktestPanel() {
                 <CodeBracketIcon className="h-3.5 w-3.5" />
                 Custom Script
               </div>
-              {scripts.length === 0 ? (
+              {scriptsLoading ? (
+                <div className="space-y-2">
+                  {[...Array(2)].map((_, i) => (
+                    <div key={i} className="h-8 bg-dark-700 rounded animate-pulse" />
+                  ))}
+                </div>
+              ) : scripts.length === 0 ? (
                 <div className="text-xs text-amber-400/80">
                   No scripts saved yet. Create one in the{' '}
                   <a href="/scripts" className="underline">Scripts</a> panel.
@@ -356,20 +366,21 @@ export default function BacktestPanel() {
                   ))}
                 </div>
 
-                {activeTab === 'equity' && (
+                <div className={activeTab === 'equity' ? '' : 'hidden'}>
                   <EquityChart
                     data={result.result?.equity_curve ?? []}
                     initialCapital={result.result?.initial_capital}
                     height={300}
                   />
-                )}
+                </div>
 
-                {activeTab === 'price' && (
+                <div className={activeTab === 'price' ? '' : 'hidden'}>
                   <SubplotChart data={result.result?.ohlcv ?? []} height={240} />
-                )}
+                </div>
 
-                {activeTab === 'trades' && (
-                  <div className="table-container max-h-80 overflow-y-auto">
+                {/* trades tab — always mounted to preserve scroll position */}
+                <div className={activeTab === 'trades' ? '' : 'hidden'}>
+                <div className="table-container max-h-80 overflow-y-auto">
                     <table>
                       <thead>
                         <tr>
@@ -400,9 +411,24 @@ export default function BacktestPanel() {
                       <div className="text-center text-slate-500 text-sm py-8">No trades executed</div>
                     )}
                   </div>
-                )}
+                </div>
               </div>
             </>
+          ) : mutation.isPending ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {[...Array(8)].map((_, i) => (
+                  <div key={i} className="metric-card animate-pulse">
+                    <div className="h-3 w-20 bg-dark-500 rounded mb-2" />
+                    <div className="h-7 w-16 bg-dark-500 rounded" />
+                  </div>
+                ))}
+              </div>
+              <div className="card h-64 flex flex-col items-center justify-center gap-3 text-slate-400">
+                <ArrowPathIcon className="h-8 w-8 animate-spin text-emerald-500" />
+                <p className="text-sm">Running backtest…</p>
+              </div>
+            </div>
           ) : (
             <div className="card flex flex-col items-center justify-center h-64 text-slate-500">
               <ArrowPathIcon className="h-10 w-10 mb-3 text-slate-600" />

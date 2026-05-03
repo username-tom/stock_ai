@@ -36,21 +36,21 @@ export default function TradingPanel() {
     refetchInterval: 5000,
   })
 
-  const { data: positions } = useQuery({
+  const { data: positions, isLoading: positionsLoading } = useQuery({
     queryKey: ['ib-positions'],
     queryFn: getIBPositions,
     enabled: ibStatus?.connected,
     refetchInterval: 10000,
   })
 
-  const { data: openOrders } = useQuery({
+  const { data: openOrders, isLoading: ordersLoading } = useQuery({
     queryKey: ['ib-orders'],
     queryFn: getIBOrders,
     enabled: ibStatus?.connected,
     refetchInterval: 5000,
   })
 
-  const { data: histData, refetch: refetchHistory } = useQuery({
+  const { data: histData, isLoading: histLoading, refetch: refetchHistory } = useQuery({
     queryKey: ['trade-history'],
     queryFn: () => getTradeHistory(50),
   })
@@ -257,59 +257,75 @@ export default function TradingPanel() {
             <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-3">
               Open Positions {isConnected ? '' : '(IB not connected)'}
             </h3>
-            <div className="table-container">
-              <table>
-                <thead>
-                  <tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Market Value</th></tr>
-                </thead>
-                <tbody>
-                  {(positions?.positions ?? []).map((p, i) => (
-                    <tr key={i}>
-                      <td className="font-mono font-bold text-slate-200">{p.symbol}</td>
-                      <td className={p.quantity >= 0 ? 'pos' : 'neg'}>{p.quantity}</td>
-                      <td className="font-mono">${p.avg_cost?.toFixed(2)}</td>
-                      <td className="font-mono">${p.market_value?.toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!positions?.positions?.length && (
-                <div className="text-center text-slate-500 text-sm py-6">No open positions</div>
-              )}
-            </div>
+            {positionsLoading ? (
+              <div className="space-y-2">
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} className="h-8 bg-dark-700 rounded animate-pulse" />
+                ))}
+              </div>
+            ) : (
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Market Value</th></tr>
+                  </thead>
+                  <tbody>
+                    {(positions?.positions ?? []).map((p, i) => (
+                      <tr key={i}>
+                        <td className="font-mono font-bold text-slate-200">{p.symbol}</td>
+                        <td className={p.quantity >= 0 ? 'pos' : 'neg'}>{p.quantity}</td>
+                        <td className="font-mono">${p.avg_cost?.toFixed(2)}</td>
+                        <td className="font-mono">${p.market_value?.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!positions?.positions?.length && (
+                  <div className="text-center text-slate-500 text-sm py-6">No open positions</div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Open orders */}
           {isConnected && (
             <div className="card">
               <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-3">Open Orders</h3>
-              <div className="table-container">
-                <table>
-                  <thead>
-                    <tr><th>Order ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th></th></tr>
-                  </thead>
-                  <tbody>
-                    {(openOrders?.orders ?? []).map((o, i) => (
-                      <tr key={i}>
-                        <td className="font-mono text-xs">{o.ib_order_id}</td>
-                        <td className="font-mono font-bold">{o.symbol}</td>
-                        <td className={o.side === 'BUY' ? 'pos' : 'neg'}>{o.side}</td>
-                        <td>{o.quantity}</td>
-                        <td><span className="badge-yellow">{o.status}</span></td>
-                        <td>
-                          <button
-                            className="text-xs text-red-400 hover:text-red-300"
-                            onClick={() => cancelMut.mutate(o.ib_order_id)}
-                          >Cancel</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {!openOrders?.orders?.length && (
-                  <div className="text-center text-slate-500 text-sm py-6">No open orders</div>
-                )}
-              </div>
+              {ordersLoading ? (
+                <div className="space-y-2">
+                  {[...Array(3)].map((_, i) => (
+                    <div key={i} className="h-8 bg-dark-700 rounded animate-pulse" />
+                  ))}
+                </div>
+              ) : (
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr><th>Order ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th></th></tr>
+                    </thead>
+                    <tbody>
+                      {(openOrders?.orders ?? []).map((o, i) => (
+                        <tr key={i}>
+                          <td className="font-mono text-xs">{o.ib_order_id}</td>
+                          <td className="font-mono font-bold">{o.symbol}</td>
+                          <td className={o.side === 'BUY' ? 'pos' : 'neg'}>{o.side}</td>
+                          <td>{o.quantity}</td>
+                          <td><span className="badge-yellow">{o.status}</span></td>
+                          <td>
+                            <button
+                              className="text-xs text-red-400 hover:text-red-300"
+                              onClick={() => cancelMut.mutate(o.ib_order_id)}
+                            >Cancel</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!openOrders?.orders?.length && (
+                    <div className="text-center text-slate-500 text-sm py-6">No open orders</div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -323,6 +339,13 @@ export default function TradingPanel() {
                 Refresh
               </button>
             </div>
+            {histLoading ? (
+              <div className="space-y-2">
+                {[...Array(5)].map((_, i) => (
+                  <div key={i} className="h-8 bg-dark-700 rounded animate-pulse" />
+                ))}
+              </div>
+            ) : (
             <div className="table-container max-h-72 overflow-y-auto">
               <table>
                 <thead>
@@ -353,6 +376,7 @@ export default function TradingPanel() {
                 <div className="text-center text-slate-500 text-sm py-6">No trades yet</div>
               )}
             </div>
+            )}
           </div>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './components/Dashboard'
 import BacktestPanel from './components/BacktestPanel'
@@ -6,16 +6,34 @@ import ReportsPanel from './components/ReportsPanel'
 import TradingPanel from './components/TradingPanel'
 import ScriptsPanel from './components/ScriptsPanel'
 
+const PANELS = [
+  { path: '/',         Component: Dashboard      },
+  { path: '/backtest', Component: BacktestPanel  },
+  { path: '/reports',  Component: ReportsPanel   },
+  { path: '/trading',  Component: TradingPanel   },
+  { path: '/scripts',  Component: ScriptsPanel   },
+]
+
+function PersistentPanels() {
+  const { pathname } = useLocation()
+  return (
+    <>
+      {PANELS.map(({ path, Component }) => (
+        <div key={path} className={pathname === path ? '' : 'hidden'}>
+          <Component />
+        </div>
+      ))}
+    </>
+  )
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <Layout>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/backtest" element={<BacktestPanel />} />
-          <Route path="/reports" element={<ReportsPanel />} />
-          <Route path="/trading" element={<TradingPanel />} />
-          <Route path="/scripts" element={<ScriptsPanel />} />
+          {/* Catch-all so the router doesn't 404 on any path */}
+          <Route path="*" element={<PersistentPanels />} />
         </Routes>
       </Layout>
     </BrowserRouter>
