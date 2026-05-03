@@ -26,7 +26,7 @@ A full-stack automated stock trading platform with Interactive Brokers integrati
 | **Paper Trading (IB)** | Connect to IB TWS/Gateway in paper-trading mode for real market simulation. |
 | **Live Trading (IB)** | Connect to IB TWS/Gateway live for real order execution. |
 | **Live Quotes & Charts** | Dashboard shows live price quotes, an intraday/historical price chart, and a market movers screen (top gainers/losers). Data sourced from the Yahoo Finance v8 API with a TTL cache. |
-| **Symbol Search** | Search 8 000+ tickers by symbol prefix or company name via the local symbol registry. |
+| **Symbol Search** | Search 8,000+ tickers by symbol prefix or company name via the local symbol registry. |
 | **Real-time Prices** | WebSocket endpoint streams live price updates (configurable interval). |
 | **Nice UI** | React 18 + Vite + TailwindCSS dark theme with Recharts interactive charts. |
 
