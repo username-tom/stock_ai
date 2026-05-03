@@ -19,12 +19,15 @@ A full-stack automated stock trading platform with Interactive Brokers integrati
 
 | Feature | Description |
 |---|---|
-| **Backtesting** | Run strategies against historical data via yfinance. Equity curve, trade log, Sharpe ratio, max drawdown, win rate. |
+| **Backtesting** | Run strategies against historical data. Supports yfinance (default), Stooq, and Interactive Brokers as data sources. Equity curve, trade log, Sharpe ratio, max drawdown, win rate. |
+| **Custom Scripts** | Write and validate custom Python trading strategies in-browser. Scripts define `generate_signals(df, **params)` using pandas/numpy in a sandboxed executor. |
 | **Report Generation** | Auto-generates HTML reports with embedded charts after every backtest. Accessible via the Reports page or served statically at `/reports/`. |
 | **Simulated Trading** | Place buy/sell orders at any fill price — no broker connection needed. All trades stored in SQLite. |
 | **Paper Trading (IB)** | Connect to IB TWS/Gateway in paper-trading mode for real market simulation. |
 | **Live Trading (IB)** | Connect to IB TWS/Gateway live for real order execution. |
-| **Real-time Prices** | WebSocket endpoint streams live price updates from yfinance (configurable interval). |
+| **Live Quotes & Charts** | Dashboard shows live price quotes, an intraday/historical price chart, and a market movers screen (top gainers/losers). Data sourced from the Yahoo Finance v8 API with a TTL cache. |
+| **Symbol Search** | Search 8,000+ tickers by symbol prefix or company name via the local symbol registry. |
+| **Real-time Prices** | WebSocket endpoint streams live price updates (configurable interval). |
 | **Nice UI** | React 18 + Vite + TailwindCSS dark theme with Recharts interactive charts. |
 
 ---
@@ -38,14 +41,18 @@ stock_ai/
 │   │   ├── main.py           # FastAPI app, CORS, startup
 │   │   ├── config.py         # Settings via .env
 │   │   ├── database.py       # SQLite + SQLAlchemy async
-│   │   ├── models/           # ORM models: Trade, Strategy, BacktestReport
-│   │   ├── routers/          # REST endpoints: trading, backtest, market_data, ws
+│   │   ├── models/           # ORM models: Trade, BacktestReport, CustomScript
+│   │   ├── routers/          # REST endpoints: trading, backtest, market_data, scripts, ws
 │   │   └── services/
-│   │       ├── ib_service.py     # Interactive Brokers (ib_insync)
-│   │       ├── backtester.py     # Backtest engine (pandas)
-│   │       ├── reporter.py       # HTML report generator (matplotlib)
-│   │       └── strategies/       # SMA Crossover, RSI, Bollinger Bands, MACD
-│   ├── tests/                # pytest unit tests (23 tests)
+│   │       ├── ib_service.py       # Interactive Brokers (ib_insync)
+│   │       ├── backtester.py       # Backtest engine (pandas)
+│   │       ├── data_provider.py    # Historical OHLCV fetcher (yfinance / Stooq / IB)
+│   │       ├── market_service.py   # Live quotes & history via Yahoo Finance v8 API (TTL-cached)
+│   │       ├── reporter.py         # HTML report generator (matplotlib)
+│   │       ├── script_executor.py  # Sandboxed Python script runner
+│   │       ├── symbol_registry.py  # Local ticker/company name search index
+│   │       └── strategies/         # SMA Crossover, RSI, Bollinger Bands, MACD
+│   ├── tests/                # pytest unit tests (45 tests)
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── .env.example
@@ -54,9 +61,12 @@ stock_ai/
 │   │   ├── App.jsx
 │   │   ├── api/client.js     # Axios API helpers
 │   │   └── components/
-│   │       ├── Dashboard.jsx       # Watchlist + live price chart
+│   │       ├── Layout.jsx          # App shell, navigation
+│   │       ├── Dashboard.jsx       # Watchlist, live price chart, market movers
+│   │       ├── LivePriceTicker.jsx # Real-time price ticker bar
 │   │       ├── BacktestPanel.jsx   # Strategy config + results
 │   │       ├── ReportsPanel.jsx    # Saved backtest reports
+│   │       ├── ScriptsPanel.jsx    # Custom Python script editor & validator
 │   │       ├── TradingPanel.jsx    # IB connect/orders/history
 │   │       └── charts/             # EquityChart, PriceChart (Recharts)
 │   ├── Dockerfile
@@ -116,7 +126,7 @@ npm run dev        # http://localhost:5173
 4. Click **Connect IB** on the Trading page.
 
 > **Note:** All features except paper/live trading work without IB.
-> Simulated mode and backtesting use only yfinance data.
+> Simulated mode and backtesting use yfinance data by default.
 
 ---
 
@@ -131,6 +141,24 @@ npm run dev        # http://localhost:5173
 
 ---
 
+## Custom Scripts
+
+The **Scripts** page lets you write Python strategies that run inside a sandboxed executor. Scripts must define:
+
+```python
+def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
+    """Add a 'signal' column: +1 buy, -1 sell, 0 hold."""
+    ...
+```
+
+An optional `get_default_params() -> dict` function can supply default parameter values.
+
+Allowed imports: `pandas` (as `pd`), `numpy` (as `np`), `math`, `statistics`.
+
+Once saved, a script can be selected from the Backtest page in place of any built-in strategy.
+
+---
+
 ## API Reference
 
 Full interactive docs at **http://localhost:8000/docs** (Swagger UI).
@@ -140,17 +168,30 @@ Key endpoints:
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/health` | Health check |
-| GET | `/api/backtest/strategies` | List available strategies |
-| POST | `/api/backtest/run` | Run a backtest |
+| GET | `/api/backtest/strategies` | List available built-in strategies |
+| GET | `/api/backtest/data-sources` | List supported data sources and availability |
+| POST | `/api/backtest/run` | Run a backtest (built-in strategy or custom script) |
 | GET | `/api/backtest/reports` | List saved reports |
 | GET | `/api/backtest/reports/{id}` | Get full report detail |
+| DELETE | `/api/backtest/reports/{id}` | Delete a report |
 | POST | `/api/trading/order` | Place an order |
 | GET | `/api/trading/history` | Trade history |
 | POST | `/api/trading/ib/connect` | Connect to IB |
 | GET | `/api/trading/ib/status` | IB connection status |
 | GET | `/api/trading/ib/positions` | IB open positions |
-| GET | `/api/market-data/quote/{symbol}` | Latest quote |
-| GET | `/api/market-data/history/{symbol}` | OHLCV history |
+| GET | `/api/market-data/quote/{symbol}` | Latest quote (cached 60 s) |
+| GET | `/api/market-data/bulk-quotes` | Quotes for multiple symbols (`?symbols=AAPL,MSFT`) |
+| GET | `/api/market-data/history/{symbol}` | OHLCV history (cached 15 min) |
+| GET | `/api/market-data/search` | Search symbols by prefix or company name |
+| GET | `/api/market-data/movers` | Top daily gainers and losers (cached 5 min) |
+| GET | `/api/scripts` | List saved custom scripts |
+| POST | `/api/scripts` | Create a custom script |
+| GET | `/api/scripts/template` | Fetch the default script template |
+| GET | `/api/scripts/{id}` | Get a script by ID |
+| PUT | `/api/scripts/{id}` | Update a script |
+| DELETE | `/api/scripts/{id}` | Delete a script |
+| POST | `/api/scripts/{id}/validate` | Validate a saved script |
+| POST | `/api/scripts/validate` | Validate script code without saving |
 | WS | `/ws/prices` | Real-time price stream |
 
 ---
@@ -162,7 +203,7 @@ cd backend
 pytest tests/ -v
 ```
 
-28 unit tests covering the backtesting engine and all four strategies.
+45 unit tests covering the backtesting engine, all four strategies, and the data provider.
 
 ---
 
@@ -182,6 +223,6 @@ pytest tests/ -v
 
 ## Tech Stack
 
-**Backend:** Python 3.11+, FastAPI, SQLAlchemy (async), SQLite, ib_insync, yfinance, pandas, numpy, matplotlib
+**Backend:** Python 3.11+, FastAPI, SQLAlchemy (async), SQLite, ib_insync, yfinance, pandas, numpy, matplotlib, reportlab, httpx
 
 **Frontend:** React 18, Vite, TailwindCSS, Recharts, React Query, React Router, Axios, Heroicons
