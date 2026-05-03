@@ -1,10 +1,30 @@
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
+import { Component } from 'react'
 import Layout from './components/Layout'
 import Dashboard from './components/Dashboard'
 import BacktestPanel from './components/BacktestPanel'
 import ReportsPanel from './components/ReportsPanel'
 import TradingPanel from './components/TradingPanel'
 import ScriptsPanel from './components/ScriptsPanel'
+
+class PanelErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null } }
+  static getDerivedStateFromError(error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-8 text-center text-slate-400">
+          <div className="text-red-400 font-semibold mb-2">Something went wrong</div>
+          <div className="text-xs font-mono text-slate-500">{this.state.error?.message}</div>
+          <button className="mt-4 text-xs text-emerald-400 underline" onClick={() => this.setState({ error: null })}>
+            Retry
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 const PANELS = [
   { path: '/',         Component: Dashboard      },
@@ -20,7 +40,9 @@ function PersistentPanels() {
     <>
       {PANELS.map(({ path, Component }) => (
         <div key={path} className={pathname === path ? '' : 'hidden'}>
-          <Component />
+          <PanelErrorBoundary>
+            <Component />
+          </PanelErrorBoundary>
         </div>
       ))}
     </>

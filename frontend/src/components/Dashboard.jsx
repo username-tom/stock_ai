@@ -289,7 +289,7 @@ export default function Dashboard() {
 
   // History: intraday/short periods track market state;
   //          multi-month+ periods refresh every 15 min regardless.
-  const shortPeriod = chartPeriod === '1d' || chartPeriod === '5d' || chartPeriod === '2w'
+  const shortPeriod = chartPeriod === '1d' || chartPeriod === '2d' || chartPeriod === '5d' || chartPeriod === '2w'
   const histRefetchInterval = shortPeriod ? (marketOpen ? 60_000 : 5 * 60_000) : 15 * 60_000
   const histStaleTime       = shortPeriod ? (marketOpen ? 55_000 : 4 * 60_000) : 840_000
 
@@ -451,6 +451,7 @@ export default function Dashboard() {
           <div className="flex gap-1">
             {[
               { key: '1d',  label: '1D' },
+              { key: '2d',  label: '2D' },
               { key: '5d',  label: '5D' },
               { key: '2w',  label: '2W' },
               { key: '1mo', label: '1M' },

@@ -43,21 +43,21 @@ _YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 
 # period string → Yahoo "range" param ("2w" fetched as 1mo then trimmed)
 _PERIOD_RANGE_MAP: dict[str, str] = {
-    "1d":  "2d",  "5d":  "5d",  "2w":  "1mo",
+    "1d":  "5d",  "2d":  "5d",  "5d":  "5d",  "2w":  "5d",
     "1mo": "1mo", "3mo": "3mo", "6mo": "6mo",
     "1y":  "1y",  "2y":  "2y",  "5y":  "5y",  "max": "max",
 }
 
 # period string → Yahoo "interval" param
 _PERIOD_INTERVAL_MAP: dict[str, str] = {
-    "1d":  "5m",  "5d":  "15m", "2w":  "1d",
+    "1d":  "1m",  "2d":  "1m",  "5d":  "15m", "2w":  "15m",
     "1mo": "1d",  "3mo": "1d",  "6mo": "1d",
     "1y":  "1d",  "2y":  "1d",  "5y":  "1wk", "max": "1mo",
 }
 
 # History TTL per period (seconds)
 _HISTORY_TTL_MAP: dict[str, float] = {
-    "1d": 60, "5d": 300, "2w": 300,
+    "1d": 60, "2d": 60,  "5d": 300, "2w": 300,
     "1mo": 900, "3mo": 900, "6mo": 900,
     "1y": 900, "2y": 900, "5y": 900, "max": 900,
 }
@@ -147,10 +147,12 @@ def _get_http_client() -> httpx.AsyncClient:
 # Yahoo Finance v8 helpers
 # ---------------------------------------------------------------------------
 
-async def _yf_chart(symbol: str, range_: str = "5d", interval: str = "1d") -> dict:
+async def _yf_chart(symbol: str, range_: str = "5d", interval: str = "1d", include_pre_post: bool = False) -> dict:
     """Fetch the raw Yahoo Finance v8 chart JSON for *symbol*."""
     url = f"{_YF_BASE}/{symbol.upper()}"
-    params = {"interval": interval, "range": range_}
+    params: dict = {"interval": interval, "range": range_}
+    if include_pre_post:
+        params["includePrePost"] = "true"
     client = _get_http_client()
     r = await client.get(url, params=params)
     r.raise_for_status()
@@ -247,7 +249,7 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     yf_interval = _PERIOD_INTERVAL_MAP.get(period, "1d")
     intraday    = "m" in yf_interval or "h" in yf_interval
 
-    chart = await _yf_chart(sym, range_=yf_range, interval=yf_interval)
+    chart = await _yf_chart(sym, range_=yf_range, interval=yf_interval, include_pre_post=(period in ("1d", "2d")))
 
     timestamps = chart.get("timestamp", [])
     indicators  = chart.get("indicators", {}).get("quote", [{}])[0]
@@ -277,16 +279,25 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     if not records:
         raise ValueError(f"No OHLCV data returned for {sym}")
 
-    # "1d" is fetched as 2d – trim to the last 360 bars (30 h × 12 five-minute bars)
-    if period == "1d":
-        records = records[-360:]
+    # "1d"/"2d" are fetched as 5d at 1m with pre/post – keep only the last
+    # N trading days. Yahoo never returns weekend bars, so on Saturday/Sunday
+    # this naturally surfaces the most recent trading day(s).
+    if period in ("1d", "2d"):
+        n_days = 1 if period == "1d" else 2
+        days_seen: list[str] = []
+        for r in records:
+            day = r["date"][:5]  # "MM/DD"
+            if day not in days_seen:
+                days_seen.append(day)
+        keep = set(days_seen[-n_days:])
+        records = [r for r in records if r["date"][:5] in keep]
 
-    # "2w" is fetched as 1mo daily – trim to the last 14 trading days
+    # "2w" is fetched as 1mo – trim to the last 260 bars (10 trading days × 26 fifteen-minute bars)
     if period == "2w":
-        records = records[-14:]
+        records = records[-260:]
 
     result = {"data": records}
-    if period == "1d" and prev_close is not None:
+    if period in ("1d", "2d") and prev_close is not None:
         result["prev_close"] = round(float(prev_close), 4)
 
     await _cache.set(cache_key, result)

@@ -61,68 +61,80 @@ function OneDayChart({ data, height, indicators, prevClose }) {
 
   const enriched = enrichData(data)
 
-  // Determine line color: green if last close >= prevClose, else red
   const lastClose = enriched[enriched.length - 1]?.close
   const isUp = prevClose == null || lastClose >= prevClose
   const lineColor = isUp ? '#22c55e' : '#ef4444'
   const fillColor = isUp ? '#22c55e' : '#ef4444'
 
-  // Dates are "MM/DD HH:MM" — extract the time portion for session logic
   const timeOf = (d) => d.date?.slice(6) ?? ''   // "HH:MM"
   const dayOf  = (d) => d.date?.slice(0, 5) ?? '' // "MM/DD"
 
-  // Unique trading days in the data
   const days = [...new Set(enriched.map(dayOf))]
 
-  // Hourly X-axis ticks: bars whose time ends in ":00"
-  const hourTicks = enriched
-    .filter(d => timeOf(d).endsWith(':00'))
-    .map(d => d.date)
+  // Split each bar into session segments.
+  // The last pre-market bar and last regular bar are shared into the next
+  // segment so the three lines connect visually at 09:30 and 16:00.
+  const segmented = enriched.map((d, i) => {
+    const t = timeOf(d)
+    const nextT = i < enriched.length - 1 ? timeOf(enriched[i + 1]) : ''
+    const inPre     = t < '09:30'
+    const inRegular = t >= '09:30' && t < '16:00'
+    const inPost    = t >= '16:00'
+    const isLastPre     = inPre     && nextT >= '09:30'          // 09:29 → shared with regular
+    const isLastRegular = inRegular && (nextT >= '16:00' || nextT === '') // 15:59 → shared with post
+    return {
+      ...d,
+      preClose:     inPre                           ? d.close : null,
+      regularClose: inRegular || isLastPre          ? d.close : null,
+      postClose:    inPost    || isLastRegular      ? d.close : null,
+    }
+  })
 
-  // Tick label: show "MM/DD" at midnight/first bar of each day, else "HH:MM"
+  // X-axis ticks: first bar of each day (→ date label) + key session times
+  const KEY_SESSION_TIMES = ['09:30', '12:00', '16:00']
+  const dayStartTicks = days.map(day => segmented.find(d => dayOf(d) === day)?.date).filter(Boolean)
+  const sessionTicks  = segmented
+    .filter(d => KEY_SESSION_TIMES.includes(timeOf(d)))
+    .map(d => d.date)
+  const allTicks = [...new Set([...dayStartTicks, ...sessionTicks])].sort()
+
   const formatTick = (val) => {
-    const t = val?.slice(6) ?? ''
-    if (t === '00:00' || t === '04:00') return val?.slice(0, 5) ?? ''
+    if (!val) return ''
+    const t = timeOf({ date: val })
+    // First bar of a day → show MM/DD date
+    if (dayStartTicks.includes(val)) return dayOf({ date: val })
     return t
   }
 
-  // Pre/post market areas per day
+  // Day separator vertical lines
+  const dayLines = days.slice(1).map(day => segmented.find(d => dayOf(d) === day)?.date).filter(Boolean)
+
+  // Subtle background tint for off-hours zones only
   const sessionAreas = []
-  const dayLines = []
-  days.forEach((day, i) => {
-    const dayData = enriched.filter(d => dayOf(d) === day)
-    if (i > 0) dayLines.push(dayData[0].date)
+  days.forEach(day => {
+    const dayData = segmented.filter(d => dayOf(d) === day)
     const pre  = dayData.filter(d => timeOf(d) < '09:30')
     const post = dayData.filter(d => timeOf(d) >= '16:00')
     if (pre.length)  sessionAreas.push({ x1: pre[0].date,  x2: pre[pre.length - 1].date })
     if (post.length) sessionAreas.push({ x1: post[0].date, x2: post[post.length - 1].date })
   })
 
-  // Session open/close boundary markers
-  const sessionBoundaries = []
-  days.forEach(day => {
-    const dayData = enriched.filter(d => dayOf(d) === day)
-    const openBar  = dayData.find(d => timeOf(d) >= '09:30')
-    const closeBar = [...dayData].reverse().find(d => timeOf(d) < '16:00')
-    if (openBar)  sessionBoundaries.push(openBar.date)
-    if (closeBar && closeBar.date !== openBar?.date) sessionBoundaries.push(closeBar.date)
-  })
+  const maxVol = Math.max(...segmented.map(d => d.volume ?? 0))
 
-  // Volume max for secondary Y domain
-  const maxVol = Math.max(...enriched.map(d => d.volume ?? 0))
-
-  const hasRSI    = (indicators.rsi    !== false) && enriched.some(d => d.rsi     != null)
-  const hasMACD   = (indicators.macd   !== false) && enriched.some(d => d.macd    != null)
-  const hasBB     = (indicators.bb     !== false) && enriched.some(d => d.upper   != null)
-  const hasFastMA = (indicators.fastMa !== false) && enriched.some(d => d.fast_ma != null)
-  const hasSlowMA = (indicators.slowMa !== false) && enriched.some(d => d.slow_ma != null)
+  const hasRSI    = (indicators.rsi    !== false) && segmented.some(d => d.rsi     != null)
+  const hasMACD   = (indicators.macd   !== false) && segmented.some(d => d.macd    != null)
+  const hasBB     = (indicators.bb     !== false) && segmented.some(d => d.upper   != null)
+  const hasFastMA = (indicators.fastMa !== false) && segmented.some(d => d.fast_ma != null)
+  const hasSlowMA = (indicators.slowMa !== false) && segmented.some(d => d.slow_ma != null)
 
   const oscHeight = 90
   const gradId = `1d-grad-${isUp ? 'up' : 'dn'}`
 
+  const offHourLine = { strokeWidth: 1, stroke: '#475569', strokeDasharray: '3 2' }
+
   const xAxisProps = {
     dataKey: 'date',
-    ticks: hourTicks,
+    ticks: allTicks,
     tickFormatter: formatTick,
     tick: { fill: '#64748b', fontSize: 10 },
     tickLine: false,
@@ -134,7 +146,7 @@ function OneDayChart({ data, height, indicators, prevClose }) {
     <div className="space-y-0.5">
       {/* Price + Volume panel */}
       <ResponsiveContainer width="100%" height={height}>
-        <ComposedChart data={enriched} margin={{ top: 8, right: 64, left: 0, bottom: 0 }}>
+        <ComposedChart data={segmented} margin={{ top: 8, right: 64, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%"  stopColor={fillColor} stopOpacity={0.25} />
@@ -156,14 +168,14 @@ function OneDayChart({ data, height, indicators, prevClose }) {
           <YAxis yAxisId="vol" orientation="left" domain={[0, maxVol * 5]} hide />
           <Tooltip content={<OneDayTooltip prevClose={prevClose} />} />
 
-          {/* Off-hours shading */}
+          {/* Subtle off-hours background tint */}
           {sessionAreas.map((a, i) => (
-            <ReferenceArea key={`off-${i}`} yAxisId="price" x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.7} />
+            <ReferenceArea key={`off-${i}`} yAxisId="price" x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
           ))}
 
-          {/* Day separator lines */}
+          {/* Day separator */}
           {dayLines.map((x, i) => (
-            <ReferenceLine key={`day-${i}`} yAxisId="price" x={x} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            <ReferenceLine key={`day-${i}`} yAxisId="price" x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
           ))}
 
           {/* Previous close reference */}
@@ -178,22 +190,32 @@ function OneDayChart({ data, height, indicators, prevClose }) {
             />
           )}
 
-          <Bar yAxisId="vol" dataKey="volume" fill="#475569" opacity={0.35} isAnimationActive={false} />
+          <Bar yAxisId="vol" dataKey="volume" fill="#475569" opacity={0.3} isAnimationActive={false} />
+
+          {/* Gradient fill under regular session only */}
           <Area
             yAxisId="price"
             type="monotone"
-            dataKey="close"
+            dataKey="regularClose"
             stroke="none"
             fill={`url(#${gradId})`}
             dot={false}
+            connectNulls={false}
             isAnimationActive={false}
             legendType="none"
             tooltipType="none"
           />
-          <Line yAxisId="price" type="monotone" dataKey="close" stroke={lineColor} strokeWidth={1.5} dot={false} isAnimationActive={false} name="Close" />
-          {hasBB && <Line yAxisId="price" type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
-          {hasBB && <Line yAxisId="price" type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
-          {hasBB && <Line yAxisId="price" type="monotone" dataKey="mid"   stroke={BB_MID}   strokeWidth={0.8} strokeDasharray="2 2" dot={false} isAnimationActive={false} />}
+
+          {/* Pre-market: muted dashed line */}
+          <Line yAxisId="price" type="monotone" dataKey="preClose"     {...offHourLine} dot={false} connectNulls={false} isAnimationActive={false} name="Pre" />
+          {/* Regular session: full-color solid line */}
+          <Line yAxisId="price" type="monotone" dataKey="regularClose" stroke={lineColor} strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} name="Close" />
+          {/* Post-market: muted dashed line */}
+          <Line yAxisId="price" type="monotone" dataKey="postClose"    {...offHourLine} dot={false} connectNulls={false} isAnimationActive={false} name="After" />
+
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="upper"   stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="lower"   stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="mid"     stroke={BB_MID}   strokeWidth={0.8} strokeDasharray="2 2" dot={false} isAnimationActive={false} />}
           {hasFastMA && <Line yAxisId="price" type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
           {hasSlowMA && <Line yAxisId="price" type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
         </ComposedChart>
@@ -202,16 +224,16 @@ function OneDayChart({ data, height, indicators, prevClose }) {
       {/* RSI panel */}
       {hasRSI && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart data={enriched} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
             <Tooltip formatter={(v) => v?.toFixed(2)} />
             {sessionAreas.map((a, i) => (
-              <ReferenceArea key={`off-r-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.7} />
+              <ReferenceArea key={`off-r-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
             ))}
             {dayLines.map((x, i) => (
-              <ReferenceLine key={`day-r-${i}`} x={x} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+              <ReferenceLine key={`day-r-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
             <ReferenceLine y={70} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={30} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
@@ -223,16 +245,16 @@ function OneDayChart({ data, height, indicators, prevClose }) {
       {/* MACD panel */}
       {hasMACD && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart data={enriched} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => v?.toFixed(2)} />
             <Tooltip formatter={(v) => v?.toFixed(4)} />
             {sessionAreas.map((a, i) => (
-              <ReferenceArea key={`off-m-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.7} />
+              <ReferenceArea key={`off-m-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
             ))}
             {dayLines.map((x, i) => (
-              <ReferenceLine key={`day-m-${i}`} x={x} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+              <ReferenceLine key={`day-m-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.7} />
             <Bar dataKey="macd_hist" fill="#4ade80" opacity={0.5} isAnimationActive={false} label={false} />
@@ -301,8 +323,8 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
     </div>
   )
 
-  // 1D gets its own Yahoo-style chart
-  if (period === '1d') {
+  // 1D and 2D get the Yahoo-style pre/regular/post chart
+  if (period === '1d' || period === '2d') {
     return <OneDayChart data={data} height={height} indicators={indicators} prevClose={prevClose} />
   }
 
