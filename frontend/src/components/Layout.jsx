@@ -6,6 +6,7 @@ import {
   BoltIcon,
   CodeBracketIcon,
 } from '@heroicons/react/24/outline'
+import LivePriceTicker from './LivePriceTicker'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: ChartBarIcon, end: true },
@@ -62,6 +63,8 @@ export default function Layout({ children }) {
       <main className="flex-1 overflow-auto bg-dark-900">
         {children}
       </main>
+
+      <LivePriceTicker />
     </div>
   )
 }
