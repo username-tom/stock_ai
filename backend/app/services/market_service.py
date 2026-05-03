@@ -34,10 +34,25 @@ _HEADERS = {
 
 _YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 
-# period string → Yahoo "range" param
-_PERIOD_MAP = {
-    "1d": "1d", "5d": "5d", "1mo": "1mo", "3mo": "3mo",
-    "6mo": "6mo", "1y": "1y", "2y": "2y", "5y": "5y", "10y": "10y",
+# period string → Yahoo "range" param ("2w" fetched as 1mo then trimmed)
+_PERIOD_RANGE_MAP: dict[str, str] = {
+    "1d":  "1d",  "5d":  "5d",  "2w":  "1mo",
+    "1mo": "1mo", "3mo": "3mo", "6mo": "6mo",
+    "1y":  "1y",  "2y":  "2y",  "5y":  "5y",  "max": "max",
+}
+
+# period string → Yahoo "interval" param
+_PERIOD_INTERVAL_MAP: dict[str, str] = {
+    "1d":  "5m",  "5d":  "15m", "2w":  "1d",
+    "1mo": "1d",  "3mo": "1d",  "6mo": "1d",
+    "1y":  "1d",  "2y":  "1d",  "5y":  "1wk", "max": "1mo",
+}
+
+# History TTL per period (seconds)
+_HISTORY_TTL_MAP: dict[str, float] = {
+    "1d": 60, "5d": 300, "2w": 300,
+    "1mo": 900, "3mo": 900, "6mo": 900,
+    "1y": 900, "2y": 900, "5y": 900, "max": 900,
 }
 
 # ---------------------------------------------------------------------------
@@ -64,8 +79,24 @@ class _TTLCache:
 
 _cache = _TTLCache()
 
-QUOTE_TTL   = 60      # seconds
-HISTORY_TTL = 900     # 15 minutes
+QUOTE_TTL = 60  # seconds
+
+# ---------------------------------------------------------------------------
+# Persistent HTTP client – reuses connections for lower latency
+# ---------------------------------------------------------------------------
+
+_http_client: httpx.AsyncClient | None = None
+
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        _http_client = httpx.AsyncClient(
+            headers=_HEADERS,
+            timeout=15,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _http_client
 
 # ---------------------------------------------------------------------------
 # Yahoo Finance v8 helpers
@@ -75,10 +106,10 @@ async def _yf_chart(symbol: str, range_: str = "5d", interval: str = "1d") -> di
     """Fetch the raw Yahoo Finance v8 chart JSON for *symbol*."""
     url = f"{_YF_BASE}/{symbol.upper()}"
     params = {"interval": interval, "range": range_}
-    async with httpx.AsyncClient(headers=_HEADERS, timeout=15, follow_redirects=True) as client:
-        r = await client.get(url, params=params)
-        r.raise_for_status()
-        data = r.json()
+    client = _get_http_client()
+    r = await client.get(url, params=params)
+    r.raise_for_status()
+    data = r.json()
 
     err = data.get("chart", {}).get("error")
     if err:
@@ -146,16 +177,30 @@ async def get_bulk_quotes(symbols: list[str]) -> dict[str, dict]:
     return {sym: data for sym, data in results if data is not None}
 
 
+def _fmt_ts(ts: int, intraday: bool, period: str) -> str:
+    """Format a Unix timestamp to a display string for the chart X-axis."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    if not intraday:
+        return dt.strftime("%Y-%m-%d")
+    if period == "1d":
+        return dt.strftime("%H:%M")
+    return dt.strftime("%m/%d %H:%M")
+
+
 async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     """Return OHLCV records list for *symbol*, served from cache when fresh."""
     sym = symbol.upper()
     cache_key = f"history:{sym}:{period}"
-    cached = await _cache.get(cache_key, HISTORY_TTL)
+    ttl = _HISTORY_TTL_MAP.get(period, 900)
+    cached = await _cache.get(cache_key, ttl)
     if cached is not None:
         return cached
 
-    yf_range = _PERIOD_MAP.get(period, "1y")
-    chart = await _yf_chart(sym, range_=yf_range, interval="1d")
+    yf_range    = _PERIOD_RANGE_MAP.get(period, "1y")
+    yf_interval = _PERIOD_INTERVAL_MAP.get(period, "1d")
+    intraday    = "m" in yf_interval or "h" in yf_interval
+
+    chart = await _yf_chart(sym, range_=yf_range, interval=yf_interval)
 
     timestamps = chart.get("timestamp", [])
     indicators  = chart.get("indicators", {}).get("quote", [{}])[0]
@@ -171,7 +216,7 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
         if c is None:
             continue
         records.append({
-            "date":   datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d"),
+            "date":   _fmt_ts(ts, intraday, period),
             "open":   round(float(opens[i]),   4) if i < len(opens)   and opens[i]   is not None else None,
             "high":   round(float(highs[i]),   4) if i < len(highs)   and highs[i]   is not None else None,
             "low":    round(float(lows[i]),    4) if i < len(lows)    and lows[i]    is not None else None,
@@ -181,6 +226,10 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
 
     if not records:
         raise ValueError(f"No OHLCV data returned for {sym}")
+
+    # "2w" is fetched as 1mo daily – trim to the last 14 trading days
+    if period == "2w":
+        records = records[-14:]
 
     await _cache.set(cache_key, records)
     return records

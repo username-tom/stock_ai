@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getBulkQuotes, getHistory, getQuote, getMovers, searchSymbols } from '../api/client'
 import SubplotChart from './charts/SubplotChart'
@@ -166,10 +166,33 @@ const INDICATOR_OPTIONS = [
   { key: 'macd',   label: 'MACD' },
 ]
 
+/**
+ * Returns true when the US equity market is likely open.
+ * Uses market_state from a quotes map when available; otherwise falls back
+ * to a clock-based check (Mon–Fri 09:30–16:00 America/New_York).
+ */
+function deriveMarketOpen(quotesMap) {
+  if (quotesMap) {
+    const states = Object.values(quotesMap).map(q => q?.market_state)
+    if (states.some(s => s === 'REGULAR')) return true
+    if (states.some(s => s === 'PRE' || s === 'POST' || s === 'CLOSED')) return false
+  }
+  return isMarketHours()
+}
+
+function isMarketHours() {
+  const now = new Date()
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+  const day = et.getDay()          // 0 Sun … 6 Sat
+  if (day === 0 || day === 6) return false
+  const mins = et.getHours() * 60 + et.getMinutes()
+  return mins >= 9 * 60 + 30 && mins < 16 * 60
+}
+
 export default function Dashboard() {
   const [watchlist, setWatchlist] = useState(loadWatchlist)
   const [chartSymbol, setChartSymbol] = useState(() => loadWatchlist()[0] ?? 'AAPL')
-  const [chartPeriod, setChartPeriod] = useState('1y')
+  const [chartPeriod, setChartPeriod] = useState('1d')
   const [indicators, setIndicators] = useState({ bb: true, fastMa: true, slowMa: true, rsi: true, macd: true })
   const [editing, setEditing] = useState(false)
   const [addInput, setAddInput] = useState('')
@@ -244,16 +267,37 @@ export default function Dashboard() {
     updateWatchlist(next)
   }
 
+  // Fetch quotes first so market_state is available for interval decisions
   const { data: quotesMap, isLoading: quotesLoading } = useQuery({
     queryKey: ['bulk-quotes', watchlist],
     queryFn: () => getBulkQuotes(watchlist),
-    refetchInterval: 60_000,
+    staleTime: 45_000,
+    // Functional form: re-evaluated after every fetch with the fresh data
+    refetchInterval: (query) => deriveMarketOpen(query.state.data) ? 60_000 : 5 * 60_000,
     enabled: watchlist.length > 0,
   })
+
+  // Re-check market hours every minute so intervals switch at open / close
+  const [clockTick, setClockTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setClockTick(t => t + 1), 60_000)
+    return () => clearInterval(id)
+  }, [])
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const marketOpen = useMemo(() => deriveMarketOpen(quotesMap), [quotesMap, clockTick])
+
+  // History: intraday/short periods track market state;
+  //          multi-month+ periods refresh every 15 min regardless.
+  const shortPeriod = chartPeriod === '1d' || chartPeriod === '5d' || chartPeriod === '2w'
+  const histRefetchInterval = shortPeriod ? (marketOpen ? 60_000 : 5 * 60_000) : 15 * 60_000
+  const histStaleTime       = shortPeriod ? (marketOpen ? 55_000 : 4 * 60_000) : 840_000
 
   const { data: histData, isLoading: histLoading } = useQuery({
     queryKey: ['history', chartSymbol, chartPeriod],
     queryFn: () => getHistory(chartSymbol, chartPeriod),
+    staleTime: histStaleTime,
+    refetchInterval: histRefetchInterval,
     enabled: !!chartSymbol,
   })
 
@@ -405,17 +449,28 @@ export default function Dashboard() {
             <h2 className="font-semibold text-slate-200">{chartSymbol} Price Chart</h2>
           </div>
           <div className="flex gap-1">
-            {['1mo', '3mo', '6mo', '1y', '2y'].map(p => (
+            {[
+              { key: '1d',  label: '1D' },
+              { key: '5d',  label: '5D' },
+              { key: '2w',  label: '2W' },
+              { key: '1mo', label: '1M' },
+              { key: '3mo', label: '3M' },
+              { key: '6mo', label: '6M' },
+              { key: '1y',  label: '1Y' },
+              { key: '2y',  label: '2Y' },
+              { key: '5y',  label: '5Y' },
+              { key: 'max', label: 'Max' },
+            ].map(p => (
               <button
-                key={p}
-                onClick={() => setChartPeriod(p)}
+                key={p.key}
+                onClick={() => setChartPeriod(p.key)}
                 className={`px-2 py-1 text-xs rounded-md transition-colors ${
-                  chartPeriod === p
+                  chartPeriod === p.key
                     ? 'bg-emerald-600 text-white'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
                 }`}
               >
-                {p}
+                {p.label}
               </button>
             ))}
           </div>
