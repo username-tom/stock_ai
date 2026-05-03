@@ -279,9 +279,10 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
                         reason = "macd_exit"
 
             # ── 3. Fallback: any non-MACD sell condition fires ───────────────
-            if not sell and (rsi_sell[i] or bb_sell[i] or ma_sell[i]):
-                sell   = True
-                reason = "fallback_exit"
+            # (disabled)
+            # if not sell and (rsi_sell[i] or bb_sell[i] or ma_sell[i]):
+            #     sell   = True
+            #     reason = "fallback_exit"
 
             if sell:
                 signals[i]       = -1

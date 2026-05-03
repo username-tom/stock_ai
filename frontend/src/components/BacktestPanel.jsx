@@ -207,15 +207,15 @@ export default function BacktestPanel() {
   const startProgress = (start, end) => {
     setProgress(0)
     const tradingDays = estimateTradingDays(start, end)
-    // Phase 1: 0 → 25%, speed proportional to date range (slowed by half vs before)
-    const phase1TickMs = Math.min(160, Math.max(16, tradingDays * 32 / 25))
+    // Phase 1: 0 → 25%, speed proportional to date range
+    const phase1TickMs = Math.min(600, Math.max(80, tradingDays * 120 / 25))
     let current = 0
     let phase = 1
     clearInterval(progressRef.current)
     progressRef.current = setInterval(() => {
       current += 1
       if (phase === 1 && current >= 25) {
-        // Switch to phase 2: 25 → 99% over ~4 minutes (14400 ms / 74 steps ≈ 195 ms/tick)
+        // Switch to phase 2: 25 → 99% over ~10 minutes (600000 ms / 74 steps ≈ 8100 ms/tick)
         phase = 2
         clearInterval(progressRef.current)
         progressRef.current = setInterval(() => {
@@ -223,7 +223,7 @@ export default function BacktestPanel() {
           const next = Math.min(current, 99)
           setProgress(next)
           if (next >= 99) clearInterval(progressRef.current)
-        }, 14400 / 74)
+        }, 600000 / 74)
         return
       }
       setProgress(Math.min(current, 25))
