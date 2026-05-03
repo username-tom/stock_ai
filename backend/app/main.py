@@ -22,6 +22,8 @@ async def lifespan(app: FastAPI):
     logger.info("Initialising database …")
     await init_db()
     logger.info("Database ready.")
+    market_service._cache.load_from_disk()
+    logger.info("Market disk cache loaded.")
     asyncio.create_task(market_service.pre_warm(DASHBOARD_SYMBOLS, periods=["1d", "1y"]))
     asyncio.create_task(symbol_registry.ensure_registry())
     asyncio.create_task(_daily_registry_refresh())

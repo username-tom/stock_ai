@@ -36,6 +36,8 @@ export const getTradeHistory = (limit = 100) =>
 export const getScripts = () => api.get('/scripts').then(r => r.data)
 export const getScript = (id) => api.get(`/scripts/${id}`).then(r => r.data)
 export const getScriptTemplate = () => api.get('/scripts/template').then(r => r.data)
+export const getScriptStorageInfo = () => api.get('/scripts/storage-info').then(r => r.data)
+export const getBuiltinTemplates = () => api.get('/scripts/builtin-templates').then(r => r.data)
 export const createScript = (payload) => api.post('/scripts', payload).then(r => r.data)
 export const updateScript = (id, payload) => api.put(`/scripts/${id}`, payload).then(r => r.data)
 export const deleteScript = (id) => api.delete(`/scripts/${id}`).then(r => r.data)

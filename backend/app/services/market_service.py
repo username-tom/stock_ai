@@ -4,14 +4,20 @@ Bypasses the yfinance library (which sends headers Yahoo blocks from Docker)
 and calls the JSON chart endpoint with a browser User-Agent.  Results are
 kept in an in-memory TTL cache to minimise outbound requests and give the
 dashboard instant responses after the first load.
+
+A disk cache (backend/data/market_cache/) is also maintained so that the
+in-memory cache survives container restarts — the last known values are
+served immediately on startup while fresh data is fetched in the background.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import zoneinfo
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -57,13 +63,40 @@ _HISTORY_TTL_MAP: dict[str, float] = {
 }
 
 # ---------------------------------------------------------------------------
-# In-memory TTL cache
+# Disk + in-memory TTL cache
 # ---------------------------------------------------------------------------
+
+_DISK_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "market_cache"
+
+def _key_to_filename(key: str) -> Path:
+    """Convert a cache key like 'quote:AAPL' to a safe filename."""
+    safe = key.replace(":", "__").replace("/", "_")
+    return _DISK_CACHE_DIR / f"{safe}.json"
+
 
 class _TTLCache:
     def __init__(self) -> None:
         self._store: dict[str, tuple[Any, float]] = {}
         self._lock = asyncio.Lock()
+
+    def load_from_disk(self) -> None:
+        """Load all persisted cache entries from disk into memory at startup."""
+        if not _DISK_CACHE_DIR.exists():
+            return
+        now_wall = time.time()
+        now_mono = time.monotonic()
+        for path in _DISK_CACHE_DIR.glob("*.json"):
+            try:
+                entry = json.loads(path.read_text(encoding="utf-8"))
+                key = entry["key"]
+                value = entry["value"]
+                saved_wall = entry["wall_ts"]
+                # Convert the wall-clock save time to an equivalent monotonic timestamp
+                age = now_wall - saved_wall          # seconds elapsed since save
+                mono_ts = now_mono - age             # equivalent monotonic point in the past
+                self._store[key] = (value, mono_ts)
+            except Exception:
+                pass  # corrupt file — ignore
 
     async def get(self, key: str, ttl: float) -> Any | None:
         async with self._lock:
@@ -76,6 +109,17 @@ class _TTLCache:
     async def set(self, key: str, value: Any) -> None:
         async with self._lock:
             self._store[key] = (value, time.monotonic())
+        # Persist to disk (non-blocking)
+        asyncio.get_event_loop().run_in_executor(None, self._write_disk, key, value)
+
+    def _write_disk(self, key: str, value: Any) -> None:
+        try:
+            _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            path = _key_to_filename(key)
+            payload = {"key": key, "value": value, "wall_ts": time.time()}
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Disk cache write failed for %s: %s", key, exc)
 
 
 _cache = _TTLCache()

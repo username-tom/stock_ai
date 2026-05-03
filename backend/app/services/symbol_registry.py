@@ -3,6 +3,7 @@ Symbol registry – downloads and caches trading symbol listings from public sou
 
 Sources (free / no auth required):
   • NASDAQ Trader FTP  – covers NASDAQ, NYSE, NYSE MKT, NYSE ARCA, BATS
+    (https://ftp.nasdaqtrader.com/SymbolDirectory/)
 
 The registry is stored as  backend/data/symbol_registry.json  and refreshed
 automatically on startup if the file is missing or older than 24 h.
@@ -41,8 +42,8 @@ _HEADERS = {
     )
 }
 
-_NASDAQ_URL = "https://ftp.nasdaqlisted.com/SymbolDirectory/nasdaqlisted.txt"
-_OTHER_URL  = "https://ftp.nasdaqlisted.com/SymbolDirectory/otherlisted.txt"
+_NASDAQ_URL = "https://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt"
+_OTHER_URL  = "https://ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt"
 
 _EXCH_CODE: dict[str, str] = {
     "A": "NYSE American",

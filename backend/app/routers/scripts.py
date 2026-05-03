@@ -1,16 +1,23 @@
 """CRUD endpoints for custom Python trading scripts."""
 from __future__ import annotations
 
+import re
+from pathlib import Path
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.config import settings
 from app.database import get_db
 from app.models.custom_script import CustomScript
 from app.services.script_executor import DEFAULT_SCRIPT, validate_script
 
 router = APIRouter(prefix="/api/scripts", tags=["scripts"])
+
+_TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 
 
 # --------------------------------------------------------------------------- #
@@ -52,6 +59,35 @@ def _serialize(s: CustomScript) -> dict:
 async def get_template():
     """Return the default script template."""
     return {"template": DEFAULT_SCRIPT}
+
+
+@router.get("/storage-info")
+async def get_storage_info():
+    """Return the resolved path of the database file that stores custom scripts."""
+    raw_url = settings.DATABASE_URL  # e.g. sqlite+aiosqlite:////app/data/stock_ai.db
+    parsed = urlparse(raw_url)
+    db_path = parsed.path  # absolute path portion after the scheme
+    return {"db_path": db_path}
+
+
+@router.get("/builtin-templates")
+async def list_builtin_templates():
+    """Return all built-in strategy templates from the templates directory."""
+    templates = []
+    for path in sorted(_TEMPLATES_DIR.glob("*.py")):
+        code = path.read_text(encoding="utf-8")
+        # Extract the module-level docstring as the description
+        match = re.match(r'"""(.*?)"""', code, re.DOTALL)
+        description = match.group(1).strip() if match else ""
+        # Use the first non-empty line of the docstring as the short description
+        short_desc = next((l.strip() for l in description.splitlines() if l.strip()), "")
+        templates.append({
+            "name": path.stem.replace("_", " ").title().replace(" Template", ""),
+            "filename": path.name,
+            "description": short_desc,
+            "script_code": code,
+        })
+    return {"templates": templates}
 
 
 @router.get("")
@@ -137,13 +173,10 @@ async def delete_script(script_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
 
 
-@router.post("/{script_id}/validate")
-async def validate_script_endpoint(script_id: int, db: AsyncSession = Depends(get_db)):
-    """Validate the syntax and structure of a saved script."""
-    script = await db.get(CustomScript, script_id)
-    if not script:
-        raise HTTPException(status_code=404, detail="Script not found.")
-    result = validate_script(script.script_code)
+@router.post("/validate")
+async def validate_script_code(body: ScriptCreate):
+    """Validate script code without saving it."""
+    result = validate_script(body.script_code)
     # Return only known-safe fields to avoid leaking internal paths
     return {
         "valid": result["valid"],
@@ -152,10 +185,13 @@ async def validate_script_endpoint(script_id: int, db: AsyncSession = Depends(ge
     }
 
 
-@router.post("/validate")
-async def validate_script_code(body: ScriptCreate):
-    """Validate script code without saving it."""
-    result = validate_script(body.script_code)
+@router.post("/{script_id}/validate")
+async def validate_script_endpoint(script_id: int, db: AsyncSession = Depends(get_db)):
+    """Validate the syntax and structure of a saved script."""
+    script = await db.get(CustomScript, script_id)
+    if not script:
+        raise HTTPException(status_code=404, detail="Script not found.")
+    result = validate_script(script.script_code)
     # Return only known-safe fields to avoid leaking internal paths
     return {
         "valid": result["valid"],
