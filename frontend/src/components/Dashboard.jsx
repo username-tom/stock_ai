@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getBulkQuotes, getHistory } from '../api/client'
 import { useMarketOpen } from '../hooks/useMarketOpen'
@@ -20,8 +21,18 @@ export default function Dashboard() {
   const watchlistState = useWatchlist()
   const { watchlist, updateWatchlist } = watchlistState
 
-  const [chartSymbol, setChartSymbol] = useState(() => watchlist[0] ?? 'AAPL')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [chartSymbol, setChartSymbol] = useState(() => searchParams.get('symbol') || watchlist[0] || 'AAPL')
   const [chartPeriod, setChartPeriod] = useState('1d')
+
+  // Consume ?symbol= param on navigation from sandbox
+  useEffect(() => {
+    const sym = searchParams.get('symbol')
+    if (sym) {
+      setChartSymbol(sym)
+      setSearchParams({}, { replace: true })
+    }
+  }, [searchParams])
   const [indicators, setIndicators] = useState({ bb: true, fastMa: true, slowMa: true, rsi: true, macd: true })
   const [activeTab, setActiveTab] = useState('overview')
 

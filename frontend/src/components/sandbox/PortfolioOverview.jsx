@@ -184,6 +184,43 @@ export default function PortfolioOverview({
         </div>
       )}
 
+      {/* Unrealised P&L by position */}
+      {positions.some(p => p.shares > 0) && (() => {
+        const unrealData = positions
+          .filter(p => p.shares > 0)
+          .map(p => {
+            const mp = quotes[p.symbol]?.last_price ?? p.avg_cost
+            const unreal = (mp - p.avg_cost) * p.shares
+            return { symbol: p.symbol, value: parseFloat(unreal.toFixed(2)) }
+          })
+          .sort((a, b) => b.value - a.value)
+        return (
+          <div className="card">
+            <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Unrealised Gain / Loss by Position</div>
+            <div style={{ height: Math.max(160, unrealData.length * 40 + 24) }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={unrealData} layout="vertical" margin={{ top: 0, right: 24, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+                  <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
+                    tickFormatter={v => `$${v >= 0 ? '+' : ''}${v.toFixed(0)}`} />
+                  <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }} tickLine={false} axisLine={false} width={46} />
+                  <Tooltip
+                    contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
+                    labelStyle={{ color: '#94a3b8' }}
+                    formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Unrealised P&L']}
+                  />
+                  <Bar dataKey="value" name="Unrealised P&L" radius={[0, 3, 3, 0]}>
+                    {unrealData.map(entry => (
+                      <Cell key={entry.symbol} fill={entry.value >= 0 ? '#10b981' : '#ef4444'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )
+      })()}
+
       {/* Analytics Charts */}
       {analytics && analytics.total_trades > 0 && (
         <div className="space-y-4">

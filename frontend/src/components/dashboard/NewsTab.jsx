@@ -1,7 +1,8 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { NewspaperIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/solid'
 import { getNews } from '../../api/client'
+import { useMarketOpen } from '../../hooks/useMarketOpen'
 
 const INITIAL_VISIBLE = 50
 const PAGE_SIZE = 25
@@ -107,13 +108,30 @@ function LoadMoreArrow({ onClick }) {
 }
 
 export default function NewsTab({ watchlist }) {
+  const marketOpen = useMarketOpen()
+  const queryClient = useQueryClient()
+  const [forceLoading, setForceLoading] = useState(false)
+
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['news', watchlist],
     queryFn: () => getNews(watchlist),
-    refetchInterval: 15 * 60_000,
+    staleTime: 0,
+    refetchInterval: marketOpen ? 30 * 60_000 : 60 * 60_000,
     refetchIntervalInBackground: true,
     enabled: watchlist.length > 0,
   })
+
+  const handleRefresh = async () => {
+    setForceLoading(true)
+    try {
+      const fresh = await getNews(watchlist, true)
+      queryClient.setQueryData(['news', watchlist], fresh)
+    } catch {
+      refetch()
+    } finally {
+      setForceLoading(false)
+    }
+  }
 
   const [visibleWatchlist, setVisibleWatchlist] = useState(INITIAL_VISIBLE)
   const [visibleMarket, setVisibleMarket] = useState(INITIAL_VISIBLE)
@@ -163,12 +181,13 @@ export default function NewsTab({ watchlist }) {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-slate-500">{asOf ? `As of ${asOf}` : 'Refreshes every 15 min'}</p>
+        <p className="text-xs text-slate-500">{asOf ? `As of ${asOf}` : marketOpen ? 'Refreshes every 30 min' : 'Refreshes every hour'}</p>
         <button
-          onClick={() => refetch()}
-          className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 px-2 py-0.5 rounded-md transition-colors"
+          onClick={handleRefresh}
+          disabled={forceLoading}
+          className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 px-2 py-0.5 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Refresh
+          {forceLoading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
 

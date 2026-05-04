@@ -1,9 +1,11 @@
 import {
   TrashIcon, PencilSquareIcon, CheckIcon, XMarkIcon,
   ArrowUpIcon, ArrowDownIcon, BoltIcon, PlayIcon, StopCircleIcon,
-  ClockIcon, SignalIcon, ExclamationTriangleIcon,
+  ClockIcon, SignalIcon, ExclamationTriangleIcon, ArrowTopRightOnSquareIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
+import { useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { getScripts, getHistory } from '../../api/client'
 import { fmt, fmtMoney, stratLabel } from './sandboxHelpers'
 import StrategySelector from './StrategySelector'
@@ -42,7 +44,9 @@ export default function PositionDetail({
   setTradeMsg,
   handleTrade,
   tradeMut,
+  accountData,
 }) {
+  const navigate = useNavigate()
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
 
@@ -55,6 +59,27 @@ export default function PositionDetail({
   })
   const chartData = histData?.data ?? []
   const prevClose = histData?.prev_close ?? null
+
+  // Auto-update trade price when live quote changes
+  useEffect(() => {
+    if (selectedPrice > 0) {
+      setTradeForm(f => ({ ...f, price: selectedPrice.toFixed(2) }))
+    }
+  }, [selectedPrice])
+
+  // Undeployed cash within this position's allocation
+  const positionCashRemaining = selectedPos
+    ? Math.max(0, selectedPos.allocated_funds - selectedPos.avg_cost * selectedPos.shares)
+    : 0
+
+  // Fill quantity field with max shares buyable from available position cash
+  function fillMaxShares() {
+    const price = parseFloat(tradeForm.price) || selectedPrice
+    if (price > 0 && positionCashRemaining > 0) {
+      const maxShares = Math.floor((positionCashRemaining / price) * 10000) / 10000
+      setTradeForm(f => ({ ...f, quantity: maxShares.toFixed(4) }))
+    }
+  }
 
   function getScriptName(strategyName) {
     if (!strategyName?.startsWith('custom:')) return null
@@ -126,6 +151,9 @@ export default function PositionDetail({
               </button>
             </div>
           )}
+          <div className="text-xs text-slate-500 mt-1">
+            Cash left: <span className={`font-semibold ${positionCashRemaining > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{fmtMoney(positionCashRemaining)}</span>
+          </div>
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Shares Held</div>
@@ -148,6 +176,14 @@ export default function PositionDetail({
       <div className="card">
         <div className="flex items-center justify-between mb-3">
           <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Today — 1D</h3>
+          <button
+            title={`Open ${selectedSymbol} in dashboard`}
+            onClick={() => navigate(`/?symbol=${selectedSymbol}`)}
+            className="flex items-center gap-1 text-xs text-slate-500 hover:text-amber-400 transition-colors"
+          >
+            <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
+            Dashboard
+          </button>
         </div>
         {chartData.length > 0
           ? <CandlestickChart data={chartData} prevClose={prevClose} height={200} />
@@ -294,8 +330,15 @@ export default function PositionDetail({
           </div>
           <div>
             <label className="label">Quantity</label>
-            <input className="input w-28" type="number" min="0.0001" step="0.0001" placeholder="Shares"
-              value={tradeForm.quantity} onChange={e => setTradeForm(f => ({ ...f, quantity: e.target.value }))} required />
+            <div className="flex items-center gap-1">
+              <input className="input w-28" type="number" min="0.0001" step="0.0001" placeholder="Shares"
+                value={tradeForm.quantity} onChange={e => setTradeForm(f => ({ ...f, quantity: e.target.value }))} required />
+              {tradeForm.side === 'BUY' && positionCashRemaining > 0 && (
+                <button type="button" title={`Max shares from ${fmtMoney(positionCashRemaining)} cash`}
+                  className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-800/40 rounded px-1.5 py-1 whitespace-nowrap"
+                  onClick={fillMaxShares}>Max</button>
+              )}
+            </div>
           </div>
           <div>
             <label className="label">Price ($)</label>

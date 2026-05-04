@@ -61,10 +61,13 @@ async def search_symbols(
 
 
 @router.get("/movers")
-async def get_movers(top_n: int = Query(default=10, ge=1, le=25)):
+async def get_movers(
+    top_n: int = Query(default=10, ge=1, le=25),
+    force: bool = Query(default=False, description="Bypass cache and force a fresh fetch"),
+):
     """Return top daily gainers and losers from a liquid-stock universe (cached 5 min)."""
     try:
-        return await market_service.get_movers(top_n)
+        return await market_service.get_movers(top_n, force_refresh=force)
     except Exception as exc:
         logger.error("movers failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -73,13 +76,14 @@ async def get_movers(top_n: int = Query(default=10, ge=1, le=25)):
 @router.get("/news")
 async def get_news(
     symbols: str = Query(..., description="Comma-separated watchlist symbols, e.g. AAPL,MSFT"),
+    force: bool = Query(default=False, description="Bypass cache and force a fresh fetch"),
 ):
     """Return merged financial news for watchlist symbols + general market topics (cached 15 min)."""
     sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     if not sym_list:
         raise HTTPException(status_code=422, detail="No symbols provided.")
     try:
-        return await market_service.get_news(sym_list)
+        return await market_service.get_news(sym_list, force_refresh=force)
     except Exception as exc:
         logger.error("news failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -88,11 +92,12 @@ async def get_news(
 @router.get("/earnings")
 async def get_earnings(
     symbols: str = Query(default="", description="Comma-separated watchlist symbols to prioritise"),
+    force: bool = Query(default=False, description="Bypass cache and force a fresh fetch"),
 ):
     """Return upcoming earnings for a broad universe, watchlist symbols sorted first (cached 15 min)."""
     watchlist = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     try:
-        return await market_service.get_earnings(watchlist)
+        return await market_service.get_earnings(watchlist, force_refresh=force)
     except Exception as exc:
         logger.error("earnings failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))

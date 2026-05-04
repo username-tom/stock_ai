@@ -35,6 +35,12 @@ export default function SandboxPanel() {
   const [allocInput, setAllocInput] = useState('')
   const [tradeForm, setTradeForm] = useState({ side: 'BUY', quantity: '', price: '', reason: '' })
   const [tradeMsg, setTradeMsg] = useState(null)
+
+  // Reset per-trade fields when switching symbols so quantity doesn't bleed across positions
+  useEffect(() => {
+    setTradeForm(f => ({ ...f, quantity: '', price: '', reason: '' }))
+    setTradeMsg(null)
+  }, [selectedSymbol])
   const [exportLoading, setExportLoading] = useState(false)
   const [importMsg, setImportMsg] = useState(null)
   const [resetConfirm, setResetConfirm] = useState(false)
@@ -382,6 +388,7 @@ export default function SandboxPanel() {
               selectedPrice={selectedPrice}
               selectedMarketValue={selectedMarketValue}
               selectedUnrealised={selectedUnrealised}
+              accountData={accountData}
               quotes={quotes}
               trades={trades}
               engineState={engineState}

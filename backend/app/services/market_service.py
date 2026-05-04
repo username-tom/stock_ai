@@ -131,6 +131,8 @@ QUOTE_TTL = 60  # seconds
 # ---------------------------------------------------------------------------
 
 _http_client: httpx.AsyncClient | None = None
+_yf_crumb: str | None = None
+_yf_crumb_lock = asyncio.Lock()
 
 def _get_http_client() -> httpx.AsyncClient:
     global _http_client
@@ -142,6 +144,29 @@ def _get_http_client() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
     return _http_client
+
+async def _get_yf_crumb() -> str:
+    """Return a valid Yahoo Finance crumb, initialising the cookie session if needed."""
+    global _yf_crumb
+    if _yf_crumb:
+        return _yf_crumb
+    async with _yf_crumb_lock:
+        if _yf_crumb:
+            return _yf_crumb
+        client = _get_http_client()
+        # Establish a cookie session with Yahoo Finance
+        await client.get("https://finance.yahoo.com", headers={
+            **_HEADERS, "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"
+        })
+        r = await client.get(
+            "https://query1.finance.yahoo.com/v1/test/getcrumb",
+            headers={**_HEADERS, "Accept": "*/*"},
+        )
+        crumb = r.text.strip()
+        if not crumb or "{" in crumb:
+            raise RuntimeError(f"Failed to obtain Yahoo Finance crumb: {crumb!r}")
+        _yf_crumb = crumb
+        return _yf_crumb
 
 # ---------------------------------------------------------------------------
 # Yahoo Finance v8 helpers
@@ -290,6 +315,12 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
             if day not in days_seen:
                 days_seen.append(day)
         keep = set(days_seen[-n_days:])
+        # Derive prev_close from the actual last bar of the trading day just
+        # before the displayed window – far more accurate than the meta value
+        # which reflects the close before the entire 5d fetch range.
+        prev_day_records = [r for r in records if r["date"][:5] not in keep]
+        if prev_day_records:
+            prev_close = prev_day_records[-1]["close"]
         records = [r for r in records if r["date"][:5] in keep]
 
     # "2w" is fetched as 1mo – trim to the last 260 bars (10 trading days × 26 fifteen-minute bars)
@@ -316,11 +347,12 @@ _MOVERS_UNIVERSE = [
 MOVERS_TTL = 300  # 5 minutes
 
 
-async def get_movers(top_n: int = 10) -> dict:
+async def get_movers(top_n: int = 10, force_refresh: bool = False) -> dict:
     """Return the top N daily gainers and losers from a liquid-stock universe."""
-    cached = await _cache.get("movers", MOVERS_TTL)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = await _cache.get("movers", MOVERS_TTL)
+        if cached is not None:
+            return cached
 
     quotes = await get_bulk_quotes(_MOVERS_UNIVERSE)
     ranked = sorted(
@@ -357,19 +389,23 @@ _EARNINGS_UNIVERSE = [
     "SYK","MDT","BSX","ABT","BAX","BDX","CAH","MCK","CVS","CI",
     "HUM","MOH","CNC","WFC","C","USB","PNC","TFC","MTB","KEY",
     "RF","CFG","FITB","HBAN","ZION","CMA","DFS","COF","SYF","ALLY",
+    # Canadian large-caps listed on US exchanges
+    "SU","CNQ","ENB","TRP","RY","TD","BNS","BMO","CM","MFC","SLF",
+    "NTR","CCO","ABX","WPM","K","IFC","POW","FFH","BAM","BN",
 ]
 
 
-async def get_earnings(watchlist: list[str]) -> dict:
+async def get_earnings(watchlist: list[str], force_refresh: bool = False) -> dict:
     """Return upcoming earnings for a broad universe with watchlist items flagged and sorted first."""
     watchlist_set = {s.upper() for s in watchlist}
     # Combine watchlist + universe, deduplicated, watchlist first
     all_symbols = list(watchlist_set) + [s for s in _EARNINGS_UNIVERSE if s not in watchlist_set]
 
     cache_key = f"earnings:{','.join(sorted(watchlist_set))}"
-    cached = await _cache.get(cache_key, EARNINGS_TTL)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = await _cache.get(cache_key, EARNINGS_TTL)
+        if cached is not None:
+            return cached
 
     results = await asyncio.gather(*[_fetch_earnings(s) for s in all_symbols])
 
@@ -430,8 +466,15 @@ async def _fetch_earnings(symbol: str) -> dict | None:
     """Fetch next earnings date for a symbol via Yahoo Finance quoteSummary."""
     client = _get_http_client()
     try:
+        crumb = await _get_yf_crumb()
         url = _YF_EARNINGS_URL.format(symbol=symbol.upper())
-        r = await client.get(url, params={"modules": "calendarEvents"})
+        r = await client.get(url, params={"modules": "calendarEvents", "crumb": crumb})
+        if r.status_code == 401:
+            # Crumb expired – reset and retry once
+            global _yf_crumb
+            _yf_crumb = None
+            crumb = await _get_yf_crumb()
+            r = await client.get(url, params={"modules": "calendarEvents", "crumb": crumb})
         r.raise_for_status()
         data = r.json()
         cal = (
@@ -446,17 +489,21 @@ async def _fetch_earnings(symbol: str) -> dict | None:
         if raw_ts is None:
             return None
         dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
-        # Only surface upcoming earnings within the next 30 days
-        now = datetime.now(tz=timezone.utc)
-        diff_days = (dt - now).days
+        # Compare calendar dates in Eastern Time so "tomorrow" doesn't collapse
+        # into "today" when the earnings timestamp is early morning ET but fewer
+        # than 24 hours away from the current UTC wall-clock time.
+        et = zoneinfo.ZoneInfo("America/New_York")
+        today_et = datetime.now(tz=et).date()
+        earnings_date_et = dt.astimezone(et).date()
+        diff_days = (earnings_date_et - today_et).days
         if diff_days < 0 or diff_days > 30:
             return None
         return {
             "id":          f"earnings:{symbol}:{raw_ts}",
             "title":       f"{symbol} earnings expected {dt.strftime('%b %d, %Y')}",
-            "url":         f"https://finance.yahoo.com/calendar/earnings?symbol={symbol}",
+            "url":         f"https://finance.yahoo.com/quote/{symbol}/",
             "source":      "Yahoo Finance",
-            "published_at": int(now.timestamp()),
+            "published_at": int(datetime.now(tz=timezone.utc).timestamp()),
             "thumbnail":   None,
             "related":     [symbol],
             "tags":        [symbol],
@@ -479,12 +526,13 @@ def _is_blocked(item: dict) -> bool:
     return any(term in text for term in _BLOCKED_TERMS)
 
 
-async def get_news(watchlist: list[str], extra_topics: list[str] | None = None) -> dict:
+async def get_news(watchlist: list[str], extra_topics: list[str] | None = None, force_refresh: bool = False) -> dict:
     """Return merged, deduplicated news for *watchlist* symbols + general market topics."""
     cache_key = f"news:{','.join(sorted(watchlist))}"
-    cached = await _cache.get(cache_key, NEWS_TTL)
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = await _cache.get(cache_key, NEWS_TTL)
+        if cached is not None:
+            return cached
 
     topics = list(watchlist) + (extra_topics or ["stock market", "S&P 500", "Federal Reserve", "earnings"])
 

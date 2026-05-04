@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BellAlertIcon, ArrowTopRightOnSquareIcon, CalendarDaysIcon, StarIcon } from '@heroicons/react/24/solid'
 import { getEarnings } from '../../api/client'
 
@@ -82,12 +83,28 @@ function SkeletonCard() {
 }
 
 export default function EarningsTab({ watchlist }) {
+  const queryClient = useQueryClient()
+  const [forceLoading, setForceLoading] = useState(false)
+
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['earnings', watchlist],
     queryFn: () => getEarnings(watchlist),
+    staleTime: 0,
     refetchInterval: 15 * 60_000,
     refetchIntervalInBackground: true,
   })
+
+  const handleRefresh = async () => {
+    setForceLoading(true)
+    try {
+      const fresh = await getEarnings(watchlist, true)
+      queryClient.setQueryData(['earnings', watchlist], fresh)
+    } catch {
+      refetch()
+    } finally {
+      setForceLoading(false)
+    }
+  }
 
   const all      = data?.items ?? []
   const today    = all.filter(i => i.days_until === 0)
@@ -103,10 +120,11 @@ export default function EarningsTab({ watchlist }) {
           {all.length > 0 && <span className="ml-2 text-slate-600">· {all.length} companies</span>}
         </p>
         <button
-          onClick={() => refetch()}
-          className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 px-2 py-0.5 rounded-md transition-colors"
+          onClick={handleRefresh}
+          disabled={forceLoading}
+          className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 px-2 py-0.5 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Refresh
+          {forceLoading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
 

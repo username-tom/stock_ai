@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useState, useRef, useCallback } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpIcon, ArrowDownIcon, EyeIcon, EyeSlashIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/solid'
 import SubplotChart from '../charts/SubplotChart'
 import { getMovers, getHistory } from '../../api/client'
@@ -21,17 +21,20 @@ function fmtMktCap(v) {
   return `$${v}`
 }
 
-/** Tooltip card that pops above the symbol name */
-function MoverTooltip({ q }) {
+/** Tooltip card that pops near the symbol name, flipping to stay in-viewport */
+function MoverTooltip({ q, pos = {} }) {
   const positive = q.change_pct >= 0
   const rangePct = (q.last_price != null && q.day_high != null && q.day_low != null && q.day_high !== q.day_low)
     ? ((q.last_price - q.day_low) / (q.day_high - q.day_low) * 100).toFixed(1)
     : null
 
   return (
-    <div className="pointer-events-none absolute bottom-full left-0 mb-2 z-50 w-64
-                    rounded-lg bg-dark-600 border border-dark-400 shadow-2xl
-                    opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+    <div
+      className="pointer-events-none absolute z-50 w-64
+                  rounded-lg bg-dark-600 border border-dark-400 shadow-2xl
+                  opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+      style={pos}
+    >
       {/* Header */}
       <div className="px-3 py-2 border-b border-dark-500">
         <div className="flex items-center justify-between">
@@ -147,6 +150,57 @@ function ChartDropdown({ symbol }) {
   )
 }
 
+function SymbolWithTooltip({ q }) {
+  const anchorRef = useRef(null)
+  const [pos, setPos] = useState({ top: '100%', left: 0 })
+
+  const measurePosition = useCallback(() => {
+    if (!anchorRef.current) return
+    const anchor = anchorRef.current.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const TOOLTIP_H = 280
+    const TOOLTIP_W = 256
+    const GAP = 6
+
+    // Vertical: prefer below, flip above if not enough room
+    const spaceBelow = vh - anchor.bottom
+    const spaceAbove = anchor.top
+    let topStyle, bottomStyle
+    if (spaceBelow >= TOOLTIP_H + GAP || spaceBelow >= spaceAbove) {
+      topStyle    = anchor.height + GAP
+      bottomStyle = 'auto'
+    } else {
+      topStyle    = 'auto'
+      bottomStyle = anchor.height + GAP
+    }
+
+    // Horizontal: align left, clamp so it doesn't overflow right edge
+    let leftStyle = 0
+    const rightEdge = anchor.left + TOOLTIP_W
+    if (rightEdge > vw - 8) {
+      leftStyle = vw - 8 - rightEdge
+    }
+
+    setPos({ top: topStyle, bottom: bottomStyle, left: leftStyle })
+  }, [])
+
+  return (
+    <div className="group relative" ref={anchorRef} onMouseEnter={measurePosition}>
+      <a
+        href={`https://finance.yahoo.com/quote/${q.symbol}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={e => e.stopPropagation()}
+        className="text-sm font-semibold font-mono w-16 inline-block text-sky-400 hover:text-sky-300 hover:underline transition-colors"
+      >
+        {q.symbol}
+      </a>
+      <MoverTooltip q={q} pos={pos} />
+    </div>
+  )
+}
+
 function MoverRow({ q, rank, inWatchlist, onToggleWatchlist }) {
   const [expanded, setExpanded] = useState(false)
   const positive = q.change_pct >= 0
@@ -159,18 +213,7 @@ function MoverRow({ q, rank, inWatchlist, onToggleWatchlist }) {
         <div className="flex items-center gap-3">
           <span className="text-xs text-slate-600 w-5 text-right">{rank}</span>
           {/* Symbol with rich tooltip */}
-          <div className="group relative">
-            <a
-              href={`https://finance.yahoo.com/quote/${q.symbol}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={e => e.stopPropagation()}
-              className="text-sm font-semibold font-mono w-16 inline-block text-sky-400 hover:text-sky-300 hover:underline transition-colors"
-            >
-              {q.symbol}
-            </a>
-            <MoverTooltip q={q} />
-          </div>
+          <SymbolWithTooltip q={q} />
           <span className="text-sm font-mono text-slate-300">${fmt(q.last_price)}</span>
         </div>
         <div className="flex items-center gap-3">
@@ -224,6 +267,9 @@ function MoverRow({ q, rank, inWatchlist, onToggleWatchlist }) {
 
 export default function MoversTab({ watchlist = [], toggleSymbol }) {
   const marketOpen = useMarketOpen()
+  const queryClient = useQueryClient()
+  const [forceLoading, setForceLoading] = useState(false)
+
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['movers'],
     queryFn: () => getMovers(25),
@@ -231,6 +277,18 @@ export default function MoversTab({ watchlist = [], toggleSymbol }) {
     refetchInterval: marketOpen ? 5 * 60_000 : false,
     refetchIntervalInBackground: true,
   })
+
+  const handleRefresh = async () => {
+    setForceLoading(true)
+    try {
+      const fresh = await getMovers(25, true)
+      queryClient.setQueryData(['movers'], fresh)
+    } catch {
+      refetch()
+    } finally {
+      setForceLoading(false)
+    }
+  }
 
   const asOf = data?.as_of ? new Date(data.as_of).toLocaleTimeString() : null
 
@@ -241,10 +299,11 @@ export default function MoversTab({ watchlist = [], toggleSymbol }) {
           {asOf ? `As of ${asOf}` : marketOpen ? 'Refreshes every 5 min' : 'Market closed'}
         </p>
         <button
-          onClick={() => refetch()}
-          className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 px-2 py-0.5 rounded-md transition-colors"
+          onClick={handleRefresh}
+          disabled={forceLoading}
+          className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 px-2 py-0.5 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Refresh
+          {forceLoading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
       {(isLoading || isError) && (
