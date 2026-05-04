@@ -3,6 +3,7 @@ import { useQuery, useMutation } from '@tanstack/react-query'
 import { getStrategies, runBacktest, getScripts } from '../api/client'
 import EquityChart from './charts/EquityChart'
 import SubplotChart from './charts/SubplotChart'
+import SymbolAutocomplete from './shared/SymbolAutocomplete'
 import {
   ArrowPathIcon,
   CheckCircleIcon,
@@ -10,7 +11,6 @@ import {
   CodeBracketIcon,
   ArrowTopRightOnSquareIcon,
   ArrowDownTrayIcon,
-  ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 
 const WATCHLIST_KEY = 'dashboard_watchlist'
@@ -181,11 +181,7 @@ export default function BacktestPanel() {
   const [activeTab, setActiveTab] = useState('equity')
   const [progress, setProgress] = useState(0)
   const progressRef = useRef(null)
-  const symbolRef = useRef(null)
-
   const [watchlist, setWatchlist] = useState(loadWatchlist)
-  const [symbolOpen, setSymbolOpen] = useState(false)
-  const [symbolFilter, setSymbolFilter] = useState('')
 
   // Keep watchlist in sync when user edits it in another panel
   useEffect(() => {
@@ -286,71 +282,14 @@ export default function BacktestPanel() {
             Configuration
           </h2>
 
-          <div className="relative" ref={symbolRef}>
+          <div>
             <label className="label">Symbol</label>
-            <div className="relative">
-              <input
-                className="input pr-8"
-                value={symbolOpen ? symbolFilter : form.symbol}
-                onFocus={() => { setSymbolOpen(true); setSymbolFilter('') }}
-                onChange={e => {
-                  const v = e.target.value.toUpperCase()
-                  setSymbolFilter(v)
-                  setSymbolOpen(true)
-                  // also update form symbol as user types
-                  setForm(f => ({ ...f, symbol: v }))
-                }}
-                onBlur={() => setTimeout(() => setSymbolOpen(false), 150)}
-                onKeyDown={e => {
-                  if (e.key === 'Escape') setSymbolOpen(false)
-                  if (e.key === 'Enter') setSymbolOpen(false)
-                }}
-                placeholder="Search or type symbol…"
-              />
-              <ChevronDownIcon
-                className={`absolute right-2 top-2.5 h-4 w-4 text-slate-400 pointer-events-none transition-transform ${symbolOpen ? 'rotate-180' : ''}`}
-              />
-            </div>
-            {symbolOpen && (() => {
-              const q = symbolFilter.trim().toUpperCase()
-              const filtered = watchlist.filter(s => !q || s.includes(q))
-              const showCustom = q && !watchlist.includes(q)
-              if (!filtered.length && !showCustom) return null
-              return (
-                <ul className="absolute z-50 mt-1 w-full bg-dark-800 border border-dark-500 rounded-lg shadow-xl max-h-56 overflow-y-auto">
-                  {filtered.map(sym => (
-                    <li key={sym}>
-                      <button
-                        type="button"
-                        onMouseDown={() => {
-                          setForm(f => ({ ...f, symbol: sym }))
-                          setSymbolOpen(false)
-                        }}
-                        className={`w-full text-left px-3 py-2 text-sm hover:bg-dark-600 transition-colors font-mono ${
-                          form.symbol === sym ? 'text-emerald-400 bg-dark-700' : 'text-slate-200'
-                        }`}
-                      >
-                        {sym}
-                      </button>
-                    </li>
-                  ))}
-                  {showCustom && (
-                    <li>
-                      <button
-                        type="button"
-                        onMouseDown={() => {
-                          setForm(f => ({ ...f, symbol: q }))
-                          setSymbolOpen(false)
-                        }}
-                        className="w-full text-left px-3 py-2 text-sm hover:bg-dark-600 transition-colors font-mono text-slate-400"
-                      >
-                        Use &ldquo;{q}&rdquo;
-                      </button>
-                    </li>
-                  )}
-                </ul>
-              )
-            })()}
+            <SymbolAutocomplete
+              value={form.symbol}
+              onChange={v => setForm(f => ({ ...f, symbol: v }))}
+              placeholder="Search or type symbol…"
+              extraSuggestions={watchlist.map(s => ({ symbol: s }))}
+            />
           </div>
 
           <div>

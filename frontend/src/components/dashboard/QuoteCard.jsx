@@ -1,4 +1,5 @@
 import { ArrowUpIcon, ArrowDownIcon } from '@heroicons/react/24/solid'
+import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 
 export default function QuoteCard({ data, isLoading, symbol }) {
   if (isLoading)
@@ -59,6 +60,25 @@ export default function QuoteCard({ data, isLoading, symbol }) {
         <span>H: ${data.day_high?.toFixed(2) ?? '—'}</span>
         <span>L: ${data.day_low?.toFixed(2) ?? '—'}</span>
       </div>
+      {(() => {
+        const s = quotesentiment(data)
+        const sig = quotesignal(data)
+        if (!s && !sig) return null
+        return (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {s && (
+              <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SENTIMENT_COLORS[s]}`}>
+                {SENTIMENT_LABELS[s]}
+              </div>
+            )}
+            {sig && (
+              <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
+                {SIGNAL_LABELS[sig]}
+              </div>
+            )}
+          </div>
+        )
+      })()}
     </div>
   )
 }

@@ -1,0 +1,49 @@
+"""Sandbox portfolio models – simulated paper trading environment."""
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean
+from sqlalchemy.sql import func
+from app.database import Base
+
+
+class SandboxAccount(Base):
+    __tablename__ = "sandbox_account"
+
+    id = Column(Integer, primary_key=True, index=True)
+    total_funds = Column(Float, default=0.0, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
+
+class SandboxPosition(Base):
+    """One row per symbol tracked in the sandbox (watchlist or held)."""
+    __tablename__ = "sandbox_positions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False, unique=True, index=True)
+    allocated_funds = Column(Float, default=0.0)   # cash assigned to this symbol
+    shares = Column(Float, default=0.0)            # current shares held
+    avg_cost = Column(Float, default=0.0)          # average cost basis per share
+    strategy_name = Column(String(100), nullable=True)
+    # Automated engine columns
+    strategy_enabled = Column(Boolean, default=False, nullable=False)  # engine active
+    last_signal = Column(Integer, nullable=True)      # +1 buy / -1 sell / 0 hold
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    engine_error = Column(Text, nullable=True)
+    realized_pnl = Column(Float, default=0.0)
+    is_on_watchlist = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
+
+class SandboxTrade(Base):
+    """Individual trade records in the sandbox."""
+    __tablename__ = "sandbox_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    side = Column(String(10), nullable=False)   # BUY | SELL
+    quantity = Column(Float, nullable=False)
+    price = Column(Float, nullable=False)
+    total = Column(Float, nullable=False)        # quantity * price
+    strategy_name = Column(String(100), nullable=True)
+    reason = Column(Text, nullable=True)         # human-readable buy/sell reason
+    pnl = Column(Float, nullable=True)           # realised PnL for SELL trades
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

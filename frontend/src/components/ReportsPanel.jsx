@@ -53,6 +53,7 @@ export default function ReportsPanel() {
   const qc = useQueryClient()
   const [selected, setSelected] = useState(null)
   const [scriptOpen, setScriptOpen] = useState(false)
+  const [search, setSearch] = useState('')
 
   const { data: listData, isLoading } = useQuery({
     queryKey: ['reports'],
@@ -74,6 +75,10 @@ export default function ReportsPanel() {
   })
 
   const reports = listData?.reports ?? []
+  const q = search.trim().toUpperCase()
+  const filtered = q
+    ? reports.filter(r => r.symbol.includes(q) || r.strategy_type.toUpperCase().includes(q))
+    : reports
 
   return (
     <div className="p-6 space-y-6">
@@ -86,8 +91,27 @@ export default function ReportsPanel() {
         {/* List */}
         <div className="card xl:col-span-1 space-y-2 max-h-[80vh] overflow-y-auto">
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">
-            {reports.length} Report{reports.length !== 1 ? 's' : ''}
+            {filtered.length}{q ? ` of ${reports.length}` : ''} Report{reports.length !== 1 ? 's' : ''}
           </h2>
+          <div className="relative mb-3">
+            <input
+              className="input w-full pl-8 py-1.5 text-sm"
+              placeholder="Search symbol or strategy…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              spellCheck={false}
+            />
+            <svg className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500 pointer-events-none" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 1 1 5 11a6 6 0 0 1 12 0z" />
+            </svg>
+            {search && (
+              <button onClick={() => setSearch('')} className="absolute right-2 top-2 text-slate-500 hover:text-slate-300">
+                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
           {isLoading && (
             <div className="space-y-2">
               {[...Array(4)].map((_, i) => (
@@ -95,13 +119,13 @@ export default function ReportsPanel() {
               ))}
             </div>
           )}
-          {!isLoading && reports.length === 0 && (
+          {!isLoading && filtered.length === 0 && (
             <div className="text-center text-slate-500 text-sm py-12">
               <DocumentChartBarIcon className="h-8 w-8 mx-auto mb-2 text-slate-600" />
-              No reports yet. Run a backtest first.
+              {reports.length === 0 ? 'No reports yet. Run a backtest first.' : 'No reports match your search.'}
             </div>
           )}
-          {reports.map(r => (
+          {filtered.map(r => (
             <button
               key={r.id}
               onClick={() => { setSelected(r.id); setScriptOpen(false) }}

@@ -204,3 +204,5 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
     
     return df
 ```
+
+docker compose build backend && docker compose up

@@ -26,6 +26,7 @@ export const deleteReport = (id) => api.delete(`/backtest/reports/${id}`).then(r
 export const getIBStatus = () => api.get('/trading/ib/status').then(r => r.data)
 export const connectIB = () => api.post('/trading/ib/connect').then(r => r.data)
 export const disconnectIB = () => api.post('/trading/ib/disconnect').then(r => r.data)
+export const setIBMode = (mode) => api.post('/trading/ib/mode', { mode }).then(r => r.data)
 export const getIBAccount = () => api.get('/trading/ib/account').then(r => r.data)
 export const getIBPositions = () => api.get('/trading/ib/positions').then(r => r.data)
 export const getIBOrders = () => api.get('/trading/ib/orders').then(r => r.data)
@@ -47,3 +48,26 @@ export const validateScript = (id) => api.post(`/scripts/${id}/validate`).then(r
 export const validateScriptCode = (payload) => api.post('/scripts/validate', payload).then(r => r.data)
 
 export default api
+
+// Sandbox
+export const getSandboxAccount = () => api.get('/sandbox/account').then(r => r.data)
+export const addSandboxFunds = (amount) => api.post('/sandbox/account/add-funds', { amount }).then(r => r.data)
+export const getSandboxPositions = () => api.get('/sandbox/positions').then(r => r.data)
+export const addSandboxSymbol = (payload) => api.post('/sandbox/positions', payload).then(r => r.data)
+export const updateSandboxPosition = (symbol, payload) => api.patch(`/sandbox/positions/${symbol}`, payload).then(r => r.data)
+export const removeSandboxSymbol = (symbol) => api.delete(`/sandbox/positions/${symbol}`).then(r => r.data)
+export const getSandboxTrades = (symbol, limit = 200) =>
+  api.get('/sandbox/trades', { params: { symbol, limit } }).then(r => r.data)
+export const placeSandboxTrade = (payload) => api.post('/sandbox/trade', payload).then(r => r.data)
+export const getSandboxIBMode = () => api.get('/sandbox/ib-mode').then(r => r.data)
+export const setSandboxIBMode = (mode) => api.post('/sandbox/ib-mode', { mode }).then(r => r.data)
+export const exportSandbox = () => api.get('/sandbox/export', { responseType: 'blob' }).then(r => r)
+export const importSandbox = (file) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/sandbox/import', form, { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data)
+}
+export const resetSandbox = () => api.post('/sandbox/reset').then(r => r.data)
+export const getSandboxAnalytics = () => api.get('/sandbox/analytics').then(r => r.data)
+export const getSandboxEngineState = () => api.get('/sandbox/engine/state').then(r => r.data)
+export const toggleSandboxEngine = (symbol) => api.post(`/sandbox/engine/toggle/${symbol}`).then(r => r.data)

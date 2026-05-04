@@ -73,7 +73,7 @@ export default function WatchlistPanel({
 
       <div
         className="overflow-y-auto mt-1 px-1 pt-1 pb-2"
-        style={{ maxHeight: '132px', scrollbarWidth: 'thin', scrollbarColor: '#334155 transparent' }}
+        style={{ scrollbarWidth: 'thin', scrollbarColor: '#334155 transparent' }}
       >
         <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
           {watchlist.map((sym, idx) => (

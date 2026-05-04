@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowUpIcon, ArrowDownIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/solid'
 import { getMovers } from '../../api/client'
 import { isMarketHours } from '../../utils/marketHours'
+import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 
 function MoverRow({ q, rank, inWatchlist, onToggleWatchlist }) {
   const positive = q.change_pct >= 0
@@ -30,6 +31,24 @@ function MoverRow({ q, rank, inWatchlist, onToggleWatchlist }) {
           {positive ? <ArrowUpIcon className="h-3.5 w-3.5" /> : <ArrowDownIcon className="h-3.5 w-3.5" />}
           {Math.abs(q.change_pct).toFixed(2)}%
         </span>
+        {(() => {
+          const s = quotesentiment(q)
+          if (!s) return null
+          return (
+            <span className={`hidden sm:inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SENTIMENT_COLORS[s]}`}>
+              {SENTIMENT_LABELS[s]}
+            </span>
+          )
+        })()}
+        {(() => {
+          const sig = quotesignal(q)
+          if (!sig) return null
+          return (
+            <span className={`hidden sm:inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
+              {SIGNAL_LABELS[sig]}
+            </span>
+          )
+        })()}
         <button
           onClick={() => onToggleWatchlist(q.symbol)}
           title={inWatchlist ? 'Remove from watchlist' : 'Add to watchlist'}

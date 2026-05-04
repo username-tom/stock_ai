@@ -5,11 +5,13 @@ import {
   DocumentChartBarIcon,
   BoltIcon,
   CodeBracketIcon,
+  BriefcaseIcon,
 } from '@heroicons/react/24/outline'
 import LivePriceTicker from './LivePriceTicker'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: ChartBarIcon, end: true },
+  { to: '/sandbox', label: 'Portfolio', icon: BriefcaseIcon },
   { to: '/backtest', label: 'Backtest', icon: ArrowPathIcon },
   { to: '/reports', label: 'Reports', icon: DocumentChartBarIcon },
   { to: '/trading', label: 'Trading', icon: BoltIcon },
@@ -49,6 +51,11 @@ export default function Layout({ children }) {
             >
               <Icon className="h-5 w-5 flex-shrink-0" />
               {label}
+              {label === 'Portfolio' && (
+                <span className="ml-auto text-xs bg-blue-600/30 text-blue-400 border border-blue-600/30 rounded px-1.5 py-0.5 leading-none">
+                  SIM
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>

@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  getIBStatus, connectIB, disconnectIB,
+  getIBStatus, connectIB, disconnectIB, setIBMode,
   getIBPositions, getIBOrders, getTradeHistory,
   placeOrder, cancelOrder,
 } from '../api/client'
+import SymbolAutocomplete from './shared/SymbolAutocomplete'
 import {
   BoltIcon, SignalIcon, SignalSlashIcon,
   ArrowUpIcon, ArrowDownIcon,
@@ -65,6 +66,11 @@ export default function TradingPanel() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['ib-status'] }),
   })
 
+  const ibModeMut = useMutation({
+    mutationFn: (mode) => setIBMode(mode),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ib-status'] }),
+  })
+
   const orderMut = useMutation({
     mutationFn: placeOrder,
     onSuccess: (data) => {
@@ -102,6 +108,7 @@ export default function TradingPanel() {
   }
 
   const isConnected = ibStatus?.connected
+  const currentMode = ibStatus?.mode ?? 'paper'
 
   return (
     <div className="p-6 space-y-6">
@@ -123,11 +130,30 @@ export default function TradingPanel() {
                 Interactive Brokers {isConnected ? 'Connected' : 'Disconnected'}
               </div>
               <div className="text-xs text-slate-500">
-                {ibStatus?.host}:{ibStatus?.port} · Mode: {ibStatus?.mode?.toUpperCase()}
+                {ibStatus?.host}:{ibStatus?.port} · Mode: {currentMode?.toUpperCase()}
               </div>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Paper / Live toggle */}
+            <div className="flex items-center gap-1 bg-dark-900 rounded-lg p-1 border border-dark-500">
+              <button
+                className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${currentMode === 'paper' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                onClick={() => !isConnected && ibModeMut.mutate('paper')}
+                disabled={isConnected || ibModeMut.isPending}
+                title={isConnected ? 'Disconnect first to switch modes' : 'Switch to Paper trading'}
+              >
+                Paper
+              </button>
+              <button
+                className={`px-3 py-1 text-xs rounded-md font-medium transition-colors ${currentMode === 'live' ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                onClick={() => !isConnected && ibModeMut.mutate('live')}
+                disabled={isConnected || ibModeMut.isPending}
+                title={isConnected ? 'Disconnect first to switch modes' : 'Switch to Live trading'}
+              >
+                🔴 Live
+              </button>
+            </div>
             <button
               className="btn-primary"
               onClick={() => connectMut.mutate()}
@@ -162,8 +188,11 @@ export default function TradingPanel() {
 
           <div>
             <label className="label">Symbol</label>
-            <input className="input" value={orderForm.symbol}
-              onChange={e => setOrderForm(f => ({ ...f, symbol: e.target.value.toUpperCase() }))} />
+            <SymbolAutocomplete
+              value={orderForm.symbol}
+              onChange={v => setOrderForm(f => ({ ...f, symbol: v }))}
+              placeholder="Symbol…"
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-3">

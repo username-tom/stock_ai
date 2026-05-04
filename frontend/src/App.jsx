@@ -6,6 +6,7 @@ import BacktestPanel from './components/BacktestPanel'
 import ReportsPanel from './components/ReportsPanel'
 import TradingPanel from './components/TradingPanel'
 import ScriptsPanel from './components/ScriptsPanel'
+import SandboxPanel from './components/SandboxPanel'
 
 class PanelErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null } }
@@ -28,6 +29,7 @@ class PanelErrorBoundary extends Component {
 
 const PANELS = [
   { path: '/',         Component: Dashboard      },
+  { path: '/sandbox',  Component: SandboxPanel   },
   { path: '/backtest', Component: BacktestPanel  },
   { path: '/reports',  Component: ReportsPanel   },
   { path: '/trading',  Component: TradingPanel   },

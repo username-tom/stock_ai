@@ -17,7 +17,7 @@ async def get_db():
 
 async def init_db():
     async with engine.begin() as conn:
-        from app.models import trade, strategy, report, custom_script  # noqa: F401
+        from app.models import trade, strategy, report, custom_script, sandbox  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
         # Add columns that may not exist in older databases
         await _migrate(conn)
@@ -29,10 +29,16 @@ async def _migrate(conn):
     migrations = [
         # backtest_reports.script_snapshot  (added for custom-script version snapshots)
         "ALTER TABLE backtest_reports ADD COLUMN script_snapshot TEXT",
+        # sandbox_positions engine columns (added for automated trading engine)
+        "ALTER TABLE sandbox_positions ADD COLUMN strategy_enabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE sandbox_positions ADD COLUMN last_signal INTEGER",
+        "ALTER TABLE sandbox_positions ADD COLUMN last_run_at DATETIME",
+        "ALTER TABLE sandbox_positions ADD COLUMN engine_error TEXT",
+        # sandbox_account seed row (ensure at least one row exists)
+        "INSERT OR IGNORE INTO sandbox_account (id, total_funds) VALUES (1, 0.0)",
     ]
     for stmt in migrations:
         try:
             await conn.execute(text(stmt))
         except Exception:
-            # Column already exists – ignore
             pass

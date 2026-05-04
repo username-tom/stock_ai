@@ -33,6 +33,23 @@ async def ib_status():
     return ib_service.connection_status()
 
 
+class IBModeToggleRequest(BaseModel):
+    mode: str = Field(..., pattern="^(paper|live)$")
+
+
+@router.post("/ib/mode")
+async def set_ib_mode(req: IBModeToggleRequest):
+    """Toggle IB connector between paper (port 7497) and live (port 7496)."""
+    from app.config import settings
+    settings.TRADING_MODE = req.mode
+    # Update the default port to match the selected mode
+    if req.mode == "live":
+        settings.IB_PORT = 7496
+    else:
+        settings.IB_PORT = 7497
+    return {"mode": settings.TRADING_MODE, "port": settings.IB_PORT}
+
+
 @router.get("/ib/account")
 async def ib_account():
     return await ib_service.get_account_summary()

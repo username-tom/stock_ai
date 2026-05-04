@@ -8,8 +8,9 @@ import os
 
 from app.config import settings
 from app.database import init_db
-from app.routers import trading, backtest, market_data, ws, scripts
+from app.routers import trading, backtest, market_data, ws, scripts, sandbox
 from app.services import market_service, symbol_registry
+from app.services.sandbox_engine import run_engine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(market_service.pre_warm(DASHBOARD_SYMBOLS, periods=["1d", "1y"]))
     asyncio.create_task(symbol_registry.ensure_registry())
     asyncio.create_task(_daily_registry_refresh())
+    asyncio.create_task(run_engine())
     yield
     logger.info("Application shutdown.")
 
@@ -62,6 +64,7 @@ app.include_router(backtest.router)
 app.include_router(market_data.router)
 app.include_router(ws.router)
 app.include_router(scripts.router)
+app.include_router(sandbox.router)
 
 # Serve HTML reports as static files
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)
