@@ -39,7 +39,13 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
           </div>
         )}
         {pos.strategy_name && (
-          <div className="mt-0.5 text-xs text-blue-400/80 truncate">{pos.strategy_name.split(':')[0]}</div>
+          <div className="mt-0.5 flex items-center gap-1.5">
+            <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${pos.strategy_enabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+            <span className="text-xs text-blue-400/80 truncate">{pos.strategy_name.split(':')[0]}</span>
+            <span className={`ml-auto text-[10px] font-semibold ${pos.strategy_enabled ? 'text-emerald-400' : 'text-slate-500'}`}>
+              {pos.strategy_enabled ? 'ON' : 'OFF'}
+            </span>
+          </div>
         )}
         {(() => {
           const s = quotesentiment(quote)

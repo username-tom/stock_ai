@@ -349,6 +349,20 @@ async def engine_state():
     return get_engine_state()
 
 
+@router.post("/engine/toggle-all")
+async def engine_toggle_all(db: AsyncSession = Depends(get_db)):
+    """Start all engines if any are stopped, otherwise stop all."""
+    result = await db.execute(select(SandboxPosition).where(SandboxPosition.strategy_name.isnot(None)))
+    positions = result.scalars().all()
+    if not positions:
+        raise HTTPException(400, "No positions with a strategy assigned.")
+    any_stopped = any(not p.strategy_enabled for p in positions)
+    for pos in positions:
+        pos.strategy_enabled = any_stopped  # start all if any stopped, else stop all
+    await db.commit()
+    return {"enabled": any_stopped, "count": len(positions)}
+
+
 @router.post("/engine/toggle/{symbol}")
 async def engine_toggle(symbol: str, db: AsyncSession = Depends(get_db)):
     """Toggle the automated strategy engine on/off for a symbol."""

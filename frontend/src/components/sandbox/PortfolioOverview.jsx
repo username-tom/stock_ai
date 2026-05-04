@@ -68,34 +68,39 @@ export default function PortfolioOverview({
               <ChartPieIcon className="h-4 w-4 text-slate-400" />
               <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Allocation by Market Value</h2>
             </div>
-            <div className="h-64">
+            <div style={{ height: 320 + Math.ceil(pieData.length / 2) * 24 }}>
               <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
+                <PieChart margin={{ top: 20, right: 20, bottom: 0, left: 20 }}>
                   <Pie
                     data={pieData}
-                    cx="50%" cy="50%"
-                    innerRadius={60} outerRadius={100}
+                    cx="50%" cy="42%"
+                    innerRadius={65} outerRadius={105}
                     paddingAngle={2}
                     dataKey="market_value"
-                    label={({ symbol, pct }) => `${symbol} ${pct}%`}
-                    labelLine={true}
+                    label={false}
+                    labelLine={false}
                   >
                     {pieData.map((e, i) => (
                       <Cell key={e.symbol} fill={PIE_COLORS[i % PIE_COLORS.length]} />
                     ))}
                   </Pie>
                   <Tooltip content={<PieTooltipContent />} />
+                  <Legend
+                    iconType="circle"
+                    iconSize={9}
+                    layout="horizontal"
+                    verticalAlign="bottom"
+                    align="center"
+                    wrapperStyle={{ fontSize: 11, paddingTop: 16 }}
+                    formatter={(value, entry) => (
+                      <span style={{ color: '#cbd5e1' }}>
+                        <span style={{ color: entry.color, fontWeight: 700 }}>{entry.payload.symbol}</span>
+                        {' '}<span style={{ color: '#64748b' }}>{entry.payload.pct}%</span>
+                      </span>
+                    )}
+                  />
                 </PieChart>
               </ResponsiveContainer>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5">
-              {pieData.map((d, i) => (
-                <div key={d.symbol} className="flex items-center gap-2 text-xs">
-                  <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                  <span className="text-slate-300 font-mono font-semibold">{d.symbol}</span>
-                  <span className="text-slate-500 ml-auto">{d.pct}%</span>
-                </div>
-              ))}
             </div>
           </div>
 

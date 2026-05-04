@@ -10,9 +10,9 @@ A full-stack algorithmic trading and market analytics platform. Real-time market
 |---|---|
 | **Dashboard** | Scrollable watchlist grid, intraday/historical price chart with technical indicators, and tabbed navigation for overview, movers, and news. |
 | **Watchlist** | Add/remove/reorder symbols via drag-and-drop. Persisted to localStorage. Scrollable grid with live price cards showing price, % change, day high/low, sentiment badge, and buy/hold/sell signal. |
-| **Live Quotes and Charts** | Quotes from Yahoo Finance v8 API with TTL in-memory and disk cache. Intraday chart distinguishes pre-market, regular session, and after-hours. 11 time-range options (1D to Max). |
-| **Technical Indicators** | Bollinger Bands, Fast MA, Slow MA, RSI, and MACD — individually togglable overlays rendered in stacked Recharts panels. |
-| **Gainers and Losers** | Top daily movers from a liquid large-cap universe. Refreshes every 5 min while market is open; polling pauses when closed. Sentiment and buy/hold/sell badges per row. Eye icon toggles watchlist membership. |
+| **Live Quotes & Charts** | Quotes from Yahoo Finance v8 API with TTL in-memory and disk cache. Intraday chart distinguishes pre-market, regular session, and after-hours. 11 time-range options (1D to Max). Yahoo Finance-style dark theme with green/red direction coloring. |
+| **Technical Indicators** | Bollinger Bands, Fast MA, Slow MA, RSI, and MACD — individually togglable overlays rendered in stacked Recharts panels with synchronized hover cursor across all sub-panels. |
+| **Gainers & Losers** | Top 25 daily movers. Hover for a rich tooltip (price, volume, market cap, sentiment, signal). Click a symbol to open its Yahoo Finance page. Click a row to expand an inline 1D/2D/5D chart dropdown fetched on demand. Refreshes every 5 min during market hours. |
 | **Financial News** | Curated feed split into: Upcoming Earnings (next 30 days for watchlist symbols), Watchlist News, and Market News. Initial load: 50 articles. Scroll to lazy-load 25 more at a time. Noise-filtered. |
 | **Earnings Notifications** | Upcoming earnings dates for watchlist symbols surface as amber alert cards at the top of the News tab. |
 | **Skeleton Loading** | All loading states use animated pulse skeleton blocks. Price chart uses a shimmer SVG placeholder. |
@@ -21,13 +21,14 @@ A full-stack algorithmic trading and market analytics platform. Real-time market
 | **Backtesting** | Run backtests across yfinance, Stooq, and IB data. Results: equity curve, trade log, Sharpe ratio, max drawdown, win rate. |
 | **Custom Scripts** | Write and validate Python trading strategies in-browser using pandas/numpy in a sandboxed executor. Collapsible script editor with title, description, and default parameters. |
 | **Report Generation** | Auto-generates HTML reports with embedded charts after every backtest. Accessible via the Reports page (with search/filter) or at /reports/. |
-| **Portfolio (Simulated Trading)** | Simulate a full portfolio with per-symbol fund allocation, automated strategy execution, and trade recording. Includes export/import/reset of the full simulation state. |
-| **Portfolio Overview** | Clickable summary header opens a home screen with stat cards (total funds, equity, unrealised/realised P&L), allocation pie chart (shares + allocated cash per symbol), and a position breakdown table. |
-| **Portfolio Analytics Charts** | Time-series charts derived from trade history: cumulative realised P&L (area chart), daily buy/sell volume (bar chart), realised P&L by symbol (horizontal bar), and win/loss ratio (donut + stats). |
-| **Automated Strategy Engine** | Background engine ticks every 60 seconds during market hours (09:20–16:00 ET, weekdays). Fetches 5 days of 1-minute data, runs the assigned strategy, and executes BUY/SELL trades automatically. Per-symbol enable/disable toggle. |
+| **Portfolio (Simulated Trading)** | Full portfolio simulation with per-symbol fund allocation, automated strategy execution, and trade recording. Export/import/reset of the full simulation state. |
+| **Portfolio Overview** | Stat cards (total funds, equity, unrealised/realised P&L), dynamic allocation pie chart with bottom legend, position breakdown table, and analytics charts. |
+| **Portfolio Analytics** | Cumulative realised P&L (area chart), daily buy/sell volume (bar chart), realised P&L by symbol (horizontal bar), and win/loss ratio (donut + stats). |
+| **Automated Strategy Engine** | Background engine ticks every 60 seconds during market hours (09:20–16:00 ET). Per-symbol enable/disable toggle with live ON/OFF status shown in the sidebar. Start/Stop All Engines toolbar button. |
 | **Market Hours Gating** | Engine and polling respect market hours. A 10-minute pre-open window (09:20 ET) allows strategies to warm up before the open. |
-| **Paper and Live Trading** | Connect to IB TWS/Gateway for paper simulation or live order execution via ib_insync. Toggle between paper and live mode at runtime. |
+| **Paper & Live Trading** | Connect to IB TWS/Gateway for paper simulation or live order execution via ib_insync. Toggle between modes at runtime. |
 | **Real-time Prices** | WebSocket endpoint streams live price updates at a configurable interval. |
+| **Frontend Error Logging** | Runtime JS errors and unhandled promise rejections are forwarded to the Vite dev-server terminal for easy debugging. |
 
 ---
 
@@ -37,68 +38,82 @@ A full-stack algorithmic trading and market analytics platform. Real-time market
 stock_ai/
 ├── backend/
 │   └── app/
-│       ├── main.py                  FastAPI app, CORS, startup cache pre-warm, engine task
-│       ├── config.py                Settings via .env
-│       ├── database.py              SQLite + SQLAlchemy async, schema migrations
+│       ├── main.py                   FastAPI entry point; CORS, startup cache pre-warm, engine scheduler
+│       ├── config.py                 Settings loaded from .env
+│       ├── database.py               SQLite + SQLAlchemy async engine; schema auto-migration
 │       ├── models/
-│       │   ├── trade.py             Manual trade orders
-│       │   ├── backtest.py          BacktestReport, CustomScript
-│       │   └── sandbox.py           SandboxAccount, SandboxPosition, SandboxTrade
+│       │   ├── trade.py              Manual trade orders
+│       │   ├── backtest.py           BacktestReport, CustomScript
+│       │   └── sandbox.py            SandboxAccount, SandboxPosition, SandboxTrade
 │       ├── routers/
-│       │   ├── trading.py           Manual order placement and IB connection
-│       │   ├── backtest.py          Backtest run, reports, data sources
-│       │   ├── market_data.py       Quotes, history, movers, news, search
-│       │   ├── scripts.py           Custom strategy script CRUD and validation
-│       │   ├── sandbox.py           Portfolio CRUD, trades, analytics, engine control, export/import/reset
-│       │   └── ws.py                WebSocket price stream
+│       │   ├── market_data.py        Quotes, history, movers, news, symbol search
+│       │   ├── backtest.py           Backtest execution, report list/detail/delete
+│       │   ├── scripts.py            Custom strategy script CRUD and sandboxed validation
+│       │   ├── trading.py            Manual order placement and IB connection management
+│       │   ├── sandbox.py            Portfolio CRUD, manual trades, analytics, engine control
+│       │   │                           (per-symbol toggle, toggle-all, state), export/import/reset
+│       │   └── ws.py                 WebSocket real-time price stream
 │       └── services/
-│           ├── market_service.py    Quotes, history, movers, news (Yahoo Finance v8, TTL-cached)
-│           ├── ib_service.py        Interactive Brokers (ib_insync)
-│           ├── backtester.py        Backtest engine (pandas)
-│           ├── sandbox_engine.py    Automated strategy execution engine
-│           ├── data_provider.py     Historical OHLCV (yfinance / Stooq / IB)
-│           ├── reporter.py          HTML report generator (matplotlib)
-│           ├── script_executor.py   Sandboxed Python script runner
-│           ├── symbol_registry.py   Local ticker/company search index
-│           └── strategies/          SMA Crossover, RSI, Bollinger Bands, MACD
+│           ├── market_service.py     Yahoo Finance v8 quotes, history, movers, news (TTL-cached)
+│           ├── ib_service.py         Interactive Brokers integration (ib_insync)
+│           ├── backtester.py         Vectorised backtest engine (pandas)
+│           ├── sandbox_engine.py     Automated strategy execution scheduler; per-symbol enable/disable
+│           ├── data_provider.py      Historical OHLCV (yfinance / Stooq / IB)
+│           ├── reporter.py           HTML report generator (matplotlib)
+│           ├── script_executor.py    Sandboxed Python script runner (restricted builtins)
+│           ├── symbol_registry.py    Local 8,000+ ticker/company prefix search index
+│           └── strategies/           Built-in strategies: SMA Crossover, RSI, Bollinger Bands, MACD
+│
 ├── frontend/
 │   └── src/
-│       ├── api/client.js            Axios API helpers (market, trading, backtest, sandbox, scripts)
-│       ├── hooks/useWatchlist.js    Watchlist state, persistence, toggle, drag
+│       ├── api/
+│       │   └── client.js             Axios wrappers for all backend endpoints
+│       ├── hooks/
+│       │   └── useWatchlist.js       Watchlist state, localStorage persistence, toggle, drag-and-drop
 │       ├── utils/
-│       │   ├── marketHours.js       isMarketHours(), deriveMarketOpen()
-│       │   └── sentiment.js         quotesentiment(), quotesignal(), color/label maps
+│       │   ├── marketHours.js        isMarketHours(), deriveMarketOpen()
+│       │   └── sentiment.js          quotesentiment(), quotesignal(), color/label maps
 │       └── components/
-│           ├── Layout.jsx
-│           ├── Dashboard.jsx
+│           ├── Layout.jsx            App shell with nav
+│           ├── Dashboard.jsx         Main dashboard page
+│           ├── BacktestPanel.jsx     Backtest form, results, equity chart
+│           ├── ReportsPanel.jsx      Saved report list with search and filter
+│           ├── ScriptsPanel.jsx      Custom script editor, validator, CRUD
+│           ├── TradingPanel.jsx      Manual order form, IB connection, trade history
+│           ├── SandboxPanel.jsx      Portfolio shell — queries, mutations, toolbar
+│           │                           (export, import, reset, Start/Stop All Engines)
+│           ├── LivePriceTicker.jsx   Scrolling live price ticker bar
 │           ├── dashboard/
-│           │   ├── QuoteCard.jsx          Price card with sentiment & signal badges
-│           │   ├── WatchlistPanel.jsx     Scrollable grid, edit/add/drag UI
-│           │   ├── PriceChartPanel.jsx    Chart + period selector + indicators
-│           │   ├── MoversTab.jsx          Gainers/Losers with sentiment, signal, watchlist toggle
-│           │   └── NewsTab.jsx            Lazy-loaded news feed with earnings alerts
+│           │   ├── QuoteCard.jsx         Price card with sentiment and signal badges
+│           │   ├── WatchlistPanel.jsx    Scrollable grid, add/edit/drag UI
+│           │   ├── PriceChartPanel.jsx   Chart with period selector and indicator toggles
+│           │   ├── MoversTab.jsx         Top 25 gainers/losers; hover tooltip, Yahoo Finance
+│           │   │                           links, click-to-expand 1D/2D/5D chart dropdown
+│           │   └── NewsTab.jsx           Lazy-loaded news feed with earnings alerts
 │           ├── charts/
-│           │   ├── SubplotChart.jsx       Price + RSI + MACD stacked chart
-│           │   └── indicators.js          BB, MA, RSI, MACD calculations
+│           │   ├── SubplotChart.jsx      Stacked price + RSI + MACD panels; synchronized
+│           │   │                           hover cursor; Yahoo Finance-style dark theme
+│           │   ├── PriceChart.jsx        General OHLCV price chart (Yahoo Finance style)
+│           │   ├── EquityChart.jsx       Equity curve chart for backtest results
+│           │   └── indicators.js         Client-side BB, MA, RSI, MACD calculations
 │           ├── shared/
-│           │   └── SymbolAutocomplete.jsx Reusable debounced symbol search input
-│           ├── LivePriceTicker.jsx
-│           ├── BacktestPanel.jsx
-│           ├── ReportsPanel.jsx           Report list with search/filter
-│           ├── ScriptsPanel.jsx
-│           ├── TradingPanel.jsx
-│           ├── SandboxPanel.jsx           Layout shell, data queries, mutations, toolbar
+│           │   └── SymbolAutocomplete.jsx  Debounced symbol search input (reused across panels)
 │           └── sandbox/
-│               ├── sandboxConstants.js    PIE_COLORS, CUSTOM_SCRIPT_KEY, STRATEGY_PARAM_UI
-│               ├── sandboxHelpers.js      fmt, fmtMoney, pct, encode/decodeStrategy helpers
-│               ├── StrategySelector.jsx   Strategy dropdown, params editor, custom script picker
-│               ├── StockListItem.jsx      Sidebar stock row with hover tooltip
-│               ├── TradeRow.jsx           Row in the trade history table
-│               ├── PieTooltipContent.jsx  Custom recharts tooltip for allocation pie
-│               ├── PortfolioOverview.jsx  Overview page (stat cards, pie, table, analytics charts)
-│               ├── PositionDetail.jsx     Stock detail (summary, strategy, trade form, history)
-│               └── SandboxSidebar.jsx     Left sidebar (account summary + scrollable stock list)
+│               ├── sandboxConstants.js     PIE_COLORS, CUSTOM_SCRIPT_KEY, STRATEGY_PARAM_UI
+│               ├── sandboxHelpers.js       fmt, fmtMoney, pct, encode/decodeStrategy
+│               ├── StrategySelector.jsx    Strategy dropdown, parameter editor, script picker
+│               ├── StockListItem.jsx       Sidebar row with engine ON/OFF indicator and hover tooltip
+│               ├── TradeRow.jsx            Row in the trade history table
+│               ├── PieTooltipContent.jsx   Custom Recharts tooltip for the allocation pie
+│               ├── PortfolioOverview.jsx   Overview page (stat cards, dynamically-sized pie
+│               │                             chart, position table, analytics charts)
+│               ├── PositionDetail.jsx      Position detail (summary, strategy editor, trade
+│               │                             form, trade history)
+│               └── SandboxSidebar.jsx      Left sidebar (account summary + stock list with
+│                                             per-symbol engine ON/OFF status)
+│
 ├── docker-compose.yml
+└── README.md
 ```
 
 ---
@@ -242,7 +257,8 @@ Full interactive docs at http://localhost:8000/docs
 | GET | /api/sandbox/trades | Trade history (optionally filtered by symbol) |
 | GET | /api/sandbox/analytics | Time-series analytics (cumulative P&L, volume, symbol P&L, win/loss) |
 | GET | /api/sandbox/engine/state | Engine status and per-symbol state |
-| POST | /api/sandbox/engine/toggle/{symbol} | Enable/disable the engine for a symbol |
+| POST | /api/sandbox/engine/toggle/{symbol} | Enable/disable engine for one symbol |
+| POST | /api/sandbox/engine/toggle-all | Start all (if any stopped) or stop all engines |
 | GET | /api/sandbox/ib-mode | Current IB mode (paper / live) |
 | POST | /api/sandbox/ib-mode | Switch IB mode |
 | GET | /api/sandbox/export | Export full portfolio snapshot as JSON |
@@ -280,81 +296,10 @@ pytest tests/ -v
 **Backend:** Python 3.11+, FastAPI, SQLAlchemy (async), SQLite, ib_insync, yfinance, pandas, numpy, matplotlib, httpx, python-multipart
 
 **Frontend:** React 18, Vite, TailwindCSS, Recharts, TanStack Query, React Router, Axios, Heroicons
-
----
-
-## Features
-
-| Feature | Description |
-|---|---|
-| **Dashboard** | Scrollable watchlist grid, intraday/historical price chart with technical indicators, and tabbed navigation for overview, movers, and news. |
-| **Watchlist** | Add/remove/reorder symbols via drag-and-drop. Persisted to localStorage. Fixed-height scrollable grid with live price cards showing price, % change, day high/low. |
-| **Live Quotes and Charts** | Quotes from Yahoo Finance v8 API with TTL in-memory and disk cache. Intraday chart distinguishes pre-market, regular session, and after-hours. 11 time-range options (1D to Max). |
-| **Technical Indicators** | Bollinger Bands, Fast MA, Slow MA, RSI, and MACD - individually togglable overlays rendered in stacked Recharts panels. |
-| **Gainers and Losers** | Top daily movers from a liquid large-cap universe. Refreshes every 5 min while market is open; polling pauses when closed. Eye icon on each row toggles watchlist membership instantly. |
-| **Financial News** | Curated feed split into: Upcoming Earnings (next 30 days for watchlist symbols), Watchlist News, and Market News. Initial load: 50 articles. Scroll to lazy-load 25 more at a time via animated chevron indicator. Noise-filtered. |
-| **Earnings Notifications** | Upcoming earnings dates for watchlist symbols surface as amber alert cards at the top of the News tab. |
-| **Skeleton Loading** | All loading states use animated pulse skeleton blocks. Price chart uses a shimmer SVG placeholder. |
-| **Symbol Search** | Search 8,000+ tickers by prefix or company name, with debounced autocomplete. |
-| **Backtesting** | Run backtests across yfinance, Stooq, and IB data. Results: equity curve, trade log, Sharpe ratio, max drawdown, win rate. |
-| **Custom Scripts** | Write and validate Python trading strategies in-browser using pandas/numpy in a sandboxed executor. |
 | **Report Generation** | Auto-generates HTML reports with embedded charts after every backtest. Accessible via the Reports page or at /reports/. |
 | **Simulated Trading** | Place buy/sell orders at any fill price with no broker needed. All trades stored in SQLite. |
 | **Paper and Live Trading** | Connect to IB TWS/Gateway for paper simulation or live order execution via ib_insync. |
 | **Real-time Prices** | WebSocket endpoint streams live price updates at a configurable interval. |
-
----
-
-## Architecture
-
-`
-stock_ai/
-+-- backend/
-|   +-- app/
-|   |   +-- main.py              FastAPI app, CORS, startup cache pre-warm
-|   |   +-- config.py            Settings via .env
-|   |   +-- database.py          SQLite + SQLAlchemy async
-|   |   +-- models/              Trade, BacktestReport, CustomScript
-|   |   +-- routers/             trading, backtest, market_data, scripts, ws
-|   |   +-- services/
-|   |       +-- market_service.py    Quotes, history, movers, news (Yahoo Finance v8, TTL-cached)
-|   |       +-- ib_service.py        Interactive Brokers (ib_insync)
-|   |       +-- backtester.py        Backtest engine (pandas)
-|   |       +-- data_provider.py     Historical OHLCV (yfinance / Stooq / IB)
-|   |       +-- reporter.py          HTML report generator (matplotlib)
-|   |       +-- script_executor.py   Sandboxed Python script runner
-|   |       +-- symbol_registry.py   Local ticker/company search index
-|   |       +-- strategies/          SMA Crossover, RSI, Bollinger Bands, MACD
-|   +-- tests/
-|   +-- requirements.txt
-|   +-- Dockerfile
-|   +-- .env.example
-+-- frontend/
-|   +-- src/
-|   |   +-- api/client.js              Axios API helpers
-|   |   +-- hooks/useWatchlist.js      Watchlist state, persistence, toggle, drag
-|   |   +-- utils/marketHours.js       isMarketHours(), deriveMarketOpen()
-|   |   +-- components/
-|   |       +-- Dashboard.jsx               Top-level shell: queries, tab routing
-|   |       +-- dashboard/
-|   |       |   +-- QuoteCard.jsx           Price card with shimmer skeleton
-|   |       |   +-- WatchlistPanel.jsx      Scrollable grid, edit/add/drag UI
-|   |       |   +-- PriceChartPanel.jsx     Chart + period selector + indicators
-|   |       |   +-- MoversTab.jsx           Gainers and Losers with watchlist toggle
-|   |       |   +-- NewsTab.jsx             Lazy-loaded news feed with earnings
-|   |       +-- charts/
-|   |       |   +-- SubplotChart.jsx        Price + RSI + MACD stacked chart
-|   |       |   +-- indicators.js           BB, MA, RSI, MACD calculations
-|   |       +-- Layout.jsx
-|   |       +-- LivePriceTicker.jsx
-|   |       +-- BacktestPanel.jsx
-|   |       +-- ReportsPanel.jsx
-|   |       +-- ScriptsPanel.jsx
-|   |       +-- TradingPanel.jsx
-|   +-- Dockerfile
-|   +-- nginx.conf
-+-- docker-compose.yml
-`
 
 ---
 

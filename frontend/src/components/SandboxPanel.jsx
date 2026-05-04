@@ -9,7 +9,7 @@ import {
   getSandboxTrades, placeSandboxTrade,
   exportSandbox, importSandbox, resetSandbox,
   getBulkQuotes, getIBStatus,
-  getSandboxEngineState, toggleSandboxEngine,
+  getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
   getSandboxAnalytics,
 } from '../api/client'
 import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy } from './sandbox/sandboxHelpers'
@@ -121,6 +121,13 @@ export default function SandboxPanel() {
     mutationFn: s => toggleSandboxEngine(s),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['sandbox-positions'] }),
   })
+  const toggleAllEnginesMut = useMutation({
+    mutationFn: toggleAllSandboxEngines,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-engine-state'] })
+    },
+  })
 
   // handlers
   function handleEditStratOpen() {
@@ -208,6 +215,25 @@ export default function SandboxPanel() {
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {(() => {
+              const withStrat = positions.filter(p => p.strategy_name)
+              const allRunning = withStrat.length > 0 && withStrat.every(p => p.strategy_enabled)
+              return withStrat.length > 0 ? (
+                <button
+                  className={`flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 ${
+                    allRunning
+                      ? 'border-emerald-700/50 text-emerald-400 hover:bg-emerald-900/20'
+                      : 'border-slate-600 text-slate-300 hover:bg-dark-700'
+                  }`}
+                  onClick={() => toggleAllEnginesMut.mutate()}
+                  disabled={toggleAllEnginesMut.isPending}
+                  title={allRunning ? 'Stop all strategy engines' : 'Start all strategy engines'}
+                >
+                  <SignalIcon className="h-3.5 w-3.5" />
+                  {toggleAllEnginesMut.isPending ? '…' : allRunning ? 'Stop All Engines' : 'Start All Engines'}
+                </button>
+              ) : null
+            })()}
             <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50"
               onClick={handleExport} disabled={exportLoading} title="Export sandbox as JSON">
               <ArrowDownTrayIcon className="h-3.5 w-3.5" />{exportLoading ? 'Exporting…' : 'Export'}

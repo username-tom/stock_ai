@@ -3,14 +3,29 @@ import {
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 
-const CustomTooltip = ({ active, payload, label }) => {
+const CustomTooltip = ({ active, payload, label, initialCapital }) => {
   if (!active || !payload?.length) return null
+  const value = payload[0]?.value
+  const chg = initialCapital != null ? value - initialCapital : null
+  const chgPct = initialCapital != null ? (chg / initialCapital) * 100 : null
+  const pos = chg == null || chg >= 0
   return (
-    <div className="bg-dark-700 border border-dark-500 rounded-lg p-3 text-sm shadow-xl">
-      <div className="text-slate-400 mb-1">{label}</div>
-      <div className="text-emerald-400 font-bold">
-        ${parseFloat(payload[0].value).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+    <div className="bg-[#1e293b] border border-[#334155] rounded-lg p-3 text-xs shadow-xl space-y-1 min-w-[160px]">
+      <div className="text-slate-400 font-medium mb-1">{label}</div>
+      <div className="flex justify-between gap-4">
+        <span className="text-slate-500">Equity</span>
+        <span className="text-slate-100 font-bold font-mono">
+          ${parseFloat(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+        </span>
       </div>
+      {chg != null && (
+        <div className="flex justify-between gap-4">
+          <span className="text-slate-500">P&amp;L</span>
+          <span className={`font-mono font-semibold ${pos ? 'text-emerald-400' : 'text-red-400'}`}>
+            {pos ? '+' : ''}${chg.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ({pos ? '+' : ''}{chgPct.toFixed(2)}%)
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -22,27 +37,33 @@ export default function EquityChart({ data = [], initialCapital = 10000, height 
     </div>
   )
 
-  const min = Math.min(...data.map(d => d.value)) * 0.99
-  const max = Math.max(...data.map(d => d.value)) * 1.01
+  const lastValue = data[data.length - 1]?.value
+  const isUp = lastValue >= initialCapital
+  const lineColor = isUp ? '#22c55e' : '#ef4444'
+  const fillId = isUp ? 'equityGradUp' : 'equityGradDn'
+
+  const min = Math.min(...data.map(d => d.value), initialCapital) * 0.995
+  const max = Math.max(...data.map(d => d.value), initialCapital) * 1.005
 
   return (
     <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
         <defs>
-          <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="5%" stopColor="#4ade80" stopOpacity={0.25} />
-            <stop offset="95%" stopColor="#4ade80" stopOpacity={0} />
+          <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%"  stopColor={lineColor} stopOpacity={0.25} />
+            <stop offset="95%" stopColor={lineColor} stopOpacity={0.02} />
           </linearGradient>
         </defs>
-        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+        <CartesianGrid horizontal={false} vertical={false} />
         <XAxis
           dataKey="date"
           tick={{ fill: '#64748b', fontSize: 11 }}
           tickLine={false}
-          axisLine={false}
+          axisLine={{ stroke: '#1e293b' }}
           interval="preserveStartEnd"
         />
         <YAxis
+          orientation="right"
           domain={[min, max]}
           tick={{ fill: '#64748b', fontSize: 11 }}
           tickLine={false}
@@ -50,18 +71,26 @@ export default function EquityChart({ data = [], initialCapital = 10000, height 
           tickFormatter={v => `$${(v / 1000).toFixed(0)}k`}
           width={55}
         />
-        <Tooltip content={<CustomTooltip />} />
-        <ReferenceLine y={initialCapital} stroke="#64748b" strokeDasharray="4 4" />
+        <Tooltip content={<CustomTooltip initialCapital={initialCapital} />} />
+        <ReferenceLine
+          y={initialCapital}
+          stroke="#64748b"
+          strokeDasharray="4 3"
+          strokeWidth={1}
+          label={{ value: `Start $${(initialCapital / 1000).toFixed(0)}k`, position: 'right', fill: '#64748b', fontSize: 9 }}
+        />
         <Area
           type="monotone"
           dataKey="value"
-          stroke="#4ade80"
-          strokeWidth={2}
-          fill="url(#equityGrad)"
+          stroke={lineColor}
+          strokeWidth={1.5}
+          fill={`url(#${fillId})`}
           dot={false}
-          activeDot={{ r: 4, fill: '#4ade80' }}
+          activeDot={{ r: 4, fill: lineColor }}
+          isAnimationActive={false}
         />
       </AreaChart>
     </ResponsiveContainer>
   )
 }
+

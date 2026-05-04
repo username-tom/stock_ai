@@ -1,5 +1,6 @@
+import { useId } from 'react'
 import {
-  ComposedChart, Line, Bar, Area, XAxis, YAxis, CartesianGrid, Tooltip,
+  ComposedChart, Line, Bar, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
 import { enrichData } from './indicators'
@@ -34,43 +35,73 @@ const SignalDot = (props) => {
 // 1D Yahoo-style chart
 // ---------------------------------------------------------------------------
 
-function OneDayTooltip({ active, payload, label, prevClose }) {
-  if (!active || !payload?.length) return null
-  const d = payload[0]?.payload
-  if (!d) return null
-  const chg = prevClose != null ? d.close - prevClose : null
-  const chgPct = prevClose != null ? (chg / prevClose) * 100 : null
-  const pos = chg == null || chg >= 0
+// ---------------------------------------------------------------------------
+// Shared tooltip helpers
+// ---------------------------------------------------------------------------
+
+const TT_BASE = "bg-[#0f172a] border border-[#1e293b] rounded-lg p-3 text-xs shadow-2xl min-w-[180px] space-y-0.5"
+
+function fmtVol(v) {
+  if (v == null) return '—'
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`
+  return `${(v / 1e3).toFixed(0)}K`
+}
+
+function TTRow({ label, value, className = 'text-slate-200' }) {
   return (
-    <div className="bg-[#1e293b] border border-[#334155] rounded-lg p-3 text-xs shadow-xl space-y-1 min-w-[170px]">
-      <div className="text-slate-400 font-medium">{label}</div>
-      <div className="flex justify-between gap-4">
-        <span className="text-slate-500">Price</span>
-        <span className="text-slate-100 font-bold font-mono">${d.close?.toFixed(2)}</span>
-      </div>
-      {chg != null && (
-        <div className="flex justify-between gap-4">
-          <span className="text-slate-500">Change</span>
-          <span className={`font-mono font-semibold ${pos ? 'text-emerald-400' : 'text-red-400'}`}>
-            {pos ? '+' : ''}{chg.toFixed(2)} ({pos ? '+' : ''}{chgPct.toFixed(2)}%)
-          </span>
-        </div>
-      )}
-      {d.volume != null && (
-        <div className="flex justify-between gap-4">
-          <span className="text-slate-500">Vol</span>
-          <span className="text-slate-400 font-mono">
-            {d.volume >= 1e6 ? `${(d.volume / 1e6).toFixed(2)}M` : `${(d.volume / 1e3).toFixed(0)}K`}
-          </span>
-        </div>
-      )}
-      {d.rsi != null && <div className="flex justify-between gap-4"><span className="text-slate-500">RSI</span><span className="text-purple-400">{d.rsi?.toFixed(2)}</span></div>}
-      {d.macd != null && <div className="flex justify-between gap-4"><span className="text-slate-500">MACD</span><span className="text-blue-400">{d.macd?.toFixed(4)}</span></div>}
+    <div className="flex justify-between gap-6">
+      <span className="text-slate-500">{label}</span>
+      <span className={`font-mono ${className}`}>{value}</span>
     </div>
   )
 }
 
-function OneDayChart({ data, height, indicators, prevClose }) {
+function TTDivider() {
+  return <div className="border-t border-[#1e293b] my-1" />
+}
+
+function OneDayTooltip({ active, payload, label, prevClose }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (!d) return null
+  const price = d.regularClose ?? d.preClose ?? d.postClose ?? d.close
+  if (price == null) return null
+  const chg = prevClose != null ? price - prevClose : null
+  const chgPct = prevClose != null ? (chg / prevClose) * 100 : null
+  const pos = chg == null || chg >= 0
+  const session = d.preClose != null && d.regularClose == null && d.postClose == null ? 'Pre-market'
+    : d.postClose != null && d.regularClose == null ? 'After-hours'
+    : null
+  return (
+    <div className={TT_BASE}>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-slate-400 font-medium">{label}</span>
+        {session && <span className="text-[10px] text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">{session}</span>}
+      </div>
+      <TTRow label="Price" value={`$${price.toFixed(2)}`} className="text-slate-100 font-bold" />
+      {chg != null && (
+        <TTRow
+          label="Change"
+          value={`${pos ? '+' : ''}${chg.toFixed(2)} (${pos ? '+' : ''}${chgPct.toFixed(2)}%)`}
+          className={pos ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}
+        />
+      )}
+      {d.open != null && <><TTDivider /><TTRow label="Open" value={`$${d.open.toFixed(2)}`} /></>}
+      {d.high != null && <TTRow label="High" value={`$${d.high.toFixed(2)}`} className="text-emerald-400" />}
+      {d.low  != null && <TTRow label="Low"  value={`$${d.low.toFixed(2)}`}  className="text-red-400" />}
+      {d.volume != null && <><TTDivider /><TTRow label="Vol" value={fmtVol(d.volume)} className="text-slate-400" /></>}
+      {(d.upper != null || d.fast_ma != null) && <TTDivider />}
+      {d.upper   != null && <TTRow label="BB Upper" value={`$${d.upper.toFixed(2)}`}   className="text-blue-400" />}
+      {d.mid     != null && <TTRow label="BB Mid"   value={`$${d.mid.toFixed(2)}`}     className="text-yellow-400" />}
+      {d.lower   != null && <TTRow label="BB Lower" value={`$${d.lower.toFixed(2)}`}   className="text-pink-400" />}
+      {d.fast_ma != null && <TTRow label="Fast MA"  value={`$${d.fast_ma.toFixed(2)}`} className="text-yellow-300" />}
+      {d.slow_ma != null && <TTRow label="Slow MA"  value={`$${d.slow_ma.toFixed(2)}`} className="text-orange-400" />}
+    </div>
+  )
+}
+
+function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 }) {
   if (!data.length) return null
 
   const enriched = enrichData(data)
@@ -160,7 +191,7 @@ function OneDayChart({ data, height, indicators, prevClose }) {
     <div className="space-y-0.5">
       {/* Price + Volume panel */}
       <ResponsiveContainer width="100%" height={height}>
-        <ComposedChart data={segmented} margin={{ top: 8, right: 64, left: 0, bottom: 0 }}>
+        <ComposedChart syncId={syncId} data={segmented} margin={{ top: 8, right: 64, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%"  stopColor={fillColor} stopOpacity={0.25} />
@@ -238,11 +269,11 @@ function OneDayChart({ data, height, indicators, prevClose }) {
       {/* RSI panel */}
       {hasRSI && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
-            <Tooltip formatter={(v) => v?.toFixed(2)} />
+            <Tooltip content={<RSITooltip />} position={{ y: 50 }} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-r-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
             ))}
@@ -259,11 +290,11 @@ function OneDayChart({ data, height, indicators, prevClose }) {
       {/* MACD panel */}
       {hasMACD && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => v?.toFixed(2)} />
-            <Tooltip formatter={(v) => v?.toFixed(4)} />
+            <Tooltip content={<MACDTooltip />} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-m-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
             ))}
@@ -271,7 +302,11 @@ function OneDayChart({ data, height, indicators, prevClose }) {
               <ReferenceLine key={`day-m-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.7} />
-            <Bar dataKey="macd_hist" fill="#4ade80" opacity={0.5} isAnimationActive={false} label={false} />
+            <Bar dataKey="macd_hist" isAnimationActive={false} label={false}>
+              {segmented.map((entry, i) => (
+                <Cell key={`1d-macd-cell-${i}`} fill={entry.macd_hist >= 0 ? '#4ade80' : '#f87171'} opacity={0.6} />
+              ))}
+            </Bar>
             <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} isAnimationActive={false} />
             <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} />
           </ComposedChart>
@@ -316,28 +351,81 @@ const sharedXAxis = (
   />
 )
 
-function PriceTooltip({ active, payload, label }) {
+function PriceTooltip({ active, payload, label, prevClose }) {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
+  const price = d.close
+  if (price == null) return null
+  const chg = prevClose != null ? price - prevClose : null
+  const chgPct = prevClose != null ? (chg / prevClose) * 100 : null
+  const pos = chg == null || chg >= 0
   const signalLabel = d.signal === 1 ? '▲ BUY' : d.signal === -1 ? '▼ SELL' : null
   return (
-    <div className="bg-dark-700 border border-dark-500 rounded-lg p-3 text-xs shadow-xl space-y-0.5 min-w-[160px]">
-      <div className="text-slate-400 font-medium mb-1">{label}</div>
-      <div className="flex justify-between gap-4"><span className="text-slate-500">Close</span><span className="text-slate-200 font-bold">${d.close}</span></div>
-      {signalLabel && (
-        <div className="flex justify-between gap-4">
-          <span className="text-slate-500">Signal</span>
-          <span className={d.signal === 1 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>{signalLabel}</span>
-        </div>
+    <div className={TT_BASE}>
+      <div className="text-slate-400 font-medium mb-1.5">{label}</div>
+      <TTRow label="Close" value={`$${price.toFixed(2)}`} className="text-slate-100 font-bold" />
+      {chg != null && (
+        <TTRow
+          label="Change"
+          value={`${pos ? '+' : ''}${chg.toFixed(2)} (${pos ? '+' : ''}${chgPct.toFixed(2)}%)`}
+          className={pos ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}
+        />
       )}
-      {d.rsi != null && <div className="flex justify-between gap-4"><span className="text-slate-500">RSI</span><span className="text-purple-400">{d.rsi?.toFixed(2)}</span></div>}
-      {d.macd != null && <div className="flex justify-between gap-4"><span className="text-slate-500">MACD</span><span className="text-blue-400">{d.macd?.toFixed(4)}</span></div>}
+      {d.open != null && <><TTDivider /><TTRow label="Open" value={`$${d.open.toFixed(2)}`} /></>}
+      {d.high != null && <TTRow label="High" value={`$${d.high.toFixed(2)}`} className="text-emerald-400" />}
+      {d.low  != null && <TTRow label="Low"  value={`$${d.low.toFixed(2)}`}  className="text-red-400" />}
+      {d.volume != null && <><TTDivider /><TTRow label="Vol" value={fmtVol(d.volume)} className="text-slate-400" /></>}
+      {signalLabel && (
+        <><TTDivider />
+        <TTRow label="Signal" value={signalLabel} className={d.signal === 1 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'} /></>
+      )}
+      {(d.upper != null || d.fast_ma != null) && <TTDivider />}
+      {d.upper   != null && <TTRow label="BB Upper" value={`$${d.upper.toFixed(2)}`}   className="text-blue-400" />}
+      {d.mid     != null && <TTRow label="BB Mid"   value={`$${d.mid.toFixed(2)}`}     className="text-yellow-400" />}
+      {d.lower   != null && <TTRow label="BB Lower" value={`$${d.lower.toFixed(2)}`}   className="text-pink-400" />}
+      {d.fast_ma != null && <TTRow label="Fast MA"  value={`$${d.fast_ma.toFixed(2)}`} className="text-yellow-300" />}
+      {d.slow_ma != null && <TTRow label="Slow MA"  value={`$${d.slow_ma.toFixed(2)}`} className="text-orange-400" />}
+    </div>
+  )
+}
+
+function RSITooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  const rsi = d?.rsi
+  if (rsi == null) return null
+  const overbought = rsi >= 70
+  const oversold = rsi <= 30
+  const color = overbought ? 'text-red-400' : oversold ? 'text-emerald-400' : 'text-purple-400'
+  const badge = overbought ? 'Overbought' : oversold ? 'Oversold' : null
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl flex items-center gap-2">
+      <span className="text-slate-500">RSI</span>
+      <span className={`font-mono font-semibold ${color}`}>{rsi.toFixed(2)}</span>
+      {badge && <span className={`text-[10px] ${color} opacity-70`}>{badge}</span>}
+    </div>
+  )
+}
+
+function MACDTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (d?.macd == null && d?.macd_hist == null) return null
+  const hist = d.macd_hist
+  const histPos = hist == null || hist >= 0
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl space-y-0.5">
+      {d.macd        != null && <TTRow label="MACD"   value={d.macd.toFixed(4)}        className="text-blue-400" />}
+      {d.macd_signal != null && <TTRow label="Signal" value={d.macd_signal.toFixed(4)} className="text-orange-400" />}
+      {hist          != null && <TTRow label="Hist"   value={(histPos ? '+' : '') + hist.toFixed(4)} className={histPos ? 'text-emerald-400' : 'text-red-400'} />}
     </div>
   )
 }
 
 export default function SubplotChart({ data = [], height = 240, indicators = {}, period = '', prevClose }) {
+  const syncId = useId()
+
   if (!data.length) return (
     <div className="flex items-center justify-center h-40 text-slate-500 text-sm">
       No price data available
@@ -346,7 +434,7 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
 
   // 1D and 2D get the Yahoo-style pre/regular/post chart
   if (period === '1d' || period === '2d') {
-    return <OneDayChart data={data} height={height} indicators={indicators} prevClose={prevClose} />
+    return <OneDayChart data={data} height={height} indicators={indicators} prevClose={prevClose} syncId={syncId} />
   }
 
   const enriched = enrichData(data)
@@ -373,7 +461,7 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
     <div className="space-y-1">
       {/* Price panel */}
       <ResponsiveContainer width="100%" height={priceHeight}>
-        <ComposedChart data={sampled} margin={{ top: 8, right: 10, left: 0, bottom: 0 }}>
+        <ComposedChart syncId={syncId} data={sampled} margin={{ top: 8, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
           {sharedXAxis}
           <YAxis
@@ -384,7 +472,7 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
             width={60}
             tickFormatter={v => `$${v.toFixed(0)}`}
           />
-          <Tooltip content={<PriceTooltip />} />
+          <Tooltip content={<PriceTooltip prevClose={prevClose} />} />
           {sessionAreas.map((a, i) => (
             <ReferenceArea key={`off-p-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
           ))}
@@ -403,11 +491,11 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
       {/* RSI panel */}
       {hasRSI && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
-            <Tooltip formatter={(v) => v?.toFixed(2)} />
+            <Tooltip content={<RSITooltip />} position={{ y: 50 }} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-r-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
             ))}
@@ -424,23 +512,24 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
       {/* MACD panel */}
       {hasMACD && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => v?.toFixed(2)} />
-            <Tooltip formatter={(v) => v?.toFixed(4)} />
+            <Tooltip content={<MACDTooltip />} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-m-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
             ))}
             {dayLines.map((d, i) => (
-              <ReferenceLine key={`day-m-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+              <ReferenceLine key={`day-m-${i}`} x={d} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.7} />
-            <Bar dataKey="macd_hist" fill="#4ade80" opacity={0.5} name="Histogram"
-              label={false}
-              isAnimationActive={false}
-            />
-            <Line type="monotone" dataKey="macd" stroke={MACD_COLOR} strokeWidth={1} dot={false} name="MACD" isAnimationActive={false} />
+            <Bar dataKey="macd_hist" name="Histogram" isAnimationActive={false} label={false}>
+              {sampled.map((entry, i) => (
+                <Cell key={`macd-cell-${i}`} fill={entry.macd_hist >= 0 ? '#4ade80' : '#f87171'} opacity={0.6} />
+              ))}
+            </Bar>
+            <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} name="MACD"   isAnimationActive={false} />
             <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="Signal" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
