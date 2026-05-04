@@ -83,3 +83,16 @@ async def get_news(
     except Exception as exc:
         logger.error("news failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/earnings")
+async def get_earnings(
+    symbols: str = Query(default="", description="Comma-separated watchlist symbols to prioritise"),
+):
+    """Return upcoming earnings for a broad universe, watchlist symbols sorted first (cached 15 min)."""
+    watchlist = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    try:
+        return await market_service.get_earnings(watchlist)
+    except Exception as exc:
+        logger.error("earnings failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

@@ -4,10 +4,11 @@ import {
   ClockIcon, SignalIcon, ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
-import { getScripts } from '../../api/client'
+import { getScripts, getHistory } from '../../api/client'
 import { fmt, fmtMoney, stratLabel } from './sandboxHelpers'
 import StrategySelector from './StrategySelector'
 import TradeRow from './TradeRow'
+import CandlestickChart from '../charts/CandlestickChart'
 
 export default function PositionDetail({
   selectedSymbol,
@@ -44,6 +45,16 @@ export default function PositionDetail({
 }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
+
+  const { data: histData } = useQuery({
+    queryKey: ['history', selectedSymbol, '1d'],
+    queryFn: () => getHistory(selectedSymbol, '1d'),
+    staleTime: 60000,
+    refetchInterval: 60000,
+    enabled: !!selectedSymbol,
+  })
+  const chartData = histData?.data ?? []
+  const prevClose = histData?.prev_close ?? null
 
   function getScriptName(strategyName) {
     if (!strategyName?.startsWith('custom:')) return null
@@ -131,6 +142,17 @@ export default function PositionDetail({
           <div className={`text-xl font-bold ${(selectedPos.realized_pnl + selectedUnrealised) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(selectedPos.realized_pnl + selectedUnrealised)}</div>
           <div className="text-xs text-slate-500 mt-0.5">Realised: {fmt(selectedPos.realized_pnl)}</div>
         </div>
+      </div>
+
+      {/* 1D Price Chart */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Today — 1D</h3>
+        </div>
+        {chartData.length > 0
+          ? <CandlestickChart data={chartData} prevClose={prevClose} height={200} />
+          : <div className="flex items-center justify-center h-[200px] text-slate-500 text-sm">Loading chart…</div>
+        }
       </div>
 
       {/* Strategy card */}

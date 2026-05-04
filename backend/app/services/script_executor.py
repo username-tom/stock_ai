@@ -212,13 +212,19 @@ def execute_script(script_code: str, df: pd.DataFrame, **params) -> pd.DataFrame
 
     Raises ``ValueError`` if the script is invalid or execution fails.
     """
-    result = validate_script(script_code)
-    if not result["valid"]:
-        raise ValueError(result["error"])
+    try:
+        code = compile(script_code, "<custom_script>", "exec")
+    except SyntaxError as exc:
+        raise ValueError(f"Syntax error: {exc}") from exc
 
-    code = compile(script_code, "<custom_script>", "exec")
     globs = _build_globals()
-    exec(code, globs)  # noqa: S102
+    try:
+        exec(code, globs)  # noqa: S102
+    except Exception as exc:
+        raise ValueError(f"Execution error: {exc}") from exc
+
+    if "generate_signals" not in globs or not callable(globs["generate_signals"]):
+        raise ValueError("Script must define a callable 'generate_signals(df, **params)'.")
 
     generate_signals = globs["generate_signals"]
 

@@ -12,6 +12,8 @@ export const getMovers = (topN = 10) =>
   api.get('/market-data/movers', { params: { top_n: topN } }).then(r => r.data)
 export const getNews = (symbols) =>
   api.get('/market-data/news', { params: { symbols: symbols.join(',') } }).then(r => r.data)
+export const getEarnings = (watchlist = []) =>
+  api.get('/market-data/earnings', { params: watchlist.length ? { symbols: watchlist.join(',') } : {} }).then(r => r.data)
 export const searchSymbols = (q, limit = 8) =>
   api.get('/market-data/search', { params: { q, limit } }).then(r => r.data)
 

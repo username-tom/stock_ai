@@ -142,31 +142,43 @@ async def _process_symbol(
 
         # The last bar is the current minute
         last_row = df_sig.iloc[-1]
-        signal = int(last_row.get("signal", 0))
-        position_change = int(df_sig["signal"].diff().iloc[-1] or 0) if len(df_sig) > 1 else signal
-
-        status["last_signal"] = signal
         current_price = float(last_row["Close"])
+
+        # The raw last-bar signal is used for display (last_signal in DB).
+        current_signal = int(last_row.get("signal", 0))
+
+        # Custom scripts emit event-based signals (+1/-1 only on the crossover
+        # bar, then 0).  Built-in strategies keep signal = +1/-1 while the
+        # condition holds.  Using the last *non-zero* value handles both: for
+        # state-based strategies it is still the last bar; for event-based
+        # scripts it is the most recent buy or sell event.
+        sig_series = df_sig["signal"]
+        nonzero = sig_series[sig_series != 0]
+        trade_signal = int(nonzero.iloc[-1]) if len(nonzero) > 0 else 0
+
+        status["last_signal"] = current_signal
 
         # Determine what action to take
         action = None
         reason = None
 
-        if position_change > 0 and pos.shares == 0:
-            # Buy signal – enter position
-            action = "BUY"
-            reason = f"Strategy {strategy_name.split(':')[0]} buy signal at ${current_price:.2f}"
+        strat_label = strategy_name.split(':')[0]
 
-        elif position_change < 0 and pos.shares > 0:
-            # Sell signal – exit position
+        if trade_signal > 0 and pos.shares == 0:
+            # Buy signal – enter position (crossover or initial alignment)
+            action = "BUY"
+            reason = f"Strategy {strat_label} buy signal at ${current_price:.2f}"
+
+        elif trade_signal < 0 and pos.shares > 0:
+            # Sell signal – exit position (crossover or initial alignment)
             action = "SELL"
-            reason = f"Strategy {strategy_name.split(':')[0]} sell signal at ${current_price:.2f}"
+            reason = f"Strategy {strat_label} sell signal at ${current_price:.2f}"
 
         if action:
             await _execute_trade(pos, action, current_price, reason)
 
-        # Write engine status back to the position row
-        await _update_position_status(pos.id, signal, None, datetime.now(timezone.utc))
+        # Write engine status back to the position row (current bar signal for display)
+        await _update_position_status(pos.id, current_signal, None, datetime.now(timezone.utc))
 
     except Exception as exc:
         logger.warning("Engine error for %s: %s", symbol, exc)
@@ -206,6 +218,7 @@ async def _execute_trade(
     """Open a fresh DB session and execute the simulated trade."""
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
+        from app.models.sandbox import SandboxAccount
         result = await db.execute(
             sa_select(SandboxPosition).where(SandboxPosition.id == pos.id)
         )
@@ -216,8 +229,17 @@ async def _execute_trade(
         pnl = None
 
         if side == "BUY":
-            # Use available allocated funds to buy as many whole shares as possible
-            available = position.allocated_funds
+            # Use allocated funds + any unallocated account balance
+            acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+            account = acct_res.scalar_one_or_none()
+            if account:
+                all_pos_res = await db.execute(sa_select(SandboxPosition))
+                total_allocated = sum(p.allocated_funds for p in all_pos_res.scalars().all())
+                unallocated = max(0.0, account.total_funds - total_allocated)
+            else:
+                unallocated = 0.0
+
+            available = position.allocated_funds + unallocated
             if available < price:
                 logger.debug("Engine BUY skipped for %s — insufficient funds ($%.2f)", pos.symbol, available)
                 return
@@ -225,6 +247,10 @@ async def _execute_trade(
             if quantity <= 0:
                 return
             total = quantity * price
+            # Draw any shortfall from the unallocated pool into this position
+            extra_needed = max(0.0, total - position.allocated_funds)
+            if extra_needed > 0:
+                position.allocated_funds += extra_needed
             new_shares = position.shares + quantity
             position.avg_cost = (position.avg_cost * position.shares + total) / new_shares
             position.shares = new_shares

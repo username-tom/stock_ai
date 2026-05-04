@@ -74,12 +74,23 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
         )}
         {(() => {
           const s = quotesentiment(quote)
-          const sig = quotesignal(quote)
+          // If the engine has run for this position, use its script signal for
+          // the BUY/SELL/HOLD badge — it reflects what the strategy actually
+          // decided rather than a generic quote heuristic.
+          const engineRan = pos.strategy_name && pos.last_run_at != null
+          const scriptSig = engineRan
+            ? (pos.last_signal === 1 ? 'buy' : pos.last_signal === -1 ? 'sell' : 'hold')
+            : null
+          const sig = scriptSig ?? quotesignal(quote)
           if (!s && !sig) return null
           return (
             <div className="mt-1 flex flex-wrap gap-1">
               {s && <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SENTIMENT_COLORS[s]}`}>{SENTIMENT_LABELS[s]}</div>}
-              {sig && <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>{SIGNAL_LABELS[sig]}</div>}
+              {sig && (
+                <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
+                  {scriptSig ? '⚡ ' : ''}{SIGNAL_LABELS[sig]}
+                </div>
+              )}
             </div>
           )
         })()}
@@ -94,12 +105,20 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
           {quote.company_name && <div className="text-slate-400">{quote.company_name}</div>}
           {(() => {
             const s = quotesentiment(quote)
-            const sig = quotesignal(quote)
+            const engineRan = pos.strategy_name && pos.last_run_at != null
+            const scriptSig = engineRan
+              ? (pos.last_signal === 1 ? 'buy' : pos.last_signal === -1 ? 'sell' : 'hold')
+              : null
+            const sig = scriptSig ?? quotesignal(quote)
             if (!s && !sig) return null
             return (
               <div className="flex flex-wrap gap-1">
                 {s && <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SENTIMENT_COLORS[s]}`}>{SENTIMENT_LABELS[s]}</div>}
-                {sig && <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>{SIGNAL_LABELS[sig]}</div>}
+                {sig && (
+                  <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
+                    {scriptSig ? '⚡ ' : ''}{SIGNAL_LABELS[sig]}
+                  </div>
+                )}
               </div>
             )
           })()}

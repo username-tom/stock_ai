@@ -180,7 +180,7 @@ async def get_quote(symbol: str) -> dict:
     if cached is not None:
         return cached
 
-    chart = await _yf_chart(sym, range_="5d", interval="1d")
+    chart = await _yf_chart(sym, range_="1d", interval="1m")
     meta = chart["meta"]
 
     last_price   = meta.get("regularMarketPrice")
@@ -337,6 +337,57 @@ async def get_movers(top_n: int = 10) -> dict:
 
 
 NEWS_TTL = 900  # 15 minutes
+EARNINGS_TTL = 900  # 15 minutes
+
+# Broad universe for earnings scanning (large-caps + ETFs that report)
+_EARNINGS_UNIVERSE = [
+    "AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","JPM","V","UNH",
+    "XOM","JNJ","WMT","MA","PG","HD","CVX","MRK","ABBV","LLY",
+    "AVGO","PEP","KO","COST","PFE","TMO","MCD","ACN","DHR","NKE",
+    "BAC","ADBE","INTC","CRM","DIS","NFLX","AMD","QCOM","TXN","GS",
+    "MS","SCHW","BLK","AXP","SPGI","NOW","INTU","AMAT","LRCX","KLAC",
+    "MU","MRVL","SNPS","CDNS","PANW","CRWD","FTNT","ZS","OKTA","DDOG",
+    "NET","SNOW","MDB","HUBS","TTD","UBER","LYFT","ABNB","DASH","RBLX",
+    "COIN","SQ","PYPL","SHOP","SE","MELI","BIDU","JD","PDD","BABA",
+    "TSM","ASML","SAP","NXPI","STX","WDC","DELL","HPE","IBM","ORCL",
+    "CSCO","F","GM","RIVN","LCID","NIO","BA","LMT","RTX","NOC",
+    "GE","CAT","DE","MMM","HON","EMR","ETN","PH","ROK","SWK",
+    "UPS","FDX","DAL","UAL","AAL","LUV","MAR","HLT","MGM","WYNN",
+    "AMGN","GILD","BIIB","REGN","VRTX","MRNA","BNTX","ZTS","IDXX","EW",
+    "SYK","MDT","BSX","ABT","BAX","BDX","CAH","MCK","CVS","CI",
+    "HUM","MOH","CNC","WFC","C","USB","PNC","TFC","MTB","KEY",
+    "RF","CFG","FITB","HBAN","ZION","CMA","DFS","COF","SYF","ALLY",
+]
+
+
+async def get_earnings(watchlist: list[str]) -> dict:
+    """Return upcoming earnings for a broad universe with watchlist items flagged and sorted first."""
+    watchlist_set = {s.upper() for s in watchlist}
+    # Combine watchlist + universe, deduplicated, watchlist first
+    all_symbols = list(watchlist_set) + [s for s in _EARNINGS_UNIVERSE if s not in watchlist_set]
+
+    cache_key = f"earnings:{','.join(sorted(watchlist_set))}"
+    cached = await _cache.get(cache_key, EARNINGS_TTL)
+    if cached is not None:
+        return cached
+
+    results = await asyncio.gather(*[_fetch_earnings(s) for s in all_symbols])
+
+    items = []
+    seen: set[str] = set()
+    for item in results:
+        if item and item["id"] not in seen:
+            seen.add(item["id"])
+            symbol = item["related"][0] if item.get("related") else None
+            item["watchlist_match"] = symbol in watchlist_set if symbol else False
+            items.append(item)
+
+    # Sort: watchlist first, then by days_until ascending
+    items.sort(key=lambda x: (not x["watchlist_match"], x.get("days_until", 99)))
+
+    result = {"items": items, "as_of": datetime.now(tz=timezone.utc).isoformat()}
+    await _cache.set(cache_key, result)
+    return result
 
 _YF_NEWS_URL = "https://query1.finance.yahoo.com/v1/finance/search"
 _YF_EARNINGS_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"

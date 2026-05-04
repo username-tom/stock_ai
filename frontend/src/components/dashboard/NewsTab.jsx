@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { NewspaperIcon, ArrowTopRightOnSquareIcon, BellAlertIcon } from '@heroicons/react/24/solid'
+import { NewspaperIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/solid'
 import { getNews } from '../../api/client'
 
 const INITIAL_VISIBLE = 50
@@ -151,7 +151,6 @@ export default function NewsTab({ watchlist }) {
 
   const asOf = data?.as_of ? new Date(data.as_of).toLocaleTimeString() : null
 
-  const earnings         = data?.items?.filter(i => i.type === 'earnings') ?? []
   const allNewsItems     = data?.items?.filter(i => i.type === 'news' && !isBlocked(i)) ?? []
   const watchlistNews    = allNewsItems.filter(i => i.watchlist_match)
   const marketNews       = allNewsItems.filter(i => !i.watchlist_match)
@@ -194,36 +193,6 @@ export default function NewsTab({ watchlist }) {
 
       {data && (
         <>
-          {earnings.length > 0 && (
-            <section>
-              <h3 className="text-xs font-semibold text-amber-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                <BellAlertIcon className="h-3.5 w-3.5" /> Upcoming Earnings
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                {earnings.map(item => (
-                  <a
-                    key={item.id}
-                    href={item.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-3 p-3 rounded-xl bg-amber-400/5 border border-amber-400/20 hover:border-amber-400/50 hover:bg-amber-400/10 transition-all group"
-                  >
-                    <BellAlertIcon className="h-5 w-5 text-amber-400 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold text-slate-200 group-hover:text-amber-300 transition-colors leading-snug">
-                        {item.title}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        {item.days_until === 0 ? 'Today' : item.days_until === 1 ? 'Tomorrow' : `In ${item.days_until} days`}
-                      </p>
-                    </div>
-                    <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5 text-slate-600 group-hover:text-amber-400 shrink-0 transition-colors" />
-                  </a>
-                ))}
-              </div>
-            </section>
-          )}
-
           {visibleWatchlistItems.length > 0 || visibleMarketItems.length > 0 ? (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
               {/* Watchlist News column */}
@@ -275,9 +244,7 @@ export default function NewsTab({ watchlist }) {
               </section>
             </div>
           ) : (
-            earnings.length === 0 && (
-              <p className="text-sm text-slate-500 text-center py-10">No news available.</p>
-            )
+            <p className="text-sm text-slate-500 text-center py-10">No news available.</p>
           )}
         </>
       )}

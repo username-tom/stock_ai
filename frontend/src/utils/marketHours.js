@@ -7,7 +7,11 @@ export function deriveMarketOpen(quotesMap) {
   if (quotesMap) {
     const states = Object.values(quotesMap).map(q => q?.market_state)
     if (states.some(s => s === 'REGULAR')) return true
-    if (states.some(s => s === 'PRE' || s === 'POST' || s === 'CLOSED')) return false
+    // PRE / POST are definitive extended-hours states — trust them
+    if (states.some(s => s === 'PRE' || s === 'POST')) return false
+    // 'CLOSED' from Yahoo's daily-chart endpoint is unreliable during the
+    // session — fall through to the clock-based check instead of returning
+    // false and permanently showing "Market Closed" during trading hours.
   }
   return isMarketHours()
 }

@@ -7,11 +7,13 @@ import WatchlistPanel from './dashboard/WatchlistPanel'
 import PriceChartPanel from './dashboard/PriceChartPanel'
 import MoversTab from './dashboard/MoversTab'
 import NewsTab from './dashboard/NewsTab'
+import EarningsTab from './dashboard/EarningsTab'
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
   { key: 'movers',   label: 'Gainers & Losers' },
   { key: 'news',     label: 'News' },
+  { key: 'earnings', label: 'Earnings' },
 ]
 
 export default function Dashboard() {
@@ -109,6 +111,10 @@ export default function Dashboard() {
 
       {activeTab === 'news' && (
         <NewsTab watchlist={watchlist} />
+      )}
+
+      {activeTab === 'earnings' && (
+        <EarningsTab watchlist={watchlist} />
       )}
 
       {activeTab === 'overview' && (

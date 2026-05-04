@@ -8,27 +8,29 @@ A full-stack algorithmic trading and market analytics platform. Real-time market
 
 | Feature | Description |
 |---|---|
-| **Dashboard** | Scrollable watchlist grid, intraday/historical price chart with technical indicators, and tabbed navigation for overview, movers, and news. |
+| **Dashboard** | Scrollable watchlist grid, intraday/historical price chart with technical indicators, and tabbed navigation for overview, movers, news, and earnings. |
 | **Watchlist** | Add/remove/reorder symbols via drag-and-drop. Persisted to localStorage. Scrollable grid with live price cards showing price, % change, day high/low, sentiment badge, and buy/hold/sell signal. |
 | **Live Quotes & Charts** | Quotes from Yahoo Finance v8 API with TTL in-memory and disk cache. Intraday chart distinguishes pre-market, regular session, and after-hours. 11 time-range options (1D to Max). Yahoo Finance-style dark theme with green/red direction coloring. |
 | **Technical Indicators** | Bollinger Bands, Fast MA, Slow MA, RSI, and MACD — individually togglable overlays rendered in stacked Recharts panels with synchronized hover cursor across all sub-panels. |
 | **Gainers & Losers** | Top 25 daily movers. Hover for a rich tooltip (price, volume, market cap, sentiment, signal). Click a symbol to open its Yahoo Finance page. Click a row to expand an inline 1D/2D/5D chart dropdown fetched on demand. Refreshes every 5 min during market hours. |
-| **Financial News** | Curated feed split into: Upcoming Earnings (next 30 days for watchlist symbols), Watchlist News, and Market News. Initial load: 50 articles. Scroll to lazy-load 25 more at a time. Noise-filtered. |
-| **Earnings Notifications** | Upcoming earnings dates for watchlist symbols surface as amber alert cards at the top of the News tab. |
+| **Financial News** | Curated feed of Watchlist News and Market News. Initial load: 50 articles. Scroll to lazy-load 25 more at a time. Noise-filtered. Earnings items are separated into their own dedicated tab. |
+| **Earnings Tab** | Dedicated dashboard tab for upcoming earnings. Events split into *Reporting Today* (red) and *Upcoming* (amber) sections. Urgency colour-coding: red = today, amber = tomorrow/this week, muted = later. Shows related tickers and source. Refreshes every 15 min. |
 | **Skeleton Loading** | All loading states use animated pulse skeleton blocks. Price chart uses a shimmer SVG placeholder. |
 | **Symbol Search** | Shared autocomplete component used across Portfolio, Backtest, and Trading panels. Searches 8,000+ tickers by prefix or company name with debounced suggestions. |
-| **Sentiment & Signals** | Client-side bullish/bearish/neutral sentiment scoring and buy/hold/sell signal classification shown on watchlist cards, movers, and portfolio stock list. |
+| **Sentiment & Signals** | Stock list BUY/SELL/HOLD badges prefer the engine-derived `last_signal` (marked ⚡) when a strategy has run, falling back to quote-based heuristics otherwise. |
 | **Backtesting** | Run backtests across yfinance, Stooq, and IB data. Results: equity curve, trade log, Sharpe ratio, max drawdown, win rate. |
 | **Custom Scripts** | Write and validate Python trading strategies in-browser using pandas/numpy in a sandboxed executor. Collapsible script editor with title, description, and default parameters. |
 | **Report Generation** | Auto-generates HTML reports with embedded charts after every backtest. Accessible via the Reports page (with search/filter) or at /reports/. |
 | **Portfolio (Simulated Trading)** | Full portfolio simulation with per-symbol fund allocation, automated strategy execution, and trade recording. Export/import/reset of the full simulation state. |
 | **Portfolio Overview** | Stat cards (total funds, equity, unrealised/realised P&L), dynamic allocation pie chart with bottom legend, position breakdown table, and analytics charts. |
 | **Portfolio Analytics** | Cumulative realised P&L (area chart), daily buy/sell volume (bar chart), realised P&L by symbol (horizontal bar), and win/loss ratio (donut + stats). |
-| **Automated Strategy Engine** | Background engine ticks every 60 seconds during market hours (09:20–16:00 ET). Per-symbol enable/disable toggle with live ON/OFF status shown in the sidebar. Start/Stop All Engines toolbar button. |
+| **Position Detail Chart** | Each sandbox stock detail panel shows a live 1D candlestick chart above the strategy card. Chart starts at 07:30 ET (2 h pre-market), includes a dashed prev-close line, an amber vertical market-open line at 09:30 ET, volume bars, and a hover crosshair with OHLCV tooltip. Implemented as pure SVG — no charting library invariant risk. |
+| **Automated Strategy Engine** | Background engine ticks every 60 seconds during market hours (09:20–16:00 ET). Uses the last non-zero signal for trade decisions and writes the current-bar signal to `last_signal` for display. BUY orders consume both allocated funds and unallocated account balance. Per-symbol enable/disable toggle with live ON/OFF status in the sidebar. Start/Stop All Engines toolbar button. |
 | **Market Hours Gating** | Engine and polling respect market hours. A 10-minute pre-open window (09:20 ET) allows strategies to warm up before the open. |
+| **Market Status Indicator** | Top-right market badge and live ticker bar derive open/closed state from Yahoo Finance intraday quote metadata, with a clock-based fallback so the indicator is correct during regular trading hours even when Yahoo returns ambiguous state. |
 | **Paper & Live Trading** | Connect to IB TWS/Gateway for paper simulation or live order execution via ib_insync. Toggle between modes at runtime. |
 | **Real-time Prices** | WebSocket endpoint streams live price updates at a configurable interval. |
-| **Frontend Error Logging** | Runtime JS errors and unhandled promise rejections are forwarded to the Vite dev-server terminal for easy debugging. |
+| **Frontend Error Logging** | Runtime JS errors and unhandled promise rejections are forwarded to the Vite dev-server terminal for easy debugging. Chart render errors are caught by a React error boundary and logged to the browser console with full stack traces. |
 
 ---
 
@@ -71,7 +73,8 @@ stock_ai/
 │       ├── hooks/
 │       │   └── useWatchlist.js       Watchlist state, localStorage persistence, toggle, drag-and-drop
 │       ├── utils/
-│       │   ├── marketHours.js        isMarketHours(), deriveMarketOpen()
+│       │   ├── marketHours.js        isMarketHours(), deriveMarketOpen() — falls back to
+│       │   │                           clock when Yahoo returns ambiguous CLOSED state
 │       │   └── sentiment.js          quotesentiment(), quotesignal(), color/label maps
 │       └── components/
 │           ├── Layout.jsx            App shell with nav
@@ -89,11 +92,16 @@ stock_ai/
 │           │   ├── PriceChartPanel.jsx   Chart with period selector and indicator toggles
 │           │   ├── MoversTab.jsx         Top 25 gainers/losers; hover tooltip, Yahoo Finance
 │           │   │                           links, click-to-expand 1D/2D/5D chart dropdown
-│           │   └── NewsTab.jsx           Lazy-loaded news feed with earnings alerts
+│           │   ├── NewsTab.jsx           Lazy-loaded news feed (general + watchlist news only)
+│           │   └── EarningsTab.jsx       Dedicated earnings tab; urgency colour-coded cards
+│           │                               split into Reporting Today / Upcoming sections
 │           ├── charts/
 │           │   ├── SubplotChart.jsx      Stacked price + RSI + MACD panels; synchronized
 │           │   │                           hover cursor; Yahoo Finance-style dark theme
-│           │   ├── PriceChart.jsx        General OHLCV price chart (Yahoo Finance style)
+│           │   ├── PriceChart.jsx        General OHLCV line chart (Yahoo Finance style)
+│           │   ├── CandlestickChart.jsx  Pure-SVG 1D candlestick chart; pre-market from
+│           │   │                           07:30 ET, market-open line at 09:30 ET, prev-close
+│           │   │                           dashed line, volume bars, hover tooltip, error boundary
 │           │   ├── EquityChart.jsx       Equity curve chart for backtest results
 │           │   └── indicators.js         Client-side BB, MA, RSI, MACD calculations
 │           ├── shared/
@@ -107,14 +115,38 @@ stock_ai/
 │               ├── PieTooltipContent.jsx   Custom Recharts tooltip for the allocation pie
 │               ├── PortfolioOverview.jsx   Overview page (stat cards, dynamically-sized pie
 │               │                             chart, position table, analytics charts)
-│               ├── PositionDetail.jsx      Position detail (summary, strategy editor, trade
-│               │                             form, trade history)
+│               ├── PositionDetail.jsx      Position detail (1D candlestick chart, summary,
+│               │                             strategy editor, trade form, trade history)
 │               └── SandboxSidebar.jsx      Left sidebar (account summary + stock list with
 │                                             per-symbol engine ON/OFF status)
 │
 ├── docker-compose.yml
 └── README.md
 ```
+
+---
+
+## Changelog
+
+### Recent updates
+
+#### Features added
+- **Earnings Tab** — Earnings news is now separated from the News tab into a dedicated *Earnings* dashboard tab. Events are split into *Reporting Today* and *Upcoming Earnings* sections with urgency-based colour coding (red for today, amber for this week, muted for later).
+- **1D Candlestick Chart in Position Detail** — Each sandbox stock detail panel now shows a live 1D candlestick chart above the strategy card. The chart is implemented as pure SVG with no third-party charting library.
+  - Starts at 07:30 ET (2 hours of pre-market data)
+  - Amber dashed vertical line marks the regular session open at 09:30 ET
+  - Dashed horizontal line shows the previous session close price
+  - Volume bars rendered as a background layer
+  - Hover crosshair with floating OHLCV tooltip
+  - React error boundary catches any render error and logs the full stack trace to the browser console
+- **Engine signal aligned with stock list badges** — The BUY/SELL/HOLD badge on each stock list row now uses the engine-derived `last_signal` value (marked ⚡) when a strategy has run at least once, rather than a generic quote heuristic.
+
+#### Bugs fixed
+- **Sandbox engine not executing trades** — The engine was only acting on a same-bar signal crossover event (`signal.diff()`), which is almost always zero. It now uses the last non-zero signal for trade decisions while writing the current-bar signal to `last_signal` for display.
+- **`last_signal` not updating after each engine tick** — Engine now correctly persists `last_signal`, `last_run_at`, and `engine_error` to the database after every tick regardless of whether a trade was placed.
+- **BUY orders ignoring unallocated account funds** — BUY logic now consumes both the position's allocated funds and any unallocated account balance, matching expected paper-trading behaviour.
+- **Market status showing "Closed" during market hours** — The market-open indicator and live ticker were reading Yahoo Finance quote metadata from daily candle requests, which frequently returns `CLOSED`. Quote fetching now uses 1-day/1-minute intraday requests, and the client-side `deriveMarketOpen()` helper falls back to the system clock when Yahoo returns an ambiguous state.
+- **Custom script double-execution** — Script validation and execution were sharing the same compile/exec path, causing scripts to run twice on validation. The execution path is now deduplicated.
 
 ---
 
