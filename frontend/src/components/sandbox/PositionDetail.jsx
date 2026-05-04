@@ -3,6 +3,8 @@ import {
   ArrowUpIcon, ArrowDownIcon, BoltIcon, PlayIcon, StopCircleIcon,
   ClockIcon, SignalIcon, ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
+import { useQuery } from '@tanstack/react-query'
+import { getScripts } from '../../api/client'
 import { fmt, fmtMoney, stratLabel } from './sandboxHelpers'
 import StrategySelector from './StrategySelector'
 import TradeRow from './TradeRow'
@@ -40,6 +42,14 @@ export default function PositionDetail({
   handleTrade,
   tradeMut,
 }) {
+  const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
+  const scripts = scriptsData?.scripts ?? []
+
+  function getScriptName(strategyName) {
+    if (!strategyName?.startsWith('custom:')) return null
+    const scriptId = parseInt(strategyName.split(':')[1], 10)
+    return scripts.find(s => s.id === scriptId)?.name ?? null
+  }
   return (
     <>
       {/* Header */}
@@ -70,6 +80,9 @@ export default function PositionDetail({
             {selectedPos.strategy_name && !editingStrategy && (
               <span className="text-sm text-blue-400 bg-blue-900/20 border border-blue-800/30 px-2 py-0.5 rounded">
                 {selectedPos.strategy_name.split(':')[0]}
+                {getScriptName(selectedPos.strategy_name) && (
+                  <span className="text-slate-400"> · {getScriptName(selectedPos.strategy_name)}</span>
+                )}
               </span>
             )}
           </div>
@@ -174,7 +187,12 @@ export default function PositionDetail({
           <div className="space-y-3">
             <div className="text-sm">
               {selectedPos.strategy_name
-                ? <span className="text-blue-400 font-medium">{stratLabel(selectedPos.strategy_name.split(':')[0])}</span>
+                ? <span className="text-blue-400 font-medium">
+                    {stratLabel(selectedPos.strategy_name.split(':')[0])}
+                    {getScriptName(selectedPos.strategy_name) && (
+                      <span className="text-slate-400 font-normal"> · {getScriptName(selectedPos.strategy_name)}</span>
+                    )}
+                  </span>
                 : <span className="text-slate-600 italic">No strategy assigned</span>}
             </div>
             {selectedPos.strategy_name && (

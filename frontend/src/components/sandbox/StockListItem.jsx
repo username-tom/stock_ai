@@ -1,7 +1,12 @@
+import { useQuery } from '@tanstack/react-query'
+import { getScripts } from '../../api/client'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 import { fmt, fmtMoney } from './sandboxHelpers'
+import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
 
 export default function StockListItem({ pos, quote, isSelected, onClick }) {
+  const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
+  const scripts = scriptsData?.scripts ?? []
   const mp = quote?.last_price ?? pos.avg_cost
   const equity = mp * pos.shares
   const unrealised = equity - pos.avg_cost * pos.shares
@@ -41,7 +46,14 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
         {pos.strategy_name && (
           <div className="mt-0.5 flex items-center gap-1.5">
             <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${pos.strategy_enabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-            <span className="text-xs text-blue-400/80 truncate">{pos.strategy_name.split(':')[0]}</span>
+            <span className="text-xs text-blue-400/80 truncate">
+              {pos.strategy_name.split(':')[0]}
+              {pos.strategy_name.startsWith(CUSTOM_SCRIPT_KEY + ':') || pos.strategy_name.startsWith('custom:') ? (() => {
+                const scriptId = parseInt(pos.strategy_name.split(':')[1], 10)
+                const sc = scripts.find(s => s.id === scriptId)
+                return sc ? <span className="text-slate-400"> · {sc.name}</span> : null
+              })() : null}
+            </span>
             <span className={`ml-auto text-[10px] font-semibold ${pos.strategy_enabled ? 'text-emerald-400' : 'text-slate-500'}`}>
               {pos.strategy_enabled ? 'ON' : 'OFF'}
             </span>
