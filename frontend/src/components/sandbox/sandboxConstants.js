@@ -1,6 +1,7 @@
 export const PIE_COLORS = ['#10b981','#3b82f6','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#84cc16','#ec4899','#14b8a6']
 
 export const CUSTOM_SCRIPT_KEY = '__custom_script__'
+export const TEMPLATE_SCRIPT_KEY = '__template__'
 
 export const STRATEGY_PARAM_UI = {
   sma_crossover: [

@@ -2,11 +2,12 @@ import {
   TrashIcon, PencilSquareIcon, CheckIcon, XMarkIcon,
   ArrowUpIcon, ArrowDownIcon, BoltIcon, PlayIcon, StopCircleIcon,
   ClockIcon, SignalIcon, ExclamationTriangleIcon, ArrowTopRightOnSquareIcon,
+  BanknotesIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getScripts, getHistory } from '../../api/client'
+import { getScripts, getHistory, getSandboxFundEvents } from '../../api/client'
 import { fmt, fmtMoney, stratLabel } from './sandboxHelpers'
 import StrategySelector from './StrategySelector'
 import TradeRow from './TradeRow'
@@ -26,6 +27,8 @@ export default function PositionDetail({
   editStratType,
   editScriptId,
   setEditScriptId,
+  editTemplateFilename,
+  setEditTemplateFilename,
   editStratParams,
   setEditStratParams,
   handleEditStratOpen,
@@ -59,6 +62,13 @@ export default function PositionDetail({
   })
   const chartData = histData?.data ?? []
   const prevClose = histData?.prev_close ?? null
+
+  const { data: fundEventsData } = useQuery({
+    queryKey: ['sandbox-fund-events'],
+    queryFn: getSandboxFundEvents,
+    refetchInterval: 15000,
+  })
+  const fundEvents = fundEventsData?.events ?? []
 
   // Auto-update trade price when live quote changes
   useEffect(() => {
@@ -238,9 +248,12 @@ export default function PositionDetail({
         </div>
 
         {editingStrategy ? (
-          <StrategySelector value={editStratType} scriptId={editScriptId} onStrategyChange={handleEditStratChange}
-            onScriptChange={setEditScriptId} stratParams={editStratParams}
-            onParamChange={(k, v) => setEditStratParams(p => ({ ...p, [k]: v }))} />
+          <StrategySelector value={editStratType} scriptId={editScriptId} templateFilename={editTemplateFilename}
+            onStrategyChange={handleEditStratChange} onScriptChange={setEditScriptId}
+            onTemplateChange={setEditTemplateFilename}
+            stratParams={editStratParams}
+            onParamChange={(k, v) => setEditStratParams(p => ({ ...p, [k]: v }))}
+            symbol={selectedPos?.symbol} />
         ) : (
           <div className="space-y-3">
             <div className="text-sm">
@@ -364,22 +377,70 @@ export default function PositionDetail({
         )}
       </div>
 
-      {/* Trade history */}
+      {/* Activity Log */}
       <div className="card">
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">
-          Trade History — {selectedSymbol}
-          {trades.length > 0 && <span className="ml-2 text-slate-500 font-normal normal-case">({trades.length})</span>}
+          Activity Log — {selectedSymbol}
         </h3>
-        {trades.length === 0 ? (
-          <div className="text-center text-slate-600 text-sm py-8">No trades recorded yet.</div>
-        ) : (
-          <div className="table-container">
-            <table>
-              <thead><tr><th>Date</th><th>Side</th><th>Qty</th><th>Price</th><th>Total</th><th>P&amp;L</th><th>Reason</th><th>Strategy</th></tr></thead>
-              <tbody>{trades.map(t => <TradeRow key={t.id} trade={t} />)}</tbody>
-            </table>
-          </div>
-        )}
+        {(() => {
+          // Merge trades + fund events into a single timeline
+          const tradeEntries = trades.map(t => ({
+            id: `t-${t.id}`,
+            kind: 'trade',
+            side: t.side,
+            date: t.created_at,
+            label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}`,
+            sub: t.strategy_name ? `${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || null,
+            pnl: t.pnl ?? null,
+            total: t.total,
+          }))
+          const fundEntries = fundEvents.map(e => ({
+            id: `f-${e.id}`,
+            kind: e.event_type,
+            date: e.created_at,
+            label: `${e.event_type === 'deposit' ? 'Deposit' : 'Withdrawal'} $${Math.abs(e.amount).toFixed(2)}`,
+            sub: e.note || null,
+            pnl: null,
+            total: e.amount,
+          }))
+          const all = [...tradeEntries, ...fundEntries].sort((a, b) =>
+            new Date(b.date) - new Date(a.date)
+          )
+          if (all.length === 0) return (
+            <div className="text-center text-slate-600 text-sm py-8">No activity recorded yet.</div>
+          )
+          return (
+            <div className="space-y-1">
+              {all.map(entry => (
+                <div key={entry.id} className="flex items-start gap-3 py-2 border-b border-dark-700 last:border-0">
+                  <div className="mt-0.5 flex-shrink-0">
+                    {entry.kind === 'trade' ? (
+                      entry.side === 'BUY'
+                        ? <ArrowUpIcon className="h-3.5 w-3.5 text-emerald-400" />
+                        : <ArrowDownIcon className="h-3.5 w-3.5 text-red-400" />
+                    ) : (
+                      <BanknotesIcon className={`h-3.5 w-3.5 ${entry.kind === 'deposit' ? 'text-blue-400' : 'text-amber-400'}`} />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm text-slate-200">{entry.label}</span>
+                      {entry.pnl != null && (
+                        <span className={`text-xs font-medium ${entry.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {entry.pnl >= 0 ? '+' : ''}{entry.pnl.toFixed(2)} PnL
+                        </span>
+                      )}
+                    </div>
+                    {entry.sub && <div className="text-xs text-slate-500 mt-0.5 truncate">{entry.sub}</div>}
+                  </div>
+                  <span className="text-xs text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">
+                    {entry.date ? new Date(entry.date).toLocaleString() : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )
+        })()}
       </div>
     </>
   )

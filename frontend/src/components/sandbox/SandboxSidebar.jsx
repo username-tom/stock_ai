@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  PlusIcon, CurrencyDollarIcon, SignalIcon, BeakerIcon,
+  PlusIcon, MinusCircleIcon, CurrencyDollarIcon, SignalIcon, BeakerIcon, QueueListIcon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline'
-import { addSandboxFunds, addSandboxSymbol } from '../../api/client'
+
+import { addSandboxFunds, withdrawSandboxFunds, addSandboxSymbol, repairSandboxFunds } from '../../api/client'
 import SymbolAutocomplete from '../shared/SymbolAutocomplete'
 import StrategySelector from './StrategySelector'
 import StockListItem from './StockListItem'
@@ -26,6 +28,9 @@ export default function SandboxSidebar({
 
   const [showAddFunds, setShowAddFunds] = useState(false)
   const [fundsInput, setFundsInput] = useState('')
+  const [showWithdraw, setShowWithdraw] = useState(false)
+  const [withdrawInput, setWithdrawInput] = useState('')
+  const [repairMsg, setRepairMsg] = useState(null)
   const [showAddSymbol, setShowAddSymbol] = useState(false)
   const [newSymbol, setNewSymbol] = useState('')
   const [newAlloc, setNewAlloc] = useState('')
@@ -36,7 +41,26 @@ export default function SandboxSidebar({
 
   const addFundsMut = useMutation({
     mutationFn: a => addSandboxFunds(a),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sandbox-account'] }); setShowAddFunds(false); setFundsInput('') },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sandbox-account'] }); qc.invalidateQueries({ queryKey: ['sandbox-fund-events'] }); setShowAddFunds(false); setFundsInput('') },
+  })
+
+  const withdrawMut = useMutation({
+    mutationFn: a => withdrawSandboxFunds(a),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sandbox-account'] }); qc.invalidateQueries({ queryKey: ['sandbox-fund-events'] }); setShowWithdraw(false); setWithdrawInput('') },
+    onError: (e) => { setRepairMsg(`Error: ${e.response?.data?.detail || e.message}`); setTimeout(() => setRepairMsg(null), 4000) },
+  })
+
+  const repairFundsMut = useMutation({
+    mutationFn: repairSandboxFunds,
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      const diff = data.correction ?? (data.total_funds_after - data.total_funds_before)
+      const sign = diff >= 0 ? '+' : ''
+      setRepairMsg(`Repaired: ${sign}$${diff.toFixed(2)} · Deposits: $${(data.net_deposits ?? 0).toFixed(2)} · PnL: $${(data.total_realized_pnl ?? 0).toFixed(2)}`)
+      setTimeout(() => setRepairMsg(null), 8000)
+    },
+    onError: (e) => { setRepairMsg(`Error: ${e.response?.data?.detail || e.message}`); setTimeout(() => setRepairMsg(null), 4000) },
   })
 
   const addSymbolMut = useMutation({
@@ -61,6 +85,21 @@ export default function SandboxSidebar({
       strategy_name: encodeStrategy(newStratType, newStratParams, newScriptId),
       allocated_funds: parseFloat(newAlloc) || 0,
     })
+  }
+
+  const [addingWatchlist, setAddingWatchlist] = useState(false)
+  async function handleAddFromWatchlist() {
+    const stored = localStorage.getItem('dashboard_watchlist')
+    const watchlist = stored ? JSON.parse(stored) : ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
+    const existingSymbols = new Set(positions.map(p => p.symbol))
+    const toAdd = watchlist.filter(s => !existingSymbols.has(s))
+    if (!toAdd.length) return
+    setAddingWatchlist(true)
+    for (const symbol of toAdd) {
+      await addSandboxSymbol({ symbol, strategy_name: null, allocated_funds: 0 }).catch(() => {})
+    }
+    qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+    setAddingWatchlist(false)
   }
 
   return (
@@ -92,13 +131,34 @@ export default function SandboxSidebar({
               </span>
             )}
           </div>
-          <button
-            onClick={e => { e.stopPropagation(); setShowAddFunds(v => !v) }}
-            className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300"
-          >
-            <CurrencyDollarIcon className="h-3.5 w-3.5" />Add Funds
-          </button>
+          <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={e => { e.stopPropagation(); setShowAddFunds(v => !v); setShowWithdraw(false) }}
+              title="Add Funds"
+              className={`flex items-center justify-center rounded-md p-1.5 transition-colors ${showAddFunds ? 'bg-emerald-700/30 text-emerald-300' : 'text-emerald-400 hover:bg-emerald-900/30'}`}
+            >
+              <CurrencyDollarIcon className="h-4 w-4" />
+            </button>
+            <button
+              onClick={e => { e.stopPropagation(); setShowWithdraw(v => !v); setShowAddFunds(false) }}
+              title="Withdraw Funds"
+              className={`flex items-center justify-center rounded-md p-1.5 transition-colors ${showWithdraw ? 'bg-amber-700/30 text-amber-300' : 'text-slate-400 hover:bg-dark-600'}`}
+            >
+              <MinusCircleIcon className="h-4 w-4" />
+            </button>
+            {!ibMode && (
+              <button
+                onClick={e => { e.stopPropagation(); repairFundsMut.mutate() }}
+                disabled={repairFundsMut.isPending}
+                title="Repair Funds"
+                className="flex items-center justify-center rounded-md p-1.5 text-amber-400 hover:bg-amber-900/30 disabled:opacity-50 transition-colors"
+              >
+                <WrenchScrewdriverIcon className="h-4 w-4" />
+              </button>
+            )}
+          </div>
         </div>
+
         {showAddFunds && (
           <div className="flex gap-2 mb-3" onClick={e => e.stopPropagation()}>
             <input className="input flex-1 py-1.5 text-sm" type="number" min="1" placeholder="Amount $"
@@ -108,9 +168,27 @@ export default function SandboxSidebar({
               onClick={() => addFundsMut.mutate(parseFloat(fundsInput))}>Add</button>
           </div>
         )}
+        {showWithdraw && (
+          <div className="flex gap-2 mb-3" onClick={e => e.stopPropagation()}>
+            <input className="input flex-1 py-1.5 text-sm" type="number" min="1" placeholder="Amount $"
+              value={withdrawInput} onChange={e => setWithdrawInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && withdrawInput && withdrawMut.mutate(parseFloat(withdrawInput))} />
+            <button className="btn-secondary py-1.5 px-3 text-xs" disabled={!withdrawInput || withdrawMut.isPending}
+              onClick={() => withdrawMut.mutate(parseFloat(withdrawInput))}>Withdraw</button>
+          </div>
+        )}
+        {repairMsg && (
+          <div className="mb-2 text-xs px-2 py-1.5 rounded bg-blue-900/30 border border-blue-700/40 text-blue-300" onClick={e => e.stopPropagation()}>
+            {repairMsg}
+          </div>
+        )}
+
         <div className="space-y-1.5 text-sm">
           <div className="flex justify-between"><span className="text-slate-500">Total Funds</span><span className="text-slate-200 font-semibold">{fmtMoney(accountData?.total_funds)}</span></div>
-          <div className="flex justify-between"><span className="text-slate-500">Available</span><span className="text-emerald-400 font-semibold">{fmtMoney(accountData?.available_funds)}</span></div>
+          <div className="flex justify-between items-center">
+            <span className="text-slate-500">Available</span>
+            <span className={`font-semibold ${(accountData?.available_funds ?? 0) < 0 ? 'text-red-400' : 'text-emerald-400'}`}>{fmtMoney(accountData?.available_funds)}</span>
+          </div>
           <div className="flex justify-between"><span className="text-slate-500">Portfolio Equity</span><span className="text-slate-200 font-semibold">{fmtMoney(totalEquity)}</span></div>
         </div>
         <div className="mt-3 grid grid-cols-2 gap-2">
@@ -125,13 +203,22 @@ export default function SandboxSidebar({
         </div>
       </button>
 
-      {/* Stock list — scrolls independently */}
+      {/* Stock list */}
       <div className="flex-1 overflow-y-auto px-3 py-3">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Stocks</span>
-          <button onClick={() => setShowAddSymbol(v => !v)} className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300">
-            <PlusIcon className="h-3.5 w-3.5" />Add
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleAddFromWatchlist}
+              disabled={addingWatchlist}
+              className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+              title="Add all watchlist symbols not already in portfolio">
+              <QueueListIcon className="h-3.5 w-3.5" />{addingWatchlist ? 'Adding…' : 'Watchlist'}
+            </button>
+            <button onClick={() => setShowAddSymbol(v => !v)} className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300">
+              <PlusIcon className="h-3.5 w-3.5" />Add
+            </button>
+          </div>
         </div>
 
         {showAddSymbol && (
@@ -169,3 +256,4 @@ export default function SandboxSidebar({
     </aside>
   )
 }
+

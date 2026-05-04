@@ -41,6 +41,8 @@ _settings: dict[str, Any] = {
     "deploy_available_funds": True,   # allocate unassigned account cash each cycle
     "deploy_target": "most_bearish",   # most_bearish | most_bullish | most_held | least_held | specific
     "deploy_target_symbol": "",        # used when deploy_target == 'specific'
+    "reallocation_enabled": True,      # enable bearish→bullish (or →available) rebalancing
+    "reallocation_mode": "to_stock",   # to_stock | to_available
 }
 
 # ── runtime state ─────────────────────────────────────────────────────────── #
@@ -85,6 +87,8 @@ async def _load_settings_from_db() -> None:
             _settings["deploy_available_funds"] = bool(row.deploy_available_funds)
             _settings["deploy_target"] = row.deploy_target
             _settings["deploy_target_symbol"] = row.deploy_target_symbol or ""
+            _settings["reallocation_enabled"] = bool(row.reallocation_enabled) if row.reallocation_enabled is not None else True
+            _settings["reallocation_mode"] = row.reallocation_mode or "to_stock"
 
 
 async def _save_settings_to_db() -> None:
@@ -106,12 +110,15 @@ async def _save_settings_to_db() -> None:
         row.deploy_available_funds = _settings["deploy_available_funds"]
         row.deploy_target = _settings["deploy_target"]
         row.deploy_target_symbol = _settings["deploy_target_symbol"]
+        row.reallocation_enabled = _settings["reallocation_enabled"]
+        row.reallocation_mode = _settings["reallocation_mode"]
         await db.commit()
 
 
 def update_manager_settings(new: dict) -> dict:
     allowed = {"transfer_pct", "transfer_interval_s", "indicator_interval_s", "min_position_funds",
-               "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol"}
+               "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
+               "reallocation_enabled", "reallocation_mode"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -301,7 +308,45 @@ async def _do_transfer() -> None:
                         score_str = f" (score {sc['score']:+.3f})" if sc.get("score") is not None else ""
                         _log_activity(f"Deployed ${deployable:.2f} available funds → {target.symbol}{score_str} [{_settings['deploy_target']}]")
 
-    # ── bearish → bullish rebalance ────────────────────────────────── #
+    # ── fund reallocation ─────────────────────────────────────────── #
+    if not _settings.get("reallocation_enabled", True):
+        return
+
+    reallocation_mode = _settings.get("reallocation_mode", "to_stock")
+
+    if reallocation_mode == "to_available":
+        # Move idle cash from every position back to account.total_funds,
+        # leaving only min_position_funds (or the cost basis) in each slot.
+        # This frees up available funds for strategies to spend directly.
+        total_freed = 0.0
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select as sa_select
+            from app.models.sandbox import SandboxAccount
+            res = await db.execute(sa_select(SandboxPosition))
+            fresh_positions: list[SandboxPosition] = res.scalars().all()
+            acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+            account = acct_res.scalar_one_or_none()
+            if account:
+                for pos in fresh_positions:
+                    # idle cash = allocated minus what's locked in open shares
+                    cost_basis = pos.avg_cost * pos.shares
+                    idle = pos.allocated_funds - cost_basis
+                    # how much we can safely pull out
+                    movable = max(0.0, idle - min_funds)
+                    movable = math.floor(movable * transfer_pct * 100) / 100
+                    if movable > 0:
+                        pos.allocated_funds -= movable
+                        account.total_funds += movable
+                        total_freed += movable
+                await db.commit()
+        if total_freed > 0:
+            _state["total_transferred"] = round(_state["total_transferred"] + total_freed, 2)
+            _state["transfers_today"] += 1
+            _state["last_transfer_at"] = datetime.now(timezone.utc)
+            _log_activity(f"Freed ${total_freed:.2f} idle cash from positions → available funds")
+        return
+
+    # ── to_stock: bearish → bullish rebalance ─────────────────────── #
     if not bearish_pos or not bullish_pos:
         return
 

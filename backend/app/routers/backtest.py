@@ -30,6 +30,10 @@ class BacktestRequest(BaseModel):
         default=None,
         description="ID of a saved custom script to use instead of a built-in strategy.",
     )
+    template_filename: str | None = Field(
+        default=None,
+        description="Filename of a built-in template (e.g. 'day_trade_template.py') to run directly.",
+    )
     start_date: str = Field(..., example="2022-01-01")
     end_date: str = Field(..., example="2023-12-31")
     initial_capital: float = Field(default=10000.0, ge=1000)
@@ -65,14 +69,26 @@ async def run_backtest_endpoint(
 ):
     """Run a backtest and persist the report.
 
-    Supply either a ``strategy_type`` (built-in) or a ``script_id`` (custom
-    Python script).  When ``script_id`` is given it takes precedence and the
-    strategy type is recorded as ``custom_script``.
+    Supply either a ``strategy_type`` (built-in), a ``script_id`` (saved custom
+    script), or a ``template_filename`` (built-in template file).
+    ``template_filename`` > ``script_id`` > ``strategy_type`` in precedence.
     """
+    from pathlib import Path
+    _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+
     script_code: str | None = None
     effective_strategy_type = req.strategy_type
 
-    if req.script_id is not None:
+    if req.template_filename is not None:
+        filename = req.template_filename
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(status_code=400, detail="Invalid template filename.")
+        tmpl_path = _TEMPLATES_DIR / filename
+        if not tmpl_path.exists():
+            raise HTTPException(status_code=404, detail=f"Template '{filename}' not found.")
+        script_code = tmpl_path.read_text(encoding="utf-8")
+        effective_strategy_type = f"template:{filename}"
+    elif req.script_id is not None:
         script = await db.get(CustomScript, req.script_id)
         if not script:
             raise HTTPException(status_code=404, detail=f"Custom script {req.script_id} not found.")
@@ -100,7 +116,10 @@ async def run_backtest_endpoint(
         raise HTTPException(status_code=500, detail=f"Backtest error: {exc}")
 
     m = result["metrics"]
-    if req.script_id is not None:
+    if req.template_filename is not None:
+        stem = req.template_filename.removesuffix(".py")
+        name = f"{req.symbol.upper()}_{stem}_{req.start_date}_to_{req.end_date}"
+    elif req.script_id is not None:
         name = (
             f"{req.symbol.upper()}_script{req.script_id}_"
             f"{req.start_date}_to_{req.end_date}"

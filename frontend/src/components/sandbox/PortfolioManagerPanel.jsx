@@ -68,6 +68,8 @@ export default function PortfolioManagerPanel() {
       deploy_available_funds: settings.deploy_available_funds ?? true,
       deploy_target: settings.deploy_target ?? 'most_bearish',
       deploy_target_symbol: settings.deploy_target_symbol ?? '',
+      reallocation_enabled: settings.reallocation_enabled ?? true,
+      reallocation_mode: settings.reallocation_mode ?? 'to_stock',
     })
     setEditSettings(true)
   }
@@ -81,6 +83,8 @@ export default function PortfolioManagerPanel() {
       deploy_available_funds: draft.deploy_available_funds,
       deploy_target: draft.deploy_target,
       deploy_target_symbol: draft.deploy_target_symbol ?? '',
+      reallocation_enabled: draft.reallocation_enabled,
+      reallocation_mode: draft.reallocation_mode,
     })
   }
 
@@ -144,8 +148,18 @@ export default function PortfolioManagerPanel() {
 
       {/* Active settings summary */}
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-400">
-        <span className="flex items-center gap-1"><ArrowsRightLeftIcon className="h-3.5 w-3.5" />Transfer {Math.round(settings.transfer_pct * 100)}% of idle cash</span>
-        <span className="flex items-center gap-1"><ClockIcon className="h-3.5 w-3.5" />Every {settings.transfer_interval_s}s</span>
+        {(settings.reallocation_enabled ?? true) ? (
+          <>
+            <span className="flex items-center gap-1"><ArrowsRightLeftIcon className="h-3.5 w-3.5" />
+              {(settings.reallocation_mode ?? 'to_stock') === 'to_stock'
+                ? <>Reallocate {Math.round(settings.transfer_pct * 100)}% idle cash &rarr; bullish stocks</>
+                : <>Free {Math.round(settings.transfer_pct * 100)}% idle cash &rarr; available funds</>}
+            </span>
+            <span className="flex items-center gap-1"><ClockIcon className="h-3.5 w-3.5" />Every {settings.transfer_interval_s}s</span>
+          </>
+        ) : (
+          <span className="flex items-center gap-1 text-slate-600"><ArrowsRightLeftIcon className="h-3.5 w-3.5" />Reallocation off</span>
+        )}
         <span className="flex items-center gap-1"><ChartBarIcon className="h-3.5 w-3.5" />Score refresh {settings.indicator_interval_s}s</span>
         <span className="flex items-center gap-1"><BanknotesIcon className="h-3.5 w-3.5" />Min {fmtMoney(settings.min_position_funds)} per position</span>
         <span className={`flex items-center gap-1 ${settings.deploy_available_funds ? 'text-violet-400' : 'text-slate-600'}`}>
@@ -203,15 +217,67 @@ export default function PortfolioManagerPanel() {
       {/* Settings modal */}
       {editSettings && draft && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-dark-800 border border-dark-600 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-5">
+          <div className="bg-dark-800 border border-dark-600 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-5 overflow-y-auto max-h-[90vh]">
             <div className="flex items-center gap-2">
               <CpuChipIcon className="h-5 w-5 text-violet-400" />
               <h3 className="text-base font-bold text-slate-100">Portfolio Manager Settings</h3>
             </div>
 
             <SettingRow
+              label="Fund Reallocation"
+              hint="Periodically move idle cash between positions or back to available funds."
+            >
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.reallocation_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                  onClick={() => setDraft(d => ({ ...d, reallocation_enabled: !d.reallocation_enabled }))}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.reallocation_enabled ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs text-slate-300">{draft.reallocation_enabled ? 'Enabled' : 'Disabled'}</span>
+              </label>
+            </SettingRow>
+
+            {draft.reallocation_enabled && (
+              <SettingRow
+                label="Reallocation Mode"
+                hint="Where idle cash is moved each cycle."
+              >
+                <div className="space-y-2">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="radio" name="reallocation_mode" value="to_stock"
+                      checked={draft.reallocation_mode === 'to_stock'}
+                      onChange={() => setDraft(d => ({ ...d, reallocation_mode: 'to_stock' }))}
+                      className="mt-0.5 accent-violet-500"
+                    />
+                    <span>
+                      <span className="text-xs font-medium text-slate-200">To Stock</span>
+                      <span className="text-xs text-slate-500 ml-1">&mdash; Move idle cash from bearish positions to bullish ones</span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="radio" name="reallocation_mode" value="to_available"
+                      checked={draft.reallocation_mode === 'to_available'}
+                      onChange={() => setDraft(d => ({ ...d, reallocation_mode: 'to_available' }))}
+                      className="mt-0.5 accent-violet-500"
+                    />
+                    <span>
+                      <span className="text-xs font-medium text-slate-200">To Available Funds</span>
+                      <span className="text-xs text-slate-500 ml-1">&mdash; Return idle cash from all positions to account available funds</span>
+                    </span>
+                  </label>
+                </div>
+              </SettingRow>
+            )}
+
+            {draft.reallocation_enabled && (
+            <SettingRow
               label="Transfer Amount (%)"
-              hint="Percentage of bearish positions' idle cash moved per cycle."
+              hint={draft.reallocation_mode === 'to_available'
+                ? "Percentage of each position's idle cash returned to available funds per cycle."
+                : "Percentage of bearish positions' idle cash moved per cycle."}
             >
               <div className="flex items-center gap-3">
                 <input
@@ -223,7 +289,9 @@ export default function PortfolioManagerPanel() {
                 <span className="w-10 text-right text-sm font-bold text-slate-200">{draft.transfer_pct}%</span>
               </div>
             </SettingRow>
+            )}
 
+            {draft.reallocation_enabled && (
             <SettingRow
               label="Transfer Interval (seconds)"
               hint="How often funds are redistributed between positions."
@@ -244,7 +312,9 @@ export default function PortfolioManagerPanel() {
                 </span>
               </div>
             </SettingRow>
+            )}
 
+            {draft.reallocation_enabled && draft.reallocation_mode === 'to_stock' && (
             <SettingRow
               label="Indicator Refresh Interval (seconds)"
               hint="How often bullish/bearish scores are recalculated for each stock."
@@ -265,7 +335,9 @@ export default function PortfolioManagerPanel() {
                 </span>
               </div>
             </SettingRow>
+            )}
 
+            {draft.reallocation_enabled && (
             <SettingRow
               label="Minimum Funds per Position ($)"
               hint="Each position always keeps at least this much cash allocated, even when bearish."
@@ -280,6 +352,7 @@ export default function PortfolioManagerPanel() {
                 />
               </div>
             </SettingRow>
+            )}
 
             <SettingRow
               label="Deploy Available Funds"

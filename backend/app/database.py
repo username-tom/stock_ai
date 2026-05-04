@@ -38,9 +38,39 @@ async def _migrate(conn):
         "INSERT OR IGNORE INTO sandbox_account (id, total_funds) VALUES (1, 0.0)",
         # portfolio_manager_settings seed row
         "INSERT OR IGNORE INTO portfolio_manager_settings (id, enabled, transfer_pct, transfer_interval_s, indicator_interval_s, min_position_funds, deploy_available_funds, deploy_target, deploy_target_symbol) VALUES (1, 0, 0.5, 300, 120, 100.0, 1, 'most_bearish', '')",
+        # portfolio_manager_settings reallocation columns (added for reallocation mode feature)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN reallocation_enabled INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN reallocation_mode VARCHAR(20) NOT NULL DEFAULT 'to_stock'",
+        # sandbox_account total_deposited column (added to track cumulative deposits for repair logic)
+        "ALTER TABLE sandbox_account ADD COLUMN total_deposited REAL NOT NULL DEFAULT 0.0",
+        # sandbox_fund_events table (deposit/withdrawal history)
+        """CREATE TABLE IF NOT EXISTS sandbox_fund_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type VARCHAR(20) NOT NULL,
+            amount REAL NOT NULL,
+            note TEXT,
+            created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+        )""",
     ]
     for stmt in migrations:
         try:
             await conn.execute(text(stmt))
         except Exception:
             pass
+
+    # Backfill total_deposited for existing accounts that have funds but no tracked deposits.
+    # Best-effort: assume current total_funds is what was deposited (minus realized pnl drift).
+    # We do this only when total_deposited is still 0 but total_funds > 0.
+    try:
+        from app.models.sandbox import SandboxAccount, SandboxPosition
+        from sqlalchemy import select as sa_select
+        acct_res = await conn.execute(text("SELECT id, total_funds, total_deposited FROM sandbox_account WHERE id=1"))
+        row = acct_res.fetchone()
+        if row and row[2] == 0.0 and row[1] > 0.0:
+            pos_res = await conn.execute(text("SELECT COALESCE(SUM(realized_pnl),0) FROM sandbox_positions"))
+            total_realized = pos_res.fetchone()[0] or 0.0
+            # Best-guess deposit = current total_funds - realized_pnl
+            seeded = max(0.0, round(row[1] - total_realized, 4))
+            await conn.execute(text(f"UPDATE sandbox_account SET total_deposited={seeded} WHERE id=1"))
+    except Exception:
+        pass

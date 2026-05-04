@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.models.sandbox import SandboxPosition, SandboxTrade
-from app.routers.sandbox_router._helpers import position_dict
+from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade
+from app.routers.sandbox_router._helpers import get_account, position_dict
 
 router = APIRouter()
 
@@ -53,6 +53,10 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
         pos.realized_pnl += pnl
         if pos.shares == 0:
             pos.avg_cost = 0.0
+        # Credit profit / debit loss to account.total_funds so that
+        # available_funds = total_funds - sum(allocated_funds) stays accurate.
+        account = await get_account(db)
+        account.total_funds += pnl
 
     trade = SandboxTrade(
         symbol=symbol,

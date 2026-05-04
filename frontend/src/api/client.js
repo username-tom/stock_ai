@@ -54,9 +54,13 @@ export default api
 // Sandbox
 export const getSandboxAccount = () => api.get('/sandbox/account').then(r => r.data)
 export const addSandboxFunds = (amount) => api.post('/sandbox/account/add-funds', { amount }).then(r => r.data)
+export const withdrawSandboxFunds = (amount) => api.post('/sandbox/account/withdraw-funds', { amount }).then(r => r.data)
+export const repairSandboxFunds = () => api.post('/sandbox/account/repair-funds').then(r => r.data)
+export const getSandboxFundEvents = (limit = 200) => api.get('/sandbox/account/fund-events', { params: { limit } }).then(r => r.data)
 export const getSandboxPositions = () => api.get('/sandbox/positions').then(r => r.data)
 export const addSandboxSymbol = (payload) => api.post('/sandbox/positions', payload).then(r => r.data)
 export const updateSandboxPosition = (symbol, payload) => api.patch(`/sandbox/positions/${symbol}`, payload).then(r => r.data)
+export const bulkUpdateSandboxStrategy = (strategy_name) => api.patch('/sandbox/positions-bulk-strategy', { strategy_name }).then(r => r.data)
 export const removeSandboxSymbol = (symbol) => api.delete(`/sandbox/positions/${symbol}`).then(r => r.data)
 export const getSandboxTrades = (symbol, limit = 200) =>
   api.get('/sandbox/trades', { params: { symbol, limit } }).then(r => r.data)
@@ -70,6 +74,7 @@ export const importSandbox = (file) => {
   return api.post('/sandbox/import', form, { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data)
 }
 export const resetSandbox = () => api.post('/sandbox/reset').then(r => r.data)
+export const resetSandboxSoft = () => api.post('/sandbox/reset-soft').then(r => r.data)
 export const getSandboxAnalytics = () => api.get('/sandbox/analytics').then(r => r.data)
 export const getSandboxEngineState = () => api.get('/sandbox/engine/state').then(r => r.data)
 export const toggleAllSandboxEngines = () => api.post('/sandbox/engine/toggle-all').then(r => r.data)

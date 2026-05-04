@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { getStrategies, runBacktest, getScripts } from '../api/client'
+import { getStrategies, runBacktest, getScripts, getBuiltinTemplates } from '../api/client'
 import EquityChart from './charts/EquityChart'
 import SubplotChart from './charts/SubplotChart'
 import SymbolAutocomplete from './shared/SymbolAutocomplete'
@@ -9,6 +9,7 @@ import {
   CheckCircleIcon,
   ExclamationTriangleIcon,
   CodeBracketIcon,
+  DocumentTextIcon,
   ArrowTopRightOnSquareIcon,
   ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline'
@@ -146,6 +147,7 @@ const STRATEGY_PARAM_UI = {
 }
 
 const CUSTOM_SCRIPT_KEY = '__custom_script__'
+const TEMPLATE_SCRIPT_KEY = '__template__'
 
 export default function BacktestPanel() {
   const { data: stratData, isLoading: stratLoading } = useQuery({
@@ -156,6 +158,11 @@ export default function BacktestPanel() {
   const { data: scriptsData, isLoading: scriptsLoading } = useQuery({
     queryKey: ['scripts'],
     queryFn: getScripts,
+  })
+
+  const { data: templatesData, isLoading: templatesLoading } = useQuery({
+    queryKey: ['builtin-templates'],
+    queryFn: getBuiltinTemplates,
   })
 
   const COMMISSION_PRESETS = [
@@ -177,6 +184,8 @@ export default function BacktestPanel() {
   const [commissionPreset, setCommissionPreset] = useState('0.005')
   const [stratParams, setStratParams] = useState({ fast_period: 10, slow_period: 30, ma_type: 'SMA' })
   const [selectedScriptId, setSelectedScriptId] = useState(null)
+  const [selectedTemplateFilename, setSelectedTemplateFilename] = useState(null)
+  const [tmplPreviewOpen, setTmplPreviewOpen] = useState(false)
   const [result, setResult] = useState(null)
   const [activeTab, setActiveTab] = useState('equity')
   const [progress, setProgress] = useState(0)
@@ -191,7 +200,9 @@ export default function BacktestPanel() {
   }, [])
 
   const isCustomScript = form.strategy_type === CUSTOM_SCRIPT_KEY
+  const isTemplate = form.strategy_type === TEMPLATE_SCRIPT_KEY
   const scripts = scriptsData?.scripts ?? []
+  const templates = (templatesData?.templates ?? []).filter(t => !t.filename.startsWith('_'))
 
   // Estimate trading days between two date strings to pace the progress bar
   const estimateTradingDays = (start, end) => {
@@ -242,7 +253,7 @@ export default function BacktestPanel() {
 
   const handleStrategyChange = (type) => {
     setForm(f => ({ ...f, strategy_type: type }))
-    if (type !== CUSTOM_SCRIPT_KEY) {
+    if (type !== CUSTOM_SCRIPT_KEY && type !== TEMPLATE_SCRIPT_KEY) {
       const defaults = {}
       ;(STRATEGY_PARAM_UI[type] || []).forEach(p => { defaults[p.key] = p.default })
       setStratParams(defaults)
@@ -260,13 +271,22 @@ export default function BacktestPanel() {
         script_id: selectedScriptId,
         strategy_params: {},
       })
+    } else if (isTemplate) {
+      if (!selectedTemplateFilename) return
+      startProgress(form.start_date, form.end_date)
+      mutation.mutate({
+        ...form,
+        strategy_type: 'custom_script',
+        template_filename: selectedTemplateFilename,
+        strategy_params: {},
+      })
     } else {
       startProgress(form.start_date, form.end_date)
       mutation.mutate({ ...form, strategy_params: stratParams })
     }
   }
 
-  const paramFields = isCustomScript ? [] : (STRATEGY_PARAM_UI[form.strategy_type] || [])
+  const paramFields = (isCustomScript || isTemplate) ? [] : (STRATEGY_PARAM_UI[form.strategy_type] || [])
 
   return (
     <div className="p-6 space-y-6">
@@ -308,9 +328,65 @@ export default function BacktestPanel() {
                   </option>
                 ))}
                 <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
+                <option value={TEMPLATE_SCRIPT_KEY}>📄 Built-in Template</option>
               </select>
             )}
           </div>
+
+          {/* Built-in template selector */}
+          {isTemplate && (
+            <div className="border border-dark-500 rounded-lg p-3 space-y-3 bg-dark-900/30">
+              <div className="flex items-center gap-1.5 text-xs text-indigo-400 uppercase tracking-wider">
+                <DocumentTextIcon className="h-3.5 w-3.5" />
+                Built-in Template
+              </div>
+              {templatesLoading ? (
+                <div className="h-8 bg-dark-700 rounded animate-pulse" />
+              ) : templates.length === 0 ? (
+                <div className="text-xs text-amber-400/80">No templates found.</div>
+              ) : (
+                <div className="space-y-2">
+                  <label className="label">Select Template</label>
+                  <select
+                    className="input"
+                    value={selectedTemplateFilename ?? ''}
+                    onChange={e => { setSelectedTemplateFilename(e.target.value || null); setTmplPreviewOpen(false) }}
+                  >
+                    <option value="">— choose a template —</option>
+                    {templates.map(t => (
+                      <option key={t.filename} value={t.filename}>{t.name}</option>
+                    ))}
+                  </select>
+                  {selectedTemplateFilename && (() => {
+                    const tmpl = templates.find(t => t.filename === selectedTemplateFilename)
+                    return tmpl ? (
+                      <>
+                        {tmpl.description && (
+                          <div className="text-xs text-slate-500">{tmpl.description}</div>
+                        )}
+                        <button
+                          type="button"
+                          className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors w-full text-left"
+                          onClick={() => setTmplPreviewOpen(v => !v)}
+                        >
+                          <span className={`inline-block transition-transform ${tmplPreviewOpen ? 'rotate-180' : ''}`}>▾</span>
+                          {tmplPreviewOpen ? 'Hide' : 'Preview'} template code
+                        </button>
+                        {tmplPreviewOpen && (
+                          <textarea
+                            readOnly
+                            className="w-full h-64 font-mono text-xs bg-dark-950 border border-dark-500 rounded-lg p-3 text-slate-400 resize-y focus:outline-none cursor-default"
+                            value={tmpl.script_code}
+                            spellCheck={false}
+                          />
+                        )}
+                      </>
+                    ) : null
+                  })()}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Custom script selector */}
           {isCustomScript && (

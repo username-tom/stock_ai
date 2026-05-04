@@ -3,8 +3,11 @@ import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
 } from 'recharts'
 import {
-  HomeIcon, ChartPieIcon, TableCellsIcon,
+  HomeIcon, ChartPieIcon, TableCellsIcon, ClockIcon,
+  ArrowUpIcon, ArrowDownIcon, BanknotesIcon,
 } from '@heroicons/react/24/outline'
+import { useQuery } from '@tanstack/react-query'
+import { getSandboxFundEvents } from '../../api/client'
 import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import PieTooltipContent from './PieTooltipContent'
@@ -20,8 +23,16 @@ export default function PortfolioOverview({
   totalRealizedPnl,
   pieData,
   analytics,
+  allTrades = [],
   onSelectSymbol,
 }) {
+  const { data: fundEventsData } = useQuery({
+    queryKey: ['sandbox-fund-events'],
+    queryFn: getSandboxFundEvents,
+    refetchInterval: 15000,
+  })
+  const fundEvents = fundEventsData?.events ?? []
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -357,6 +368,110 @@ export default function PortfolioOverview({
           </div>
         </div>
       )}
+
+      {/* Activity Log */}
+      <div className="card">
+        <div className="flex items-center gap-2 mb-4">
+          <ClockIcon className="h-4 w-4 text-slate-400" />
+          <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Activity Log</h2>
+          {(() => {
+            const total = allTrades.length + fundEvents.length
+            return total > 0 && <span className="ml-auto text-xs text-slate-500">{total} event{total !== 1 ? 's' : ''}</span>
+          })()}
+        </div>
+        {(() => {
+          const tradeEntries = allTrades.map(t => ({
+            id: `t-${t.id}`,
+            kind: 'trade',
+            side: t.side,
+            date: t.created_at,
+            symbol: t.symbol,
+            label: `${t.side} ${(t.quantity ?? 0).toFixed(3)} ${t.symbol} @ $${(t.price ?? 0).toFixed(2)}`,
+            total: (t.quantity ?? 0) * (t.price ?? 0),
+            pnl: t.pnl ?? null,
+            reason: t.reason ?? null,
+          }))
+          const fundEntries = fundEvents.map(e => ({
+            id: `f-${e.id}`,
+            kind: e.event_type,
+            side: null,
+            date: e.created_at,
+            symbol: null,
+            label: `${e.event_type === 'deposit' ? 'Deposit' : 'Withdrawal'} $${Math.abs(e.amount).toFixed(2)}`,
+            total: e.amount,
+            pnl: null,
+            reason: e.note ?? null,
+          }))
+          const all = [...tradeEntries, ...fundEntries].sort((a, b) => new Date(b.date) - new Date(a.date))
+          if (all.length === 0) return (
+            <div className="text-center text-slate-600 text-sm py-8">No activity yet</div>
+          )
+          return (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-slate-500 border-b border-dark-600">
+                    <th className="text-left pb-2 font-medium">Time</th>
+                    <th className="text-left pb-2 font-medium">Type</th>
+                    <th className="text-left pb-2 font-medium">Details</th>
+                    <th className="text-right pb-2 font-medium">Amount</th>
+                    <th className="text-right pb-2 font-medium">P&amp;L</th>
+                    <th className="text-left pb-2 font-medium">Note</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-dark-700">
+                  {all.map(entry => {
+                    const ts = entry.date ? new Date(entry.date) : null
+                    const timeStr = ts ? ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
+                    return (
+                      <tr key={entry.id} className="hover:bg-dark-700/40 transition-colors">
+                        <td className="py-1.5 text-slate-500 whitespace-nowrap">{timeStr}</td>
+                        <td className="py-1.5">
+                          <div className="flex items-center gap-1">
+                            {entry.kind === 'trade' ? (
+                              entry.side === 'BUY'
+                                ? <ArrowUpIcon className="h-3 w-3 text-emerald-400" />
+                                : <ArrowDownIcon className="h-3 w-3 text-red-400" />
+                            ) : (
+                              <BanknotesIcon className={`h-3 w-3 ${entry.kind === 'deposit' ? 'text-blue-400' : 'text-amber-400'}`} />
+                            )}
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                              entry.kind === 'trade'
+                                ? entry.side === 'BUY' ? 'bg-emerald-900/50 text-emerald-300' : 'bg-red-900/50 text-red-300'
+                                : entry.kind === 'deposit' ? 'bg-blue-900/50 text-blue-300' : 'bg-amber-900/50 text-amber-300'
+                            }`}>{entry.kind === 'trade' ? entry.side : entry.kind}</span>
+                          </div>
+                        </td>
+                        <td className="py-1.5">
+                          {entry.symbol ? (
+                            <span
+                              className="font-bold text-blue-400 font-mono cursor-pointer hover:text-blue-300"
+                              onClick={() => onSelectSymbol(entry.symbol)}
+                            >{entry.symbol}</span>
+                          ) : (
+                            <span className="text-slate-400">{entry.label}</span>
+                          )}
+                        </td>
+                        <td className="py-1.5 text-right font-mono text-slate-200">${entry.total.toFixed(2)}</td>
+                        <td className="py-1.5 text-right font-mono">
+                          {entry.pnl != null
+                            ? <span className={entry.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{entry.pnl >= 0 ? '+' : ''}{entry.pnl.toFixed(2)}</span>
+                            : <span className="text-slate-600">—</span>}
+                        </td>
+                        <td className="py-1.5 text-slate-400 max-w-[200px] truncate">
+                          {entry.reason
+                            ? <span className="px-1.5 py-0.5 rounded border text-[10px] bg-slate-700/50 text-slate-300 border-slate-600/40 font-mono">{entry.reason}</span>
+                            : <span className="text-slate-600">—</span>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        })()}
+      </div>
     </div>
   )
 }

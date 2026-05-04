@@ -135,3 +135,41 @@ async def reset_sandbox(db: AsyncSession = Depends(get_db)):
     db.add(SandboxAccount(total_funds=0.0))
     await db.commit()
     return {"status": "ok", "message": "Sandbox reset to factory defaults."}
+
+
+@router.post("/reset-soft")
+async def reset_sandbox_soft(db: AsyncSession = Depends(get_db)):
+    """Keep all symbols in the portfolio but reset all shares, costs, PnL, and trades.
+
+    Each position's allocated_funds is preserved so the user's allocation
+    structure is maintained.  Total funds is recalculated to equal the sum of
+    all allocated funds (available cash becomes zero, ready to trade fresh).
+    Strategy assignments and watchlist membership are also preserved.
+    """
+    # Delete all trade history
+    await db.execute(delete(SandboxTrade))
+
+    # Reset per-position counters while keeping symbol / allocation / strategy
+    positions_res = await db.execute(select(SandboxPosition))
+    positions = positions_res.scalars().all()
+    for pos in positions:
+        pos.shares = 0.0
+        pos.avg_cost = 0.0
+        pos.allocated_funds = 0.0
+        pos.realized_pnl = 0.0
+        pos.last_signal = None
+        pos.last_run_at = None
+        pos.engine_error = None
+        pos.strategy_enabled = False
+
+    # Reset account funds to zero — clean slate
+    account = await get_account(db)
+    account.total_funds = 0.0
+
+    await db.commit()
+    return {
+        "status": "ok",
+        "message": "Portfolio counters and funds reset. Symbols and strategies preserved.",
+        "positions_kept": len(positions),
+        "total_funds": 0.0,
+    }

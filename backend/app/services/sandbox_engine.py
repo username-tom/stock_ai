@@ -95,6 +95,18 @@ def _run_strategy_sync(strategy_name: str, df: pd.DataFrame, scripts: dict[int, 
             raise ValueError(f"Script {script_id} not found.")
         return execute_script(code, df)
 
+    if strategy_name.startswith("template:"):
+        filename = strategy_name[9:]
+        # Reject any path traversal attempts
+        if "/" in filename or "\\" in filename or ".." in filename:
+            raise ValueError(f"Invalid template filename: {filename}")
+        from pathlib import Path
+        tmpl_path = Path(__file__).resolve().parents[1] / "templates" / filename
+        if not tmpl_path.exists():
+            raise ValueError(f"Template file not found: {filename}")
+        code = tmpl_path.read_text(encoding="utf-8")
+        return execute_script(code, df)
+
     # Built-in strategy — parse type and params
     colon = strategy_name.find(":")
     if colon == -1:
@@ -156,6 +168,12 @@ async def _process_symbol(
         nonzero = sig_series[sig_series != 0]
         trade_signal = int(nonzero.iloc[-1]) if len(nonzero) > 0 else 0
 
+        # Grab the signal_source from the last non-zero bar (if available)
+        last_sig_idx = nonzero.index[-1] if len(nonzero) > 0 else None
+        signal_source = ""
+        if last_sig_idx is not None and "signal_source" in df_sig.columns:
+            signal_source = str(df_sig.loc[last_sig_idx, "signal_source"]).strip()
+
         status["last_signal"] = current_signal
 
         # Determine what action to take
@@ -165,14 +183,12 @@ async def _process_symbol(
         strat_label = strategy_name.split(':')[0]
 
         if trade_signal > 0 and pos.shares == 0:
-            # Buy signal – enter position (crossover or initial alignment)
             action = "BUY"
-            reason = f"Strategy {strat_label} buy signal at ${current_price:.2f}"
+            reason = signal_source if signal_source else f"{strat_label} buy @ ${current_price:.2f}"
 
         elif trade_signal < 0 and pos.shares > 0:
-            # Sell signal – exit position (crossover or initial alignment)
             action = "SELL"
-            reason = f"Strategy {strat_label} sell signal at ${current_price:.2f}"
+            reason = signal_source if signal_source else f"{strat_label} sell @ ${current_price:.2f}"
 
         if action:
             await _execute_trade(pos, action, current_price, reason)
@@ -249,8 +265,11 @@ async def _execute_trade(
             total = quantity * price
             # Draw any shortfall from the unallocated pool into this position
             extra_needed = max(0.0, total - position.allocated_funds)
-            if extra_needed > 0:
+            if extra_needed > 0 and account:
                 position.allocated_funds += extra_needed
+                # Remove the drawn cash from total_funds so available_funds
+                # (= total_funds - sum(allocated_funds)) decreases correctly.
+                account.total_funds -= extra_needed
             new_shares = position.shares + quantity
             position.avg_cost = (position.avg_cost * position.shares + total) / new_shares
             position.shares = new_shares
@@ -266,6 +285,12 @@ async def _execute_trade(
             position.allocated_funds += total
             position.realized_pnl += pnl
             position.avg_cost = 0.0
+            # Credit profit / debit loss to account.total_funds so that
+            # available_funds = total_funds - sum(allocated_funds) stays accurate.
+            acct_res2 = await db.execute(sa_select(SandboxAccount).limit(1))
+            acct2 = acct_res2.scalar_one_or_none()
+            if acct2:
+                acct2.total_funds += pnl
         else:
             return
 

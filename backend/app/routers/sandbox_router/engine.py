@@ -74,6 +74,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     deploy_available_funds: Optional[bool] = None
     deploy_target: Optional[str] = Field(default=None, pattern="^(most_bearish|most_bullish|most_held|least_held|specific)$")
     deploy_target_symbol: Optional[str] = None
+    reallocation_enabled: Optional[bool] = None
+    reallocation_mode: Optional[str] = Field(default=None, pattern="^(to_stock|to_available)$")
 
 
 @router.get("/manager/state")

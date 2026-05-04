@@ -121,6 +121,13 @@ _SAFE_BUILTINS: dict[str, Any] = {
 }
 
 # Allowed module aliases that the script may reference (pre-imported).
+# app.templates._indicators is also pre-imported so templates that import
+# indicator helpers from it work inside the sandboxed execution context.
+try:
+    import app.templates._indicators as _tmpl_indicators
+except Exception:
+    _tmpl_indicators = None  # type: ignore[assignment]
+
 _ALLOWED_MODULES: dict[str, Any] = {
     "pd": pd,
     "np": np,
@@ -129,14 +136,33 @@ _ALLOWED_MODULES: dict[str, Any] = {
     "math": math,
     "statistics": statistics,
 }
+if _tmpl_indicators is not None:
+    _ALLOWED_MODULES["app"] = type("app", (), {
+        "templates": type("templates", (), {
+            "_indicators": _tmpl_indicators,
+        })(),
+    })()
+    # Also expose the module object under its full dotted path so that
+    # `from app.templates._indicators import calc_rsi` resolves correctly.
+    import sys as _sys
+    _ALLOWED_MODULES.update({
+        k: v for k, v in _sys.modules.items()
+        if k.startswith("app.templates")
+    })
 
 
 def _safe_import(name: str, globs: dict, locs: dict, fromlist: tuple, level: int):
     """Custom __import__ that only allows whitelisted modules."""
+    # __future__ is a compile-time directive with no runtime side-effects.
+    if name == "__future__":
+        return __import__(name, globs, locs, fromlist, level)
     allowed = {"pandas", "numpy", "math", "statistics"}
-    # Resolve top-level module name
+    # app.templates._indicators is an internal, side-effect-free helper module
+    # that all built-in strategy templates rely on.  Whitelist it explicitly so
+    # templates that import from it work when executed through the sandbox engine.
+    allowed_prefixes = {"app.templates._indicators", "app.templates."}
     top = name.split(".")[0]
-    if top not in allowed:
+    if top not in allowed and not any(name == p or name.startswith(p) for p in allowed_prefixes):
         raise ImportError(
             f"Import of '{name}' is not allowed inside custom scripts. "
             f"Permitted modules: {sorted(allowed)}"

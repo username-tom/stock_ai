@@ -45,8 +45,8 @@ async def add_symbol(req: AddSymbolRequest, db: AsyncSession = Depends(get_db)):
         account = await get_account(db)
         all_pos = (await db.execute(select(SandboxPosition))).scalars().all()
         available = account.total_funds - sum(p.allocated_funds for p in all_pos)
-        if req.allocated_funds > available:
-            account.total_funds += req.allocated_funds - available
+        # Cap allocation to what is actually available — do NOT inflate total_funds
+        req = req.model_copy(update={"allocated_funds": min(req.allocated_funds, max(0.0, available))})
 
     pos = SandboxPosition(
         symbol=symbol,
@@ -102,3 +102,18 @@ async def remove_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
     await db.delete(pos)
     await db.commit()
     return {"status": "ok", "symbol": symbol}
+
+
+class BulkStrategyRequest(BaseModel):
+    strategy_name: Optional[str] = None
+
+
+@router.patch("/positions-bulk-strategy")
+async def bulk_update_strategy(req: BulkStrategyRequest, db: AsyncSession = Depends(get_db)):
+    """Set the same strategy on every existing position at once."""
+    result = await db.execute(select(SandboxPosition))
+    positions = result.scalars().all()
+    for pos in positions:
+        pos.strategy_name = req.strategy_name
+    await db.commit()
+    return {"updated": len(positions), "strategy_name": req.strategy_name}

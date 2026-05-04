@@ -9,6 +9,7 @@ class SandboxAccount(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     total_funds = Column(Float, default=0.0, nullable=False)
+    total_deposited = Column(Float, default=0.0, nullable=False)  # cumulative add-funds deposits
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
 
@@ -31,6 +32,17 @@ class SandboxPosition(Base):
     is_on_watchlist = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
+
+
+class SandboxFundEvent(Base):
+    """Deposit and withdrawal events for the sandbox account."""
+    __tablename__ = "sandbox_fund_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(20), nullable=False)  # 'deposit' | 'withdrawal'
+    amount = Column(Float, nullable=False)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class SandboxTrade(Base):
@@ -62,4 +74,6 @@ class PortfolioManagerSettings(Base):
     deploy_available_funds = Column(Boolean, default=True, nullable=False)
     deploy_target = Column(String(20), default="most_bearish", nullable=False)
     deploy_target_symbol = Column(String(20), default="", nullable=False)
+    reallocation_enabled = Column(Boolean, default=True, nullable=False)
+    reallocation_mode = Column(String(20), default="to_stock", nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
