@@ -1,4 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
+import { useState, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { getScripts } from '../../api/client'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 import { fmt, fmtMoney } from './sandboxHelpers'
@@ -7,6 +9,17 @@ import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
 export default function StockListItem({ pos, quote, isSelected, onClick }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
+  const [tooltipPos, setTooltipPos] = useState(null)
+  const wrapperRef = useRef(null)
+
+  const handleMouseEnter = useCallback(() => {
+    if (!wrapperRef.current) return
+    const rect = wrapperRef.current.getBoundingClientRect()
+    setTooltipPos({ top: rect.top, left: rect.right + 8 })
+  }, [])
+
+  const handleMouseLeave = useCallback(() => setTooltipPos(null), [])
+
   const mp = quote?.last_price ?? pos.avg_cost
   const equity = mp * pos.shares
   const unrealised = equity - pos.avg_cost * pos.shares
@@ -15,7 +28,7 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
   const positive = changePct == null ? null : changePct >= 0
 
   return (
-    <div className="relative group">
+    <div ref={wrapperRef} className="relative" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
       <button onClick={onClick} className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${isSelected ? 'bg-emerald-600/20 border-emerald-600/40' : 'border-transparent hover:bg-dark-700'}`}>
         <div className="flex items-center justify-between mb-0.5">
           <span className="font-bold text-slate-100 text-sm">{pos.symbol}</span>
@@ -73,10 +86,10 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
       </button>
 
       {/* Hover tooltip */}
-      {quote && (
-        <div className="pointer-events-none absolute left-full top-0 ml-2 z-50 w-52
-                       rounded-lg bg-dark-600 border border-dark-400 p-3 shadow-xl
-                       opacity-0 group-hover:opacity-100 transition-opacity text-xs space-y-1.5">
+      {quote && tooltipPos && createPortal(<div
+          className="pointer-events-none fixed z-[9999] w-52 rounded-lg bg-dark-600 border border-dark-400 p-3 shadow-xl text-xs space-y-1.5"
+          style={{ top: tooltipPos.top, left: tooltipPos.left }}
+        >
           <div className="font-bold text-slate-100 text-sm">{quote.symbol}</div>
           {quote.company_name && <div className="text-slate-400">{quote.company_name}</div>}
           {(() => {
@@ -143,8 +156,7 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
           {quote.market_state && (
             <div className="text-slate-600 text-xs pt-0.5">Market: {quote.market_state}</div>
           )}
-        </div>
-      )}
+        </div>, document.body)}
     </div>
   )
 }
