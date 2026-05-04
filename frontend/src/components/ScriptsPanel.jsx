@@ -39,7 +39,7 @@ function FunctionReference() {
           className="fixed z-50 flex items-center gap-1 py-0.5 px-2 bg-dark-900 border border-dark-500 rounded-l-lg text-[11px] font-semibold text-slate-500 hover:text-slate-300 hover:bg-dark-800 transition-colors shadow-lg"
           style={{
             bottom: '32px',
-            left: '240px',
+            left: '3rem',
             writingMode: 'vertical-rl',
             transform: 'rotate(180deg)',
             transformOrigin: 'center center',
@@ -53,7 +53,7 @@ function FunctionReference() {
 
       {/* Expanded panel — floats over content */}
       {open && (
-        <div className="fixed z-50 w-80 bg-dark-800 border border-dark-500 rounded-tr-xl shadow-2xl" style={{ bottom: '32px', left: '240px' }}>
+        <div className="fixed z-50 w-80 bg-dark-800 border border-dark-500 rounded-tr-xl shadow-2xl" style={{ bottom: '32px', left: '3rem' }}>
           <div className="flex items-center justify-between px-4 py-3 border-b border-dark-500">
             <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">
               Overridable Functions

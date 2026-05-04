@@ -107,9 +107,13 @@ def run_backtest(
     if script_code is not None:
         from app.services.script_executor import execute_script
         df = execute_script(script_code, df, **strategy_params)
-        # Derive position column if the script didn't add one
+        # Scripts emit event-based signals (+1/-1 only on the action bar, 0
+        # elsewhere).  Using diff() on such signals would create phantom trades
+        # (the bar *after* a +1 buy signal becomes diff=-1, triggering an
+        # immediate phantom sell).  Use the signal column directly as position.
         if "position" not in df.columns:
-            df = _derive_position(df)
+            df = df.copy()
+            df["position"] = df["signal"].fillna(0)
     else:
         strategy = get_strategy(strategy_type, **strategy_params)
         df = strategy.generate_signals(df)
