@@ -479,6 +479,47 @@ async def get_news(watchlist: list[str], extra_topics: list[str] | None = None) 
     return result
 
 
+async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
+                          include_pre_post: bool = False) -> "pd.DataFrame":
+    """Return a pandas DataFrame of recent OHLCV bars for *symbol*.
+
+    This is a shared helper used by the sandbox engine and portfolio manager
+    so bar-fetching logic lives in one place.
+    """
+    import pandas as pd  # optional heavy import – kept local
+
+    chart = await _yf_chart(symbol.upper(), range_=range_, interval=interval,
+                            include_pre_post=include_pre_post)
+    timestamps = chart.get("timestamp", [])
+    quotes = chart.get("indicators", {}).get("quote", [{}])[0]
+
+    opens   = quotes.get("open",   [])
+    highs   = quotes.get("high",   [])
+    lows    = quotes.get("low",    [])
+    closes  = quotes.get("close",  [])
+    volumes = quotes.get("volume", [])
+
+    rows = []
+    for i, ts in enumerate(timestamps):  # noqa: F841 – ts unused but kept for alignment
+        c = closes[i] if i < len(closes) else None
+        if c is None:
+            continue
+        rows.append({
+            "Open":   float(opens[i])   if i < len(opens)   and opens[i]   is not None else float(c),
+            "High":   float(highs[i])   if i < len(highs)   and highs[i]   is not None else float(c),
+            "Low":    float(lows[i])    if i < len(lows)    and lows[i]    is not None else float(c),
+            "Close":  float(c),
+            "Volume": int(volumes[i])   if i < len(volumes) and volumes[i] is not None else 0,
+        })
+
+    if not rows:
+        raise ValueError(f"No intraday data returned for {symbol}")
+
+    df = pd.DataFrame(rows)
+    df.index = pd.RangeIndex(len(df))
+    return df
+
+
 async def pre_warm(symbols: list[str], periods: list[str] | None = None) -> None:
     """Pre-populate the cache for *symbols* so the first dashboard load is fast."""
     periods = periods or ["1y"]

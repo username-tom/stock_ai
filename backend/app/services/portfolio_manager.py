@@ -122,26 +122,10 @@ def update_manager_settings(new: dict) -> dict:
 # ── scoring ───────────────────────────────────────────────────────────────── #
 
 async def _fetch_bars(symbol: str) -> pd.DataFrame:
-    """Fetch recent intraday bars (re-uses the same helper as sandbox_engine)."""
-    from app.services.market_service import _yf_chart
-    chart = await _yf_chart(symbol, range_="5d", interval="1m", include_pre_post=False)
-    timestamps = chart.get("timestamp", [])
-    quotes = chart.get("indicators", {}).get("quote", [{}])[0]
-    closes = quotes.get("close", [])
-    volumes = quotes.get("volume", [])
-
-    rows = []
-    for i, ts in enumerate(timestamps):
-        c = closes[i] if i < len(closes) else None
-        if c is None:
-            continue
-        rows.append({
-            "Close": float(c),
-            "Volume": int(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0,
-        })
-    if not rows:
-        raise ValueError(f"No data for {symbol}")
-    return pd.DataFrame(rows)
+    """Fetch recent intraday bars for scoring (re-uses the shared market_service helper)."""
+    from app.services.market_service import get_intraday_df
+    df = await get_intraday_df(symbol, range_="5d", interval="1m", include_pre_post=False)
+    return df[["Close", "Volume"]]
 
 
 def _score_symbol(df: pd.DataFrame) -> tuple[float, str]:

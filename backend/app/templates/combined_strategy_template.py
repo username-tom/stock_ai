@@ -12,7 +12,16 @@ loss from the entry price reaches ``stop_loss_pct`` percent (default 5 %).
 """
 
 import pandas as pd
-import numpy as np
+
+from app.templates._indicators import (
+    calc_rsi as _calc_rsi,
+    calc_macd as _calc_macd_full,
+    calc_ma as _calc_ma,
+    calc_bb as _calc_bb,
+    safe_int as _int,
+    safe_float as _float,
+    safe_str as _str,
+)
 
 
 def get_default_params() -> dict:
@@ -39,67 +48,6 @@ def get_default_params() -> dict:
         "stop_loss_pct": 5.0,
     }
 
-
-# ---------------------------------------------------------------------------
-# Internal indicator helpers
-# ---------------------------------------------------------------------------
-
-def _calc_ma(close: pd.Series, period: int, ma_type: str) -> pd.Series:
-    if ma_type.upper() == "EMA":
-        return close.ewm(span=period, adjust=False).mean()
-    return close.rolling(window=period).mean()
-
-
-def _calc_macd(close: pd.Series, fast: int, slow: int, signal: int):
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line
-
-
-def _calc_rsi(close: pd.Series, period: int) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, float("inf"))
-    return 100 - (100 / (1 + rs))
-
-
-def _calc_bb(close: pd.Series, period: int, std_dev: float):
-    mid = close.rolling(window=period).mean()
-    std = close.rolling(window=period).std()
-    return mid + std_dev * std, mid, mid - std_dev * std
-
-
-# ---------------------------------------------------------------------------
-# Safe parameter helpers
-# ---------------------------------------------------------------------------
-
-def _int(value, default: int) -> int:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return default
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _float(value, default: float) -> float:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _str(value, default: str) -> str:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return default
-    return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +122,7 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
     df["ma_fast_line"] = _calc_ma(df["Close"], ma_fast, ma_type)
     df["ma_slow_line"] = _calc_ma(df["Close"], ma_slow, ma_type)
 
-    macd_line, macd_signal_line = _calc_macd(
+    macd_line, macd_signal_line, _ = _calc_macd_full(
         df["Close"], macd_fast, macd_slow, macd_sig
     )
     df["macd"]        = macd_line

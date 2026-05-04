@@ -31,6 +31,21 @@ signal_source values:
 import pandas as pd
 import numpy as np
 
+from app.templates._indicators import (
+    calc_rsi as _calc_rsi,
+    calc_kdj as _calc_kdj,
+    calc_cci as _calc_cci,
+    calc_macd as _calc_macd_full,
+    safe_int as _int,
+    safe_float as _float,
+    safe_val as _safe,
+)
+
+
+def _calc_macd(close, fast, slow, signal):
+    macd_line, signal_line, hist = _calc_macd_full(close, fast, slow, signal)
+    return macd_line, signal_line, hist
+
 
 def get_default_params() -> dict:
     """Return default parameter values used when none are supplied."""
@@ -66,82 +81,6 @@ def get_default_params() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Indicator helpers
-# ---------------------------------------------------------------------------
-
-def _calc_rsi(close: pd.Series, period: int) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, float("inf"))
-    return 100 - (100 / (1 + rs))
-
-
-def _calc_kdj(high: pd.Series, low: pd.Series, close: pd.Series,
-              n: int, m1: int, m2: int):
-    lowest = low.rolling(n).min()
-    highest = high.rolling(n).max()
-    hl_range = (highest - lowest).replace(0, np.nan)
-    rsv = ((close - lowest) / hl_range * 100).fillna(50)
-
-    k = np.full(len(close), 50.0)
-    d = np.full(len(close), 50.0)
-    rsv_arr = rsv.values
-    for i in range(1, len(close)):
-        k[i] = k[i - 1] * (m1 - 1) / m1 + rsv_arr[i] / m1
-        d[i] = d[i - 1] * (m2 - 1) / m2 + k[i] / m2
-    j = 3 * k - 2 * d
-    return k, d, j
-
-
-def _calc_cci(high: pd.Series, low: pd.Series, close: pd.Series,
-              period: int) -> pd.Series:
-    tp = (high + low + close) / 3
-    ma_tp = tp.rolling(period).mean()
-    md = tp.rolling(period).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
-    return (tp - ma_tp) / (0.015 * md.replace(0, np.nan))
-
-
-def _calc_macd(close: pd.Series, fast: int, slow: int, signal: int):
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    dif = ema_fast - ema_slow
-    dea = dif.ewm(span=signal, adjust=False).mean()
-    hist = dif - dea
-    return dif, dea, hist
-
-
-# ---------------------------------------------------------------------------
-# Safe parameter helpers
-# ---------------------------------------------------------------------------
-
-def _int(value, default: int) -> int:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return default
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _float(value, default: float) -> float:
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe(arr, i) -> float:
-    """Return arr[i] as float, or NaN if out of bounds."""
-    if i < 0 or i >= len(arr):
-        return float("nan")
-    v = arr[i]
-    return float(v) if v is not None else float("nan")
 
 
 # ---------------------------------------------------------------------------

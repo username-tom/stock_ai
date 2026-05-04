@@ -8,7 +8,8 @@ import os
 
 from app.config import settings
 from app.database import init_db
-from app.routers import trading, backtest, market_data, ws, scripts, sandbox
+from app.routers import trading, backtest, market_data, ws, scripts
+from app.routers.sandbox_router import router as sandbox_router
 from app.services import market_service, symbol_registry
 from app.services.sandbox_engine import run_engine
 from app.services.portfolio_manager import run_portfolio_manager
@@ -66,7 +67,7 @@ app.include_router(backtest.router)
 app.include_router(market_data.router)
 app.include_router(ws.router)
 app.include_router(scripts.router)
-app.include_router(sandbox.router)
+app.include_router(sandbox_router)
 
 # Serve HTML reports as static files
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)

@@ -76,37 +76,8 @@ def get_engine_state() -> dict:
 
 async def _fetch_intraday_df(symbol: str) -> pd.DataFrame:
     """Return a DataFrame of recent intraday OHLCV bars for *symbol*."""
-    from app.services.market_service import _yf_chart, _fmt_ts
-
-    chart = await _yf_chart(symbol, range_="5d", interval="1m", include_pre_post=False)
-    timestamps = chart.get("timestamp", [])
-    quotes     = chart.get("indicators", {}).get("quote", [{}])[0]
-
-    opens   = quotes.get("open",   [])
-    highs   = quotes.get("high",   [])
-    lows    = quotes.get("low",    [])
-    closes  = quotes.get("close",  [])
-    volumes = quotes.get("volume", [])
-
-    rows = []
-    for i, ts in enumerate(timestamps):
-        c = closes[i] if i < len(closes) else None
-        if c is None:
-            continue
-        rows.append({
-            "Open":   float(opens[i])   if i < len(opens)   and opens[i]   is not None else float(c),
-            "High":   float(highs[i])   if i < len(highs)   and highs[i]   is not None else float(c),
-            "Low":    float(lows[i])    if i < len(lows)    and lows[i]    is not None else float(c),
-            "Close":  float(c),
-            "Volume": int(volumes[i])   if i < len(volumes) and volumes[i] is not None else 0,
-        })
-
-    if not rows:
-        raise ValueError(f"No intraday data returned for {symbol}")
-
-    df = pd.DataFrame(rows)
-    df.index = pd.RangeIndex(len(df))
-    return df
+    from app.services.market_service import get_intraday_df
+    return await get_intraday_df(symbol, range_="5d", interval="1m", include_pre_post=False)
 
 
 # ── signal generation ─────────────────────────────────────────────────────── #
