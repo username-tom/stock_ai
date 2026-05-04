@@ -33,7 +33,7 @@ function NewsCard({ item }) {
         <img
           src={item.thumbnail}
           alt=""
-          className="h-16 w-24 object-cover rounded-lg shrink-0 bg-dark-700"
+          className="h-14 w-20 object-cover rounded-lg shrink-0 bg-dark-700"
           onError={e => { e.target.style.display = 'none' }}
         />
       )}
@@ -111,47 +111,55 @@ export default function NewsTab({ watchlist }) {
     queryKey: ['news', watchlist],
     queryFn: () => getNews(watchlist),
     refetchInterval: 15 * 60_000,
+    refetchIntervalInBackground: true,
     enabled: watchlist.length > 0,
   })
 
-  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE)
-  const sentinelRef = useRef(null)
+  const [visibleWatchlist, setVisibleWatchlist] = useState(INITIAL_VISIBLE)
+  const [visibleMarket, setVisibleMarket] = useState(INITIAL_VISIBLE)
+  const watchlistSentinelRef = useRef(null)
+  const marketSentinelRef = useRef(null)
 
   // Reset pagination when fresh data arrives
-  useEffect(() => { setVisibleCount(INITIAL_VISIBLE) }, [data])
+  useEffect(() => { setVisibleWatchlist(INITIAL_VISIBLE); setVisibleMarket(INITIAL_VISIBLE) }, [data])
 
-  const loadMore = useCallback(() => {
-    setVisibleCount(n => n + PAGE_SIZE)
-  }, [])
+  const loadMoreWatchlist = useCallback(() => setVisibleWatchlist(n => n + PAGE_SIZE), [])
+  const loadMoreMarket    = useCallback(() => setVisibleMarket(n => n + PAGE_SIZE), [])
 
-  // Auto-load when the sentinel scrolls into view
+  // Auto-load sentinels
   useEffect(() => {
-    const el = sentinelRef.current
+    const el = watchlistSentinelRef.current
     if (!el) return
     const observer = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) loadMore() },
+      ([entry]) => { if (entry.isIntersecting) loadMoreWatchlist() },
       { rootMargin: '120px' },
     )
     observer.observe(el)
     return () => observer.disconnect()
-  }, [loadMore, data])
+  }, [loadMoreWatchlist, data])
+
+  useEffect(() => {
+    const el = marketSentinelRef.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting) loadMoreMarket() },
+      { rootMargin: '120px' },
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [loadMoreMarket, data])
 
   const asOf = data?.as_of ? new Date(data.as_of).toLocaleTimeString() : null
 
-  // Earnings always shown in full; news articles are paginated together
-  const earnings      = data?.items?.filter(i => i.type === 'earnings') ?? []
-  const allNewsItems  = data?.items?.filter(i => i.type === 'news' && !isBlocked(i)) ?? []
-  const watchlistNews = allNewsItems.filter(i => i.watchlist_match)
-  const marketNews    = allNewsItems.filter(i => !i.watchlist_match)
+  const earnings         = data?.items?.filter(i => i.type === 'earnings') ?? []
+  const allNewsItems     = data?.items?.filter(i => i.type === 'news' && !isBlocked(i)) ?? []
+  const watchlistNews    = allNewsItems.filter(i => i.watchlist_match)
+  const marketNews       = allNewsItems.filter(i => !i.watchlist_match)
 
-  // Apply the combined visible budget across watchlist-then-market ordering
-  const combined      = [...watchlistNews, ...marketNews]
-  const visibleNews   = combined.slice(0, visibleCount)
-  const hasMore       = visibleCount < combined.length
-
-  // Split visible slice back into their sections for labelled rendering
-  const visibleWatchlist = visibleNews.filter(i => i.watchlist_match)
-  const visibleMarket    = visibleNews.filter(i => !i.watchlist_match)
+  const visibleWatchlistItems = watchlistNews.slice(0, visibleWatchlist)
+  const visibleMarketItems    = marketNews.slice(0, visibleMarket)
+  const hasMoreWatchlist      = visibleWatchlist < watchlistNews.length
+  const hasMoreMarket         = visibleMarket < marketNews.length
 
   return (
     <div className="space-y-6">
@@ -216,42 +224,60 @@ export default function NewsTab({ watchlist }) {
             </section>
           )}
 
-          {visibleWatchlist.length > 0 && (
-            <section>
-              <h3 className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                <NewspaperIcon className="h-3.5 w-3.5" /> Watchlist News
-              </h3>
-              <div className="space-y-2">
-                {visibleWatchlist.map(item => <NewsCard key={item.id} item={item} />)}
-              </div>
-            </section>
-          )}
+          {visibleWatchlistItems.length > 0 || visibleMarketItems.length > 0 ? (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+              {/* Watchlist News column */}
+              <section>
+                <h3 className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                  <NewspaperIcon className="h-3.5 w-3.5" /> Watchlist News
+                  <span className="ml-auto text-slate-600 normal-case font-normal">{watchlistNews.length} articles</span>
+                </h3>
+                {visibleWatchlistItems.length === 0 ? (
+                  <p className="text-sm text-slate-600 py-4">No watchlist news.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {visibleWatchlistItems.map(item => <NewsCard key={item.id} item={item} />)}
+                    {hasMoreWatchlist && (
+                      <div>
+                        <LoadMoreArrow onClick={loadMoreWatchlist} />
+                        <div ref={watchlistSentinelRef} className="h-1" aria-hidden="true" />
+                      </div>
+                    )}
+                    {!hasMoreWatchlist && watchlistNews.length > 0 && (
+                      <p className="text-xs text-slate-600 text-center py-3">All {watchlistNews.length} articles shown</p>
+                    )}
+                  </div>
+                )}
+              </section>
 
-          {visibleMarket.length > 0 && (
-            <section>
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
-                <NewspaperIcon className="h-3.5 w-3.5" /> Market News
-              </h3>
-              <div className="space-y-2">
-                {visibleMarket.map(item => <NewsCard key={item.id} item={item} />)}
-              </div>
-            </section>
-          )}
-
-          {earnings.length === 0 && combined.length === 0 && (
-            <p className="text-sm text-slate-500 text-center py-10">No news available.</p>
-          )}
-
-          {/* Sentinel + load-more arrow */}
-          {hasMore && (
-            <div>
-              <LoadMoreArrow onClick={loadMore} />
-              {/* invisible sentinel that IntersectionObserver watches */}
-              <div ref={sentinelRef} className="h-1" aria-hidden="true" />
+              {/* Market News column */}
+              <section>
+                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                  <NewspaperIcon className="h-3.5 w-3.5" /> Market News
+                  <span className="ml-auto text-slate-600 normal-case font-normal">{marketNews.length} articles</span>
+                </h3>
+                {visibleMarketItems.length === 0 ? (
+                  <p className="text-sm text-slate-600 py-4">No market news.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {visibleMarketItems.map(item => <NewsCard key={item.id} item={item} />)}
+                    {hasMoreMarket && (
+                      <div>
+                        <LoadMoreArrow onClick={loadMoreMarket} />
+                        <div ref={marketSentinelRef} className="h-1" aria-hidden="true" />
+                      </div>
+                    )}
+                    {!hasMoreMarket && marketNews.length > 0 && (
+                      <p className="text-xs text-slate-600 text-center py-3">All {marketNews.length} articles shown</p>
+                    )}
+                  </div>
+                )}
+              </section>
             </div>
-          )}
-          {!hasMore && combined.length > 0 && (
-            <p className="text-xs text-slate-600 text-center py-4">All {combined.length} articles shown</p>
+          ) : (
+            earnings.length === 0 && (
+              <p className="text-sm text-slate-500 text-center py-10">No news available.</p>
+            )
           )}
         </>
       )}

@@ -14,9 +14,19 @@ export function deriveMarketOpen(quotesMap) {
 
 export function isMarketHours() {
   const now = new Date()
-  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
-  const day = et.getDay()          // 0 Sun … 6 Sat
-  if (day === 0 || day === 6) return false
-  const mins = et.getHours() * 60 + et.getMinutes()
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  }).formatToParts(now)
+
+  const day    = parts.find(p => p.type === 'weekday')?.value   // 'Mon'…'Sun'
+  const hour   = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10)
+  const minute = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10)
+
+  if (day === 'Sat' || day === 'Sun') return false
+  const mins = hour * 60 + minute
   return mins >= 9 * 60 + 30 && mins < 16 * 60
 }

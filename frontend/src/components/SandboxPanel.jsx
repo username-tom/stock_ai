@@ -1,4 +1,4 @@
-﻿import { useState, useMemo, useRef } from 'react'
+﻿import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   SignalIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, ArrowPathIcon, XMarkIcon,
@@ -19,6 +19,8 @@ import { CUSTOM_SCRIPT_KEY } from './sandbox/sandboxConstants'
 import SandboxSidebar from './sandbox/SandboxSidebar'
 import PortfolioOverview from './sandbox/PortfolioOverview'
 import PositionDetail from './sandbox/PositionDetail'
+import TradeNotificationBanner from './sandbox/TradeNotificationBanner'
+import ActivityLog from './sandbox/ActivityLog'
 
 export default function SandboxPanel() {
   const qc = useQueryClient()
@@ -36,6 +38,8 @@ export default function SandboxPanel() {
   const [exportLoading, setExportLoading] = useState(false)
   const [importMsg, setImportMsg] = useState(null)
   const [resetConfirm, setResetConfirm] = useState(false)
+  const [activities, setActivities] = useState([])
+  const prevTradeIdRef = useRef(null)
 
   // IB status
   const { data: ibStatus } = useQuery({ queryKey: ['ib-status'], queryFn: getIBStatus, refetchInterval: 5000 })
@@ -91,6 +95,41 @@ export default function SandboxPanel() {
   const { data: analytics } = useQuery({ queryKey: ['sandbox-analytics'], queryFn: getSandboxAnalytics, refetchInterval: 30000 })
   const { data: managerState } = useQuery({ queryKey: ['portfolio-manager-state'], queryFn: getPortfolioManagerState, refetchInterval: 10000 })
 
+  // all recent trades (for notification + activity log)
+  const { data: allTradesData } = useQuery({
+    queryKey: ['sandbox-trades-all'],
+    queryFn: () => getSandboxTrades(undefined, 50),
+    refetchInterval: 8000,
+  })
+  const allTrades = allTradesData?.trades ?? []
+  const engineTrades = allTrades.filter(t => t.strategy_name)
+  const latestEngineTrade = engineTrades[0] ?? null
+
+  // build activity log entries from trades + mutations
+  useEffect(() => {
+    if (!allTrades.length) return
+    const newest = allTrades[0]
+    if (newest.id === prevTradeIdRef.current) return
+    prevTradeIdRef.current = newest.id
+    // add new trades that aren't yet in activities
+    setActivities(prev => {
+      const existingIds = new Set(prev.filter(a => a.tradeId).map(a => a.tradeId))
+      const newEntries = allTrades
+        .filter(t => !existingIds.has(t.id))
+        .map(t => ({
+          type: 'trade',
+          tradeId: t.id,
+          side: t.side,
+          label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}${
+            t.pnl != null ? ` · PnL: ${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : ''
+          }`,
+          sub: t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined,
+          time: t.created_at ? new Date(t.created_at).toLocaleTimeString() : '',
+        }))
+      return [...newEntries, ...prev].slice(0, 100)
+    })
+  }, [allTrades])
+
   // mutations
   const removeSymbolMut = useMutation({
     mutationFn: s => removeSandboxSymbol(s),
@@ -122,18 +161,41 @@ export default function SandboxPanel() {
   })
   const toggleEngineMut = useMutation({
     mutationFn: s => toggleSandboxEngine(s),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['sandbox-positions'] }),
+    onSuccess: (data, symbol) => {
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      const pos = positions.find(p => p.symbol === symbol)
+      const nowEnabled = !pos?.strategy_enabled
+      setActivities(prev => [{
+        type: 'engine',
+        label: `${symbol} engine ${nowEnabled ? 'started' : 'stopped'}`,
+        sub: pos?.strategy_name?.split(':')[0],
+        time: new Date().toLocaleTimeString(),
+      }, ...prev].slice(0, 100))
+    },
   })
   const toggleAllEnginesMut = useMutation({
     mutationFn: toggleAllSandboxEngines,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-engine-state'] })
+      setActivities(prev => [{
+        type: 'engine',
+        label: 'All sandbox engines toggled',
+        time: new Date().toLocaleTimeString(),
+      }, ...prev].slice(0, 100))
     },
   })
   const toggleManagerMut = useMutation({
     mutationFn: togglePortfolioManager,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] }),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+      const enabled = data?.settings?.enabled ?? data?.enabled
+      setActivities(prev => [{
+        type: 'manager',
+        label: `Portfolio Manager ${enabled ? 'enabled' : 'disabled'}`,
+        time: new Date().toLocaleTimeString(),
+      }, ...prev].slice(0, 100))
+    },
   })
 
   // handlers
@@ -188,6 +250,8 @@ export default function SandboxPanel() {
 
   return (
     <div className="flex h-screen max-h-screen overflow-hidden">
+      <TradeNotificationBanner latestEngineTrade={latestEngineTrade} />
+      <ActivityLog activities={activities} />
 
       <SandboxSidebar
         ibMode={ibMode}

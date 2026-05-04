@@ -1,0 +1,64 @@
+import { useEffect, useRef, useState } from 'react'
+import { XMarkIcon, ArrowTrendingUpIcon, ArrowTrendingDownIcon } from '@heroicons/react/24/outline'
+
+/**
+ * Shows a dismissible top banner whenever a new engine-triggered trade appears.
+ * `latestEngineTrade` is the most recent trade object with strategy_name set.
+ */
+export default function TradeNotificationBanner({ latestEngineTrade }) {
+  const [visible, setVisible] = useState(false)
+  const [trade, setTrade] = useState(null)
+  const prevIdRef = useRef(null)
+  const timerRef = useRef(null)
+
+  useEffect(() => {
+    if (!latestEngineTrade) return
+    if (latestEngineTrade.id === prevIdRef.current) return
+    prevIdRef.current = latestEngineTrade.id
+    setTrade(latestEngineTrade)
+    setVisible(true)
+    clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => setVisible(false), 8000)
+    return () => clearTimeout(timerRef.current)
+  }, [latestEngineTrade])
+
+  if (!visible || !trade) return null
+
+  const isBuy = trade.side === 'BUY'
+  const stratLabel = trade.strategy_name?.split(':')[0] ?? 'Engine'
+
+  return (
+    <div
+      className={`fixed top-0 left-0 right-0 z-50 flex items-center justify-between gap-4 px-6 py-2.5 text-sm font-medium shadow-lg
+        ${isBuy
+          ? 'bg-emerald-900/95 border-b border-emerald-700/60 text-emerald-200'
+          : 'bg-red-900/95 border-b border-red-700/60 text-red-200'
+        }`}
+    >
+      <div className="flex items-center gap-2.5">
+        {isBuy
+          ? <ArrowTrendingUpIcon className="h-4 w-4 flex-shrink-0 text-emerald-400" />
+          : <ArrowTrendingDownIcon className="h-4 w-4 flex-shrink-0 text-red-400" />
+        }
+        <span>
+          <span className={`font-bold ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>{trade.side}</span>
+          {' '}{trade.quantity} <span className="font-bold text-white">{trade.symbol}</span>
+          {' '}@ <span className="font-mono">${trade.price?.toFixed(2)}</span>
+          {trade.pnl != null && (
+            <span className={`ml-2 ${trade.pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+              PnL: {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
+            </span>
+          )}
+          <span className="ml-2 text-xs opacity-60">via {stratLabel}</span>
+          {trade.reason && <span className="ml-2 text-xs opacity-50">— {trade.reason}</span>}
+        </span>
+      </div>
+      <button
+        onClick={() => setVisible(false)}
+        className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"
+      >
+        <XMarkIcon className="h-4 w-4" />
+      </button>
+    </div>
+  )
+}

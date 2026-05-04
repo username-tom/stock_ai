@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ArrowUpIcon, ArrowDownIcon, EyeIcon, EyeSlashIcon, ChevronDownIcon, ChevronUpIcon } from '@heroicons/react/24/solid'
 import SubplotChart from '../charts/SubplotChart'
 import { getMovers, getHistory } from '../../api/client'
-import { isMarketHours } from '../../utils/marketHours'
+import { useMarketOpen } from '../../hooks/useMarketOpen'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 
 function fmt(n, digits = 2) { return n != null ? n.toFixed(digits) : '—' }
@@ -100,11 +100,14 @@ const CHART_PERIODS = [
 function ChartDropdown({ symbol }) {
   const [activeTab, setActiveTab] = useState('1D')
   const tab = CHART_PERIODS.find(p => p.label === activeTab)
+  const marketOpen = useMarketOpen()
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['mover-history', symbol, tab.period, tab.interval],
     queryFn: () => getHistory(symbol, tab.period, tab.interval),
-    staleTime: 5 * 60_000,
+    staleTime: marketOpen ? 55_000 : 5 * 60_000,
+    refetchInterval: marketOpen ? 60_000 : 5 * 60_000,
+    refetchIntervalInBackground: true,
   })
 
   return (
@@ -220,11 +223,13 @@ function MoverRow({ q, rank, inWatchlist, onToggleWatchlist }) {
 }
 
 export default function MoversTab({ watchlist = [], toggleSymbol }) {
-  const marketOpen = isMarketHours()
+  const marketOpen = useMarketOpen()
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['movers'],
     queryFn: () => getMovers(25),
+    staleTime: marketOpen ? 4 * 60_000 : 10 * 60_000,
     refetchInterval: marketOpen ? 5 * 60_000 : false,
+    refetchIntervalInBackground: true,
   })
 
   const asOf = data?.as_of ? new Date(data.as_of).toLocaleTimeString() : null
