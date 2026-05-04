@@ -92,7 +92,7 @@ def run_backtest(
     start_date: str,
     end_date: str,
     initial_capital: float = 10_000.0,
-    commission: float = 0.001,
+    commission: float = 0.005,  # flat per-share fee (e.g. IB fixed $0.005/share)
     script_code: str | None = None,
     data_source: DataSource = "yfinance",
     day_trade: bool = False,
@@ -202,8 +202,8 @@ def run_backtest(
 
         # ── Day-trade: force-close at end of last regular bar of the day ──── #
         if day_trade and date in last_regular_bar and shares > 0:
-            proceeds = shares * price * (1 - commission)
-            pnl = proceeds - (shares * entry_price * (1 + commission))
+            proceeds = shares * price - shares * commission
+            pnl = proceeds - (shares * entry_price + shares * commission)
             trades.append(
                 {
                     "entry_date": entry_date,
@@ -228,9 +228,9 @@ def run_backtest(
 
         # ── Day-trade: execute a pending pre-market buy at first regular bar ─ #
         if day_trade and is_regular and pending_buy_reason is not None and shares == 0:
-            shares_to_buy = math.floor(cash / (price * (1 + commission)))
+            shares_to_buy = math.floor(cash / (price + commission))
             if shares_to_buy > 0:
-                cost = shares_to_buy * price * (1 + commission)
+                cost = shares_to_buy * price + shares_to_buy * commission
                 cash -= cost
                 shares = shares_to_buy
                 entry_price = price
@@ -249,8 +249,8 @@ def run_backtest(
             and entry_price is not None
             and price <= entry_price * stop_loss_mult
         ):
-            proceeds = shares * price * (1 - commission)
-            pnl = proceeds - (shares * entry_price * (1 + commission))
+            proceeds = shares * price - shares * commission
+            pnl = proceeds - (shares * entry_price + shares * commission)
             trades.append(
                 {
                     "entry_date": entry_date,
@@ -277,9 +277,9 @@ def run_backtest(
             # BUY signal
             if is_regular:
                 # Execute immediately during regular session
-                shares_to_buy = math.floor(cash / (price * (1 + commission)))
+                shares_to_buy = math.floor(cash / (price + commission))
                 if shares_to_buy > 0:
-                    cost = shares_to_buy * price * (1 + commission)
+                    cost = shares_to_buy * price + shares_to_buy * commission
                     cash -= cost
                     shares = shares_to_buy
                     entry_price = price
@@ -291,8 +291,8 @@ def run_backtest(
 
         elif position_change < 0 and shares > 0 and is_regular:
             # SELL — only during regular session
-            proceeds = shares * price * (1 - commission)
-            pnl = proceeds - (shares * entry_price * (1 + commission))
+            proceeds = shares * price - shares * commission
+            pnl = proceeds - (shares * entry_price + shares * commission)
             exit_reason = str(row.get("signal_source", "")) or "strategy_exit"
             trades.append(
                 {

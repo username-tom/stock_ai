@@ -195,6 +195,7 @@ def validate_script(script_code: str) -> dict:
       - ``error`` (str | None)
       - ``default_params`` (dict)
     """
+    script_code = script_code.lstrip("\ufeff")
     try:
         code = compile(script_code, "<custom_script>", "exec")
     except SyntaxError as exc:
@@ -238,6 +239,7 @@ def execute_script(script_code: str, df: pd.DataFrame, **params) -> pd.DataFrame
 
     Raises ``ValueError`` if the script is invalid or execution fails.
     """
+    script_code = script_code.lstrip("\ufeff")
     try:
         code = compile(script_code, "<custom_script>", "exec")
     except SyntaxError as exc:

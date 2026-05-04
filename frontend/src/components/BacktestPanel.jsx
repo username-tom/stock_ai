@@ -160,6 +160,30 @@ const TEMPLATE_PARAM_UI = {
     { key: 'use_squeeze',    label: 'Require BB Squeeze', type: 'toggle', default: 1 },
     { key: 'hold_overnight', label: 'Hold Overnight',    type: 'toggle', default: 0 },
   ],
+  'day_trade_pro_template.py': [
+    { key: 'entry_mode',            label: 'Entry Mode',             type: 'select', options: ['both', 'orb', 'vwap'], default: 'both' },
+    { key: 'orb_bars',              label: 'ORB Bars (minutes)',      type: 'number', default: 15 },
+    { key: 'orb_expire_bars',       label: 'ORB Expire After (bars)', type: 'number', default: 60 },
+    { key: 'orb_volume_mult',       label: 'ORB Volume Surge ×',      type: 'number', default: 1.5, step: 0.1 },
+    { key: 'ema_fast',              label: 'EMA Fast',                type: 'number', default: 9 },
+    { key: 'ema_slow',              label: 'EMA Slow',                type: 'number', default: 21 },
+    { key: 'ema_trend',             label: 'Trend EMA (0=off)',       type: 'number', default: 50 },
+    { key: 'rsi_period',            label: 'RSI Period',              type: 'number', default: 14 },
+    { key: 'rsi_min',               label: 'RSI Min (entry)',         type: 'number', default: 45, step: 1 },
+    { key: 'rsi_max',               label: 'RSI Max (entry)',         type: 'number', default: 75, step: 1 },
+    { key: 'use_macd_entry',        label: 'Require MACD Entry',      type: 'toggle', default: 1 },
+    { key: 'atr_period',            label: 'ATR Period',              type: 'number', default: 14 },
+    { key: 'atr_stop_mult',         label: 'Hard Stop ATR ×',         type: 'number', default: 2.0, step: 0.1 },
+    { key: 'atr_tp_mult',           label: 'Take-Profit ATR ×',       type: 'number', default: 5.0, step: 0.1 },
+    { key: 'trail_activation_mult', label: 'Trail Activate ATR ×',    type: 'number', default: 1.5, step: 0.1 },
+    { key: 'trail_mult',            label: 'Trailing Stop ATR ×',     type: 'number', default: 1.2, step: 0.1 },
+    { key: 'min_atr_pct',           label: 'Min ATR % of Price',       type: 'number', default: 0.05, step: 0.01 },
+    { key: 'min_move_pct',          label: 'Min TP Move % (0=off)',    type: 'number', default: 0.05, step: 0.01 },
+    { key: 'max_trades_per_day',    label: 'Max Trades/Day',          type: 'number', default: 2 },
+    { key: 'cooldown_bars',         label: 'Cooldown Bars After Exit', type: 'number', default: 10 },
+    { key: 'max_hold_bars',         label: 'Max Hold Bars (0=off)',   type: 'number', default: 60 },
+    { key: 'hold_overnight',        label: 'Hold Overnight',          type: 'toggle', default: 0 },
+  ],
 }
 
 const CUSTOM_SCRIPT_KEY = '__custom_script__'
@@ -544,7 +568,25 @@ export default function BacktestPanel() {
                   type="checkbox"
                   className="sr-only peer"
                   checked={form.day_trade}
-                  onChange={e => setForm(f => ({ ...f, day_trade: e.target.checked }))}
+                  onChange={e => {
+                    const on = e.target.checked
+                    if (on) {
+                      // Auto-set date range to last 7 calendar days → today
+                      // (accounts for weekends: today counts if it's a weekday)
+                      const now = new Date()
+                      const day = now.getDay() // 0=Sun, 6=Sat
+                      // If today is a weekend, roll back to Friday
+                      const endDate = new Date(now)
+                      if (day === 0) endDate.setDate(endDate.getDate() - 2)
+                      else if (day === 6) endDate.setDate(endDate.getDate() - 1)
+                      const startDate = new Date(endDate)
+                      startDate.setDate(startDate.getDate() - 6)
+                      const fmt = d => d.toISOString().slice(0, 10)
+                      setForm(f => ({ ...f, day_trade: true, start_date: fmt(startDate), end_date: fmt(endDate) }))
+                    } else {
+                      setForm(f => ({ ...f, day_trade: false }))
+                    }
+                  }}
                 />
                 <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-indigo-500 transition-colors" />
                 <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
