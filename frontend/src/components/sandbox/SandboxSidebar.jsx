@@ -1,0 +1,171 @@
+import { useState } from 'react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  PlusIcon, CurrencyDollarIcon, SignalIcon, BeakerIcon,
+} from '@heroicons/react/24/outline'
+import { addSandboxFunds, addSandboxSymbol } from '../../api/client'
+import SymbolAutocomplete from '../shared/SymbolAutocomplete'
+import StrategySelector from './StrategySelector'
+import StockListItem from './StockListItem'
+import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
+import { encodeStrategy, fmtMoney, fmt, defaultParams } from './sandboxHelpers'
+
+export default function SandboxSidebar({
+  ibMode,
+  accountData,
+  totalEquity,
+  totalUnrealizedPnl,
+  totalRealizedPnl,
+  positions,
+  quotes,
+  selectedSymbol,
+  onSelectSymbol,
+  onShowOverview,
+}) {
+  const qc = useQueryClient()
+
+  const [showAddFunds, setShowAddFunds] = useState(false)
+  const [fundsInput, setFundsInput] = useState('')
+  const [showAddSymbol, setShowAddSymbol] = useState(false)
+  const [newSymbol, setNewSymbol] = useState('')
+  const [newAlloc, setNewAlloc] = useState('')
+  const [addSymbolErr, setAddSymbolErr] = useState('')
+  const [newStratType, setNewStratType] = useState('sma_crossover')
+  const [newScriptId, setNewScriptId] = useState(null)
+  const [newStratParams, setNewStratParams] = useState(defaultParams('sma_crossover'))
+
+  const addFundsMut = useMutation({
+    mutationFn: a => addSandboxFunds(a),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sandbox-account'] }); setShowAddFunds(false); setFundsInput('') },
+  })
+
+  const addSymbolMut = useMutation({
+    mutationFn: p => addSandboxSymbol(p),
+    onSuccess: d => {
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      setShowAddSymbol(false); setNewSymbol(''); setNewAlloc(''); setAddSymbolErr('')
+      onSelectSymbol(d.symbol)
+    },
+    onError: e => setAddSymbolErr(e.response?.data?.detail || e.message),
+  })
+
+  function handleNewStratChange(type) {
+    setNewStratType(type)
+    if (type !== CUSTOM_SCRIPT_KEY) setNewStratParams(defaultParams(type))
+  }
+
+  function handleAddSymbol() {
+    if (!newSymbol.trim()) return
+    addSymbolMut.mutate({
+      symbol: newSymbol.trim().toUpperCase(),
+      strategy_name: encodeStrategy(newStratType, newStratParams, newScriptId),
+      allocated_funds: parseFloat(newAlloc) || 0,
+    })
+  }
+
+  return (
+    <aside className="w-72 flex-shrink-0 bg-dark-800 border-r border-dark-500 flex flex-col">
+
+      {/* Account summary — click to show portfolio overview */}
+      <button
+        onClick={onShowOverview}
+        className={`w-full text-left px-4 py-4 border-b border-dark-500 transition-colors hover:bg-dark-700/40 ${
+          selectedSymbol === null ? 'bg-dark-700/30 ring-1 ring-inset ring-emerald-600/30' : ''
+        }`}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              {ibMode === 'live' ? 'Live Trading' : ibMode === 'paper' ? 'Paper Trading' : 'Portfolio'}
+            </h2>
+            {ibMode ? (
+              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold ${
+                ibMode === 'live' ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/40'
+                  : 'bg-blue-900/40 text-blue-400 border border-blue-700/40'
+              }`}>
+                <SignalIcon className="h-3 w-3" />
+                {ibMode === 'live' ? 'LIVE' : 'PAPER'}
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-500 border border-dark-500">
+                <BeakerIcon className="h-3 w-3" />SIM
+              </span>
+            )}
+          </div>
+          <button
+            onClick={e => { e.stopPropagation(); setShowAddFunds(v => !v) }}
+            className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300"
+          >
+            <CurrencyDollarIcon className="h-3.5 w-3.5" />Add Funds
+          </button>
+        </div>
+        {showAddFunds && (
+          <div className="flex gap-2 mb-3" onClick={e => e.stopPropagation()}>
+            <input className="input flex-1 py-1.5 text-sm" type="number" min="1" placeholder="Amount $"
+              value={fundsInput} onChange={e => setFundsInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && fundsInput && addFundsMut.mutate(parseFloat(fundsInput))} />
+            <button className="btn-primary py-1.5 px-3 text-xs" disabled={!fundsInput || addFundsMut.isPending}
+              onClick={() => addFundsMut.mutate(parseFloat(fundsInput))}>Add</button>
+          </div>
+        )}
+        <div className="space-y-1.5 text-sm">
+          <div className="flex justify-between"><span className="text-slate-500">Total Funds</span><span className="text-slate-200 font-semibold">{fmtMoney(accountData?.total_funds)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">Available</span><span className="text-emerald-400 font-semibold">{fmtMoney(accountData?.available_funds)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">Portfolio Equity</span><span className="text-slate-200 font-semibold">{fmtMoney(totalEquity)}</span></div>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className={`rounded-lg p-2 text-center ${totalUnrealizedPnl >= 0 ? 'bg-emerald-900/20' : 'bg-red-900/20'}`}>
+            <div className="text-xs text-slate-500 mb-0.5">Unrealised</div>
+            <div className={`text-sm font-semibold ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalUnrealizedPnl)}</div>
+          </div>
+          <div className={`rounded-lg p-2 text-center ${totalRealizedPnl >= 0 ? 'bg-emerald-900/20' : 'bg-red-900/20'}`}>
+            <div className="text-xs text-slate-500 mb-0.5">Realised</div>
+            <div className={`text-sm font-semibold ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</div>
+          </div>
+        </div>
+      </button>
+
+      {/* Stock list — scrolls independently */}
+      <div className="flex-1 overflow-y-auto px-3 py-3">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Stocks</span>
+          <button onClick={() => setShowAddSymbol(v => !v)} className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300">
+            <PlusIcon className="h-3.5 w-3.5" />Add
+          </button>
+        </div>
+
+        {showAddSymbol && (
+          <div className="mb-3 space-y-2 border border-dark-500 rounded-lg p-3 bg-dark-900/40">
+            <SymbolAutocomplete
+              value={newSymbol}
+              onChange={v => setNewSymbol(v)}
+              onSelect={hit => setNewSymbol(hit.symbol)}
+              placeholder="Search symbol or name…"
+            />
+            <StrategySelector value={newStratType} scriptId={newScriptId} onStrategyChange={handleNewStratChange}
+              onScriptChange={setNewScriptId} stratParams={newStratParams}
+              onParamChange={(k, v) => setNewStratParams(p => ({ ...p, [k]: v }))} />
+            <input className="input text-sm py-1.5 w-full" type="number" placeholder="Allocate funds $"
+              value={newAlloc} onChange={e => setNewAlloc(e.target.value)} />
+            {addSymbolErr && <div className="text-xs text-red-400">{addSymbolErr}</div>}
+            <div className="flex gap-2">
+              <button className="btn-primary flex-1 text-xs py-1.5" disabled={!newSymbol || addSymbolMut.isPending} onClick={handleAddSymbol}>Add Symbol</button>
+              <button className="btn-secondary text-xs py-1.5 px-2" onClick={() => { setShowAddSymbol(false); setAddSymbolErr(''); setNewSymbol('') }}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-1">
+          {positions.map(pos => (
+            <StockListItem key={pos.symbol} pos={pos} quote={quotes[pos.symbol]}
+              isSelected={selectedSymbol === pos.symbol}
+              onClick={() => onSelectSymbol(pos.symbol)} />
+          ))}
+          {positions.length === 0 && (
+            <div className="text-center text-slate-600 text-xs py-6">No stocks yet.<br />Add a symbol above.</div>
+          )}
+        </div>
+      </div>
+    </aside>
+  )
+}

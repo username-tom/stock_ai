@@ -87,7 +87,17 @@ stock_ai/
 │           ├── ReportsPanel.jsx           Report list with search/filter
 │           ├── ScriptsPanel.jsx
 │           ├── TradingPanel.jsx
-│           └── SandboxPanel.jsx           Portfolio overview, analytics charts, engine controls
+│           ├── SandboxPanel.jsx           Layout shell, data queries, mutations, toolbar
+│           └── sandbox/
+│               ├── sandboxConstants.js    PIE_COLORS, CUSTOM_SCRIPT_KEY, STRATEGY_PARAM_UI
+│               ├── sandboxHelpers.js      fmt, fmtMoney, pct, encode/decodeStrategy helpers
+│               ├── StrategySelector.jsx   Strategy dropdown, params editor, custom script picker
+│               ├── StockListItem.jsx      Sidebar stock row with hover tooltip
+│               ├── TradeRow.jsx           Row in the trade history table
+│               ├── PieTooltipContent.jsx  Custom recharts tooltip for allocation pie
+│               ├── PortfolioOverview.jsx  Overview page (stat cards, pie, table, analytics charts)
+│               ├── PositionDetail.jsx     Stock detail (summary, strategy, trade form, history)
+│               └── SandboxSidebar.jsx     Left sidebar (account summary + scrollable stock list)
 ├── docker-compose.yml
 ```
 
