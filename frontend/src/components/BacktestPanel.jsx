@@ -146,6 +146,22 @@ const STRATEGY_PARAM_UI = {
   ],
 }
 
+const TEMPLATE_PARAM_UI = {
+  'day_trade_template.py': [
+    { key: 'ema_fast',       label: 'EMA Fast',          type: 'number', default: 9 },
+    { key: 'ema_slow',       label: 'EMA Slow',          type: 'number', default: 21 },
+    { key: 'rsi_period',     label: 'RSI Period',        type: 'number', default: 14 },
+    { key: 'rsi_overbought', label: 'RSI Overbought',    type: 'number', default: 70, step: 1 },
+    { key: 'atr_period',     label: 'ATR Period',        type: 'number', default: 14 },
+    { key: 'atr_stop_mult',  label: 'ATR Stop ×',        type: 'number', default: 1.5, step: 0.1 },
+    { key: 'atr_tp_mult',    label: 'ATR Take-Profit ×', type: 'number', default: 3.0, step: 0.1 },
+    { key: 'use_vwap',       label: 'Require VWAP',      type: 'toggle', default: 1 },
+    { key: 'use_macd',       label: 'Require MACD',      type: 'toggle', default: 1 },
+    { key: 'use_squeeze',    label: 'Require BB Squeeze', type: 'toggle', default: 1 },
+    { key: 'hold_overnight', label: 'Hold Overnight',    type: 'toggle', default: 0 },
+  ],
+}
+
 const CUSTOM_SCRIPT_KEY = '__custom_script__'
 const TEMPLATE_SCRIPT_KEY = '__template__'
 
@@ -180,11 +196,13 @@ export default function BacktestPanel() {
     end_date: '2023-12-31',
     initial_capital: 10000,
     commission: 0.005,
+    day_trade: false,
   })
   const [commissionPreset, setCommissionPreset] = useState('0.005')
   const [stratParams, setStratParams] = useState({ fast_period: 10, slow_period: 30, ma_type: 'SMA' })
   const [selectedScriptId, setSelectedScriptId] = useState(null)
   const [selectedTemplateFilename, setSelectedTemplateFilename] = useState(null)
+  const [tmplParams, setTmplParams] = useState({})
   const [tmplPreviewOpen, setTmplPreviewOpen] = useState(false)
   const [result, setResult] = useState(null)
   const [activeTab, setActiveTab] = useState('equity')
@@ -278,7 +296,7 @@ export default function BacktestPanel() {
         ...form,
         strategy_type: 'custom_script',
         template_filename: selectedTemplateFilename,
-        strategy_params: {},
+        strategy_params: tmplParams,
       })
     } else {
       startProgress(form.start_date, form.end_date)
@@ -350,7 +368,16 @@ export default function BacktestPanel() {
                   <select
                     className="input"
                     value={selectedTemplateFilename ?? ''}
-                    onChange={e => { setSelectedTemplateFilename(e.target.value || null); setTmplPreviewOpen(false) }}
+                    onChange={e => {
+                      const fn = e.target.value || null
+                      setSelectedTemplateFilename(fn)
+                      setTmplPreviewOpen(false)
+                      // Pre-populate params with defaults for this template
+                      const fields = TEMPLATE_PARAM_UI[fn] ?? []
+                      const defaults = {}
+                      fields.forEach(f => { defaults[f.key] = f.default })
+                      setTmplParams(defaults)
+                    }}
                   >
                     <option value="">— choose a template —</option>
                     {templates.map(t => (
@@ -385,6 +412,54 @@ export default function BacktestPanel() {
                   })()}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Template parameters */}
+          {isTemplate && selectedTemplateFilename && (TEMPLATE_PARAM_UI[selectedTemplateFilename] ?? []).length > 0 && (
+            <div className="border border-dark-500 rounded-lg p-3 space-y-3 bg-dark-900/30">
+              <div className="text-xs text-slate-500 uppercase tracking-wider">Template Parameters</div>
+              {(TEMPLATE_PARAM_UI[selectedTemplateFilename] ?? []).map(f => (
+                <div key={f.key}>
+                  <label className="label">{f.label}</label>
+                  {f.type === 'toggle' ? (
+                    <label className="flex items-center gap-3 cursor-pointer mt-1">
+                      <div className="relative">
+                        <input
+                          type="checkbox"
+                          className="sr-only peer"
+                          checked={!!(tmplParams[f.key] ?? f.default)}
+                          onChange={e => setTmplParams(p => ({ ...p, [f.key]: e.target.checked ? 1 : 0 }))}
+                        />
+                        <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-indigo-500 transition-colors" />
+                        <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+                      </div>
+                      <span className="text-xs text-slate-400">
+                        {(tmplParams[f.key] ?? f.default) ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </label>
+                  ) : f.type === 'select' ? (
+                    <select
+                      className="input"
+                      value={tmplParams[f.key] ?? f.default}
+                      onChange={e => setTmplParams(p => ({ ...p, [f.key]: e.target.value }))}
+                    >
+                      {f.options.map(o => <option key={o}>{o}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      className="input"
+                      type="number"
+                      step={f.step ?? 1}
+                      value={tmplParams[f.key] ?? f.default}
+                      onChange={e => setTmplParams(p => ({
+                        ...p,
+                        [f.key]: f.step ? parseFloat(e.target.value) : parseInt(e.target.value, 10),
+                      }))}
+                    />
+                  )}
+                </div>
+              ))}
             </div>
           )}
 
@@ -460,6 +535,31 @@ export default function BacktestPanel() {
               ))}
             </div>
           )}
+
+          {/* Day Trade toggle */}
+          <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30">
+            <label className="flex items-center gap-3 cursor-pointer select-none">
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  checked={form.day_trade}
+                  onChange={e => setForm(f => ({ ...f, day_trade: e.target.checked }))}
+                />
+                <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-indigo-500 transition-colors" />
+                <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+              </div>
+              <div>
+                <div className="text-sm font-medium text-slate-200">Day Trade Mode</div>
+                <div className="text-xs text-slate-500">Use intraday data (1m → 2m → 5m)</div>
+              </div>
+            </label>
+            {form.day_trade && (
+              <div className="mt-2 text-xs text-amber-400/80 border-t border-dark-600 pt-2">
+                ⚠ Yahoo Finance limits: 1m data to last 7 days, 2m/5m to last 60 days.
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -650,6 +750,13 @@ export default function BacktestPanel() {
           ) : result ? (
             <>
               {/* Summary header */}
+              {result.result?.day_trade && (
+                <div className="flex items-center gap-2 px-3 py-2 bg-indigo-900/30 border border-indigo-700/40 rounded-lg text-xs text-indigo-300">
+                  <span className="font-semibold uppercase tracking-wide">Day Trade Mode</span>
+                  <span className="text-indigo-500">•</span>
+                  <span>Interval: <span className="font-mono font-semibold">{result.result.interval ?? '—'}</span></span>
+                </div>
+              )}
               <SummaryPanel result={result} />
               {/* Metrics grid */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

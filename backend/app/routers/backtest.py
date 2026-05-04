@@ -48,6 +48,14 @@ class BacktestRequest(BaseModel):
         ),
         example="yfinance",
     )
+    day_trade: bool = Field(
+        default=False,
+        description=(
+            "When True, fetches intraday data (finest available interval: 1m → 2m → 5m) "
+            "and scales performance metrics accordingly. "
+            "Note: Yahoo Finance limits 1m data to the last 7 days."
+        ),
+    )
 
 
 @router.get("/strategies")
@@ -106,6 +114,7 @@ async def run_backtest_endpoint(
             commission=req.commission,
             script_code=script_code,
             data_source=req.data_source,
+            day_trade=req.day_trade,
             **req.strategy_params,
         )
     except ValueError as exc:

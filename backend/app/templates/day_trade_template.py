@@ -45,6 +45,9 @@ Parameters (all overridable from the UI or backtest request):
   use_vwap          int   1      1 = require price ≥ VWAP to buy, 0 = disable
   use_squeeze       int   1      1 = require BB squeeze confirmation, 0 = disable
   use_macd          int   1      1 = require positive MACD histogram, 0 = disable
+  hold_overnight    int   0      0 = close position at end of each trading day (day-trade
+                                    mode), 1 = allow positions to carry over to the next day
+                                    On daily-bar data this parameter has no effect.
 """
 import math
 
@@ -172,6 +175,8 @@ def get_default_params() -> dict:
         "use_vwap": 1,
         "use_squeeze": 1,
         "use_macd": 1,
+        # Position holding
+        "hold_overnight": 0,  # 0 = close at EOD, 1 = allow overnight
     }
 
 
@@ -211,11 +216,37 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
     atr_p         = _i(params.get("atr_period"),     14)
     atr_stop      = _f(params.get("atr_stop_mult"),  1.5)
     atr_tp        = _f(params.get("atr_tp_mult"),    3.0)
-    use_vwap      = bool(_i(params.get("use_vwap"),    1))
-    use_squeeze   = bool(_i(params.get("use_squeeze"), 1))
-    use_macd      = bool(_i(params.get("use_macd"),    1))
+    use_vwap       = bool(_i(params.get("use_vwap"),      1))
+    use_squeeze    = bool(_i(params.get("use_squeeze"),   1))
+    use_macd       = bool(_i(params.get("use_macd"),      1))
+    hold_overnight = bool(_i(params.get("hold_overnight"), 0))
 
     high, low, close, volume = df["High"], df["Low"], df["Close"], df["Volume"]
+
+    # ── pre-compute last regular-session bar index per calendar day ───────── #
+    # Used to emit a closing signal at EOD when hold_overnight is disabled.
+    # Only meaningful when intraday session data is present; on daily bars the
+    # set stays empty and the parameter has no effect.
+    _eod_indices: set = set()
+    if not hold_overnight and "session" in df.columns:
+        import datetime as _dt
+        _tz = getattr(df.index, "tz", None)
+        if _tz is not None:
+            try:
+                from zoneinfo import ZoneInfo as _ZI
+                _et = _ZI("America/New_York")
+                _et_dates = df.index.tz_convert(_et).date
+            except Exception:
+                _et_dates = df.index.date
+        else:
+            _et_dates = df.index.date
+        _reg_mask = df["session"].values == "regular"
+        for _d in set(_et_dates):
+            _day_positions = [
+                j for j, (d, r) in enumerate(zip(_et_dates, _reg_mask)) if d == _d and r
+            ]
+            if _day_positions:
+                _eod_indices.add(_day_positions[-1])
 
     # ── compute indicators ────────────────────────────────────────────────── #
     ema_f = _ema(close, ema_fast_p)
@@ -313,6 +344,16 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
             if use_macd and not math.isnan(macd_h_arr[i]) and macd_h_arr[i] < 0:
                 signals[i]       = -1
                 signal_source[i] = "macd_reversal (hist<0)"
+                in_position = False
+                entry_price = float("nan")
+                continue
+
+            # EOD close: emit sell at last regular bar of the day when
+            # hold_overnight is disabled.  Checked last so other exits
+            # (stop-loss, take-profit, EMA cross) still fire first.
+            if i in _eod_indices:
+                signals[i]       = -1
+                signal_source[i] = "eod_close (hold_overnight=0)"
                 in_position = False
                 entry_price = float("nan")
                 continue

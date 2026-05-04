@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import logging
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -27,6 +28,39 @@ import yfinance as yf
 from app.services.ib_service import IB_AVAILABLE, ib_service
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+
+# Regular US equity market session: 09:30 – 16:00 ET
+_MARKET_OPEN_TIME  = (9, 30)   # (hour, minute) inclusive
+_MARKET_CLOSE_TIME = (16, 0)   # (hour, minute) exclusive
+
+
+def _tag_market_session(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a ``session`` column: ``'pre'``, ``'regular'``, or ``'post'``.
+
+    The DataFrame index must be timezone-aware.  All comparisons are done in
+    US/Eastern time so daylight-saving transitions are handled correctly.
+
+    Regular session: 09:30 ≤ bar_time < 16:00 ET.
+    Pre-market:      bar_time < 09:30 ET.
+    Post-market:     bar_time ≥ 16:00 ET.
+    """
+    df = df.copy()
+    idx_et = df.index.tz_convert(_ET)
+    hour   = idx_et.hour
+    minute = idx_et.minute
+    total_min = hour * 60 + minute
+    open_min  = _MARKET_OPEN_TIME[0]  * 60 + _MARKET_OPEN_TIME[1]   # 570
+    close_min = _MARKET_CLOSE_TIME[0] * 60 + _MARKET_CLOSE_TIME[1]  # 960
+
+    session = pd.array(
+        ["pre" if t < open_min else ("post" if t >= close_min else "regular")
+         for t in total_min],
+        dtype=object,
+    )
+    df["session"] = session
+    return df
 
 DataSource = Literal["yfinance", "stooq", "ib"]
 
@@ -161,6 +195,79 @@ async def _ib_to_dataframe(symbol: str, start: str, end: str) -> pd.DataFrame:
 # Public API
 # --------------------------------------------------------------------------- #
 
+def fetch_ohlcv_intraday(
+    symbol: str,
+    start: str,
+    end: str,
+    source: DataSource = "yfinance",
+) -> pd.DataFrame:
+    """Fetch intraday OHLCV data using the finest available interval.
+
+    Tries intervals in order: ``1m``, ``2m``, ``5m``.  The first interval that
+    returns data is used.  Falls back gracefully when the date range exceeds
+    what yfinance allows for a given interval (e.g. 1m is limited to the last
+    7 days).
+
+    Parameters
+    ----------
+    symbol, start, end, source:
+        Same as :func:`fetch_ohlcv`.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with a DatetimeIndex (timezone-aware) and columns
+        Open, High, Low, Close, Volume.  An ``interval`` attribute is set on
+        the returned DataFrame indicating the interval that was used.
+
+    Raises
+    ------
+    ValueError
+        When no intraday data could be fetched for any supported interval.
+    """
+    if source not in ("yfinance",):
+        # Only yfinance supports sub-daily intervals in this implementation;
+        # other sources fall back to daily data via the regular fetch_ohlcv.
+        logger.warning(
+            "Intraday data is only supported for 'yfinance'; falling back to daily bars for %s.",
+            symbol,
+        )
+        df = fetch_ohlcv(symbol, start, end, source=source)
+        df.attrs["interval"] = "1d"
+        return df
+
+    for interval in ("1m", "2m", "5m"):
+        try:
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(start=start, end=end, interval=interval, prepost=True)
+            if df.empty:
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [col[0] for col in df.columns]
+            # Normalise column names to match daily data (yfinance Ticker.history
+            # uses Title Case already, but ensure Dividends/Stock Splits are dropped)
+            df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+            df.index = pd.to_datetime(df.index)
+            # Tag each bar with its market session (pre / regular / post)
+            df = _tag_market_session(df)
+            df.attrs["interval"] = interval
+            n_regular = int((df["session"] == "regular").sum())
+            logger.info(
+                "Intraday fetch: using interval=%s for %s (%s → %s), "
+                "%d total bars (%d regular-session)",
+                interval, symbol, start, end, len(df), n_regular,
+            )
+            return df
+        except Exception as exc:
+            logger.debug("Intraday interval %s failed for %s: %s", interval, symbol, exc)
+            continue
+
+    raise ValueError(
+        f"No intraday data available for {symbol!r} between {start} and {end}. "
+        "Note: 1m data is limited to the last 7 days and 2m/5m to the last 60 days on Yahoo Finance."
+    )
+
+
 def fetch_ohlcv(
     symbol: str,
     start: str,
@@ -223,6 +330,9 @@ def fetch_ohlcv(
             return _fetch_stooq(symbol, start, end)
 
     return fetchers[source](symbol, start, end)
+
+
+__all__ = ["fetch_ohlcv", "fetch_ohlcv_intraday", "list_data_sources", "DataSource", "_tag_market_session"]
 
 
 def list_data_sources() -> list[dict]:
