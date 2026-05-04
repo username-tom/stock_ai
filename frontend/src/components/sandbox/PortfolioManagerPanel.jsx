@@ -65,6 +65,9 @@ export default function PortfolioManagerPanel() {
       transfer_interval_s: settings.transfer_interval_s,
       indicator_interval_s: settings.indicator_interval_s,
       min_position_funds: settings.min_position_funds,
+      deploy_available_funds: settings.deploy_available_funds ?? true,
+      deploy_target: settings.deploy_target ?? 'most_bearish',
+      deploy_target_symbol: settings.deploy_target_symbol ?? '',
     })
     setEditSettings(true)
   }
@@ -75,6 +78,9 @@ export default function PortfolioManagerPanel() {
       transfer_interval_s: Number(draft.transfer_interval_s),
       indicator_interval_s: Number(draft.indicator_interval_s),
       min_position_funds: Number(draft.min_position_funds),
+      deploy_available_funds: draft.deploy_available_funds,
+      deploy_target: draft.deploy_target,
+      deploy_target_symbol: draft.deploy_target_symbol ?? '',
     })
   }
 
@@ -142,6 +148,12 @@ export default function PortfolioManagerPanel() {
         <span className="flex items-center gap-1"><ClockIcon className="h-3.5 w-3.5" />Every {settings.transfer_interval_s}s</span>
         <span className="flex items-center gap-1"><ChartBarIcon className="h-3.5 w-3.5" />Score refresh {settings.indicator_interval_s}s</span>
         <span className="flex items-center gap-1"><BanknotesIcon className="h-3.5 w-3.5" />Min {fmtMoney(settings.min_position_funds)} per position</span>
+        <span className={`flex items-center gap-1 ${settings.deploy_available_funds ? 'text-violet-400' : 'text-slate-600'}`}>
+          <BanknotesIcon className="h-3.5 w-3.5" />
+          {settings.deploy_available_funds
+            ? `Deploying available funds → ${{ most_bearish: 'most bearish', most_bullish: 'most bullish', most_held: 'most held', least_held: 'least held', specific: settings.deploy_target_symbol || 'specific' }[settings.deploy_target] ?? settings.deploy_target}`
+            : 'Available funds deployment off'}
+        </span>
       </div>
 
       {/* Symbol scores */}
@@ -268,6 +280,62 @@ export default function PortfolioManagerPanel() {
                 />
               </div>
             </SettingRow>
+
+            <SettingRow
+              label="Deploy Available Funds"
+              hint="Automatically allocate unassigned account cash to a target position each cycle."
+            >
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.deploy_available_funds ? 'bg-violet-600' : 'bg-dark-600'}`}
+                  onClick={() => setDraft(d => ({ ...d, deploy_available_funds: !d.deploy_available_funds }))}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.deploy_available_funds ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs text-slate-300">{draft.deploy_available_funds ? 'Enabled' : 'Disabled'}</span>
+              </label>
+            </SettingRow>
+
+            {draft.deploy_available_funds && (
+              <SettingRow
+                label="Deploy Target"
+                hint="Which position receives the available funds each cycle."
+              >
+                <div className="space-y-2">
+                  {[
+                    { value: 'most_bearish',  label: '▼ Most Bearish',  desc: 'Lowest composite signal score' },
+                    { value: 'most_bullish',  label: '▲ Most Bullish',  desc: 'Highest composite signal score' },
+                    { value: 'most_held',     label: '📈 Most Held',    desc: 'Position with highest market value' },
+                    { value: 'least_held',    label: '📉 Least Held',   desc: 'Position with lowest market value' },
+                    { value: 'specific',      label: '🎯 Specific Stock', desc: 'Always deploy to one symbol' },
+                  ].map(opt => (
+                    <label key={opt.value} className="flex items-start gap-2 cursor-pointer group">
+                      <input
+                        type="radio"
+                        name="deploy_target"
+                        value={opt.value}
+                        checked={draft.deploy_target === opt.value}
+                        onChange={() => setDraft(d => ({ ...d, deploy_target: opt.value }))}
+                        className="mt-0.5 accent-violet-500"
+                      />
+                      <span>
+                        <span className="text-xs font-medium text-slate-200">{opt.label}</span>
+                        <span className="text-xs text-slate-500 ml-1">— {opt.desc}</span>
+                      </span>
+                    </label>
+                  ))}
+                  {draft.deploy_target === 'specific' && (
+                    <input
+                      type="text"
+                      placeholder="Symbol e.g. AAPL"
+                      value={draft.deploy_target_symbol}
+                      onChange={e => setDraft(d => ({ ...d, deploy_target_symbol: e.target.value.toUpperCase() }))}
+                      className="input w-36 text-sm py-1.5 mt-1 font-mono uppercase"
+                    />
+                  )}
+                </div>
+              </SettingRow>
+            )}
 
             <div className="flex justify-end gap-2 pt-1">
               <button

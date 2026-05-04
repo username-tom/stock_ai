@@ -407,6 +407,9 @@ class PortfolioManagerSettingsRequest(BaseModel):
     transfer_interval_s: Optional[int] = Field(default=None, ge=30)
     indicator_interval_s: Optional[int] = Field(default=None, ge=30)
     min_position_funds: Optional[float] = Field(default=None, ge=0)
+    deploy_available_funds: Optional[bool] = None
+    deploy_target: Optional[str] = Field(default=None, pattern="^(most_bearish|most_bullish|most_held|least_held|specific)$")
+    deploy_target_symbol: Optional[str] = None
 
 
 @router.get("/manager/state")

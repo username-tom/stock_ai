@@ -11,6 +11,9 @@ Settings (persisted in-memory, reset on server restart unless saved to DB):
   transfer_interval_s   – seconds between rebalance cycles
   indicator_interval_s  – seconds between re-scoring each stock
   min_position_funds    – minimum $ that must remain allocated to any position
+  deploy_available_funds – whether to deploy unallocated account cash each cycle
+  deploy_target         – where to deploy: most_bearish | most_bullish | most_held | least_held | specific
+  deploy_target_symbol  – symbol to target when deploy_target == 'specific'
 """
 from __future__ import annotations
 
@@ -35,6 +38,9 @@ _settings: dict[str, Any] = {
     "transfer_interval_s": 300,      # rebalance every 5 minutes
     "indicator_interval_s": 120,     # refresh scores every 2 minutes
     "min_position_funds": 100.0,     # never leave less than $100 in any position
+    "deploy_available_funds": True,   # allocate unassigned account cash each cycle
+    "deploy_target": "most_bearish",   # most_bearish | most_bullish | most_held | least_held | specific
+    "deploy_target_symbol": "",        # used when deploy_target == 'specific'
 }
 
 # ── runtime state ─────────────────────────────────────────────────────────── #
@@ -63,11 +69,53 @@ def get_manager_state() -> dict:
     }
 
 
+async def _load_settings_from_db() -> None:
+    """Overwrite in-memory _settings from the DB row on startup."""
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        from app.models.sandbox import PortfolioManagerSettings
+        res = await db.execute(sa_select(PortfolioManagerSettings).where(PortfolioManagerSettings.id == 1))
+        row = res.scalar_one_or_none()
+        if row:
+            _settings["enabled"] = bool(row.enabled)
+            _settings["transfer_pct"] = row.transfer_pct
+            _settings["transfer_interval_s"] = row.transfer_interval_s
+            _settings["indicator_interval_s"] = row.indicator_interval_s
+            _settings["min_position_funds"] = row.min_position_funds
+            _settings["deploy_available_funds"] = bool(row.deploy_available_funds)
+            _settings["deploy_target"] = row.deploy_target
+            _settings["deploy_target_symbol"] = row.deploy_target_symbol or ""
+
+
+async def _save_settings_to_db() -> None:
+    """Persist current in-memory _settings to the DB."""
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        from app.models.sandbox import PortfolioManagerSettings
+        res = await db.execute(sa_select(PortfolioManagerSettings).where(PortfolioManagerSettings.id == 1))
+        row = res.scalar_one_or_none()
+        if not row:
+            from app.models.sandbox import PortfolioManagerSettings as PMS
+            row = PMS(id=1)
+            db.add(row)
+        row.enabled = _settings["enabled"]
+        row.transfer_pct = _settings["transfer_pct"]
+        row.transfer_interval_s = _settings["transfer_interval_s"]
+        row.indicator_interval_s = _settings["indicator_interval_s"]
+        row.min_position_funds = _settings["min_position_funds"]
+        row.deploy_available_funds = _settings["deploy_available_funds"]
+        row.deploy_target = _settings["deploy_target"]
+        row.deploy_target_symbol = _settings["deploy_target_symbol"]
+        await db.commit()
+
+
 def update_manager_settings(new: dict) -> dict:
-    allowed = {"transfer_pct", "transfer_interval_s", "indicator_interval_s", "min_position_funds", "enabled"}
+    allowed = {"transfer_pct", "transfer_interval_s", "indicator_interval_s", "min_position_funds",
+               "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
+    asyncio.get_event_loop().create_task(_save_settings_to_db())
     return get_manager_settings()
 
 
@@ -185,21 +233,54 @@ def _log_activity(msg: str) -> None:
     logger.info("PortfolioManager: %s", msg)
 
 
+def _pick_deploy_target(
+    positions: list[SandboxPosition],
+    scores: dict,
+) -> SandboxPosition | None:
+    """Return the position that should receive deployed available funds."""
+    if not positions:
+        return None
+
+    deploy_target = _settings.get("deploy_target", "most_bearish")
+
+    if deploy_target == "specific":
+        sym = (_settings.get("deploy_target_symbol") or "").upper()
+        return next((p for p in positions if p.symbol == sym), None)
+
+    if deploy_target == "most_bearish":
+        scored = [(p, scores[p.symbol]["score"]) for p in positions if p.symbol in scores]
+        return min(scored, key=lambda x: x[1])[0] if scored else None
+
+    if deploy_target == "most_bullish":
+        scored = [(p, scores[p.symbol]["score"]) for p in positions if p.symbol in scores]
+        return max(scored, key=lambda x: x[1])[0] if scored else None
+
+    if deploy_target == "most_held":
+        return max(positions, key=lambda p: p.shares * (p.avg_cost or 0))
+
+    if deploy_target == "least_held":
+        return min(positions, key=lambda p: p.shares * (p.avg_cost or 0))
+
+    return None
+
+
 async def _do_transfer() -> None:
-    """Move funds from bearish positions to bullish positions."""
+    """Move funds from bearish positions to bullish positions, and optionally
+    deploy unallocated account cash to the most bearish position."""
     min_funds = _settings["min_position_funds"]
     transfer_pct = _settings["transfer_pct"]
 
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
+        from app.models.sandbox import SandboxAccount
         result = await db.execute(sa_select(SandboxPosition))
         positions: list[SandboxPosition] = result.scalars().all()
+        acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+        account = acct_res.scalar_one_or_none()
 
     if not positions:
         return
 
-    symbols = [p.symbol for p in positions]
-    # Ensure scores are fresh (may have been updated by background loop already)
     scores = _state["scores"]
 
     bearish_pos = []
@@ -208,22 +289,43 @@ async def _do_transfer() -> None:
     for p in positions:
         sc = scores.get(p.symbol, {})
         cls = sc.get("classification", "neutral")
-        # Available idle cash = allocated_funds minus cost-basis of held shares
         idle_cash = p.allocated_funds - p.avg_cost * p.shares
         if cls == "bearish" and idle_cash > min_funds:
             bearish_pos.append((p, idle_cash))
         elif cls == "bullish":
             bullish_pos.append(p)
 
+    # ── deploy unallocated account funds to target position ─────── #
+    if _settings.get("deploy_available_funds") and account:
+        total_allocated = sum(p.allocated_funds for p in positions)
+        available = account.total_funds - total_allocated
+        deployable = math.floor(available * transfer_pct * 100) / 100
+        if deployable > 0:
+            target = _pick_deploy_target(positions, scores)
+            if target:
+                async with AsyncSessionLocal() as db:
+                    from sqlalchemy import select as sa_select
+                    res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == target.id))
+                    pos = res.scalar_one_or_none()
+                    if pos:
+                        pos.allocated_funds += deployable
+                        await db.commit()
+                        _state["total_transferred"] = round(_state["total_transferred"] + deployable, 2)
+                        _state["transfers_today"] += 1
+                        _state["last_transfer_at"] = datetime.now(timezone.utc)
+                        sc = scores.get(target.symbol, {})
+                        score_str = f" (score {sc['score']:+.3f})" if sc.get("score") is not None else ""
+                        _log_activity(f"Deployed ${deployable:.2f} available funds → {target.symbol}{score_str} [{_settings['deploy_target']}]")
+
+    # ── bearish → bullish rebalance ────────────────────────────────── #
     if not bearish_pos or not bullish_pos:
         return
 
-    # Collect funds to move
     total_to_move = 0.0
     transfers_from: list[tuple[SandboxPosition, float]] = []
     for p, idle in bearish_pos:
         movable = max(0.0, (idle - min_funds) * transfer_pct)
-        movable = math.floor(movable * 100) / 100  # round down to cents
+        movable = math.floor(movable * 100) / 100
         if movable > 0:
             transfers_from.append((p, movable))
             total_to_move += movable
@@ -231,20 +333,17 @@ async def _do_transfer() -> None:
     if total_to_move <= 0:
         return
 
-    # Distribute evenly among bullish positions
     per_bullish = math.floor((total_to_move / len(bullish_pos)) * 100) / 100
 
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
 
-        # Deduct from bearish
         for src_pos, amount in transfers_from:
             res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == src_pos.id))
             pos = res.scalar_one_or_none()
             if pos:
                 pos.allocated_funds = max(0.0, pos.allocated_funds - amount)
 
-        # Add to bullish
         for dst_pos in bullish_pos:
             res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == dst_pos.id))
             pos = res.scalar_one_or_none()
@@ -267,7 +366,8 @@ async def _do_transfer() -> None:
 async def run_portfolio_manager() -> None:
     """Long-running coroutine – start as an asyncio task from app lifespan."""
     _state["running"] = True
-    logger.info("Portfolio Manager task started.")
+    await _load_settings_from_db()
+    logger.info("Portfolio Manager task started (enabled=%s).", _settings["enabled"])
 
     last_transfer = 0.0
     last_score = 0.0

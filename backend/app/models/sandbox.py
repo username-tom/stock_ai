@@ -47,3 +47,19 @@ class SandboxTrade(Base):
     reason = Column(Text, nullable=True)         # human-readable buy/sell reason
     pnl = Column(Float, nullable=True)           # realised PnL for SELL trades
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PortfolioManagerSettings(Base):
+    """Persisted portfolio manager configuration (single row, id=1)."""
+    __tablename__ = "portfolio_manager_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+    transfer_pct = Column(Float, default=0.50, nullable=False)
+    transfer_interval_s = Column(Integer, default=300, nullable=False)
+    indicator_interval_s = Column(Integer, default=120, nullable=False)
+    min_position_funds = Column(Float, default=100.0, nullable=False)
+    deploy_available_funds = Column(Boolean, default=True, nullable=False)
+    deploy_target = Column(String(20), default="most_bearish", nullable=False)
+    deploy_target_symbol = Column(String(20), default="", nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

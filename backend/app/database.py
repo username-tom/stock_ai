@@ -36,6 +36,8 @@ async def _migrate(conn):
         "ALTER TABLE sandbox_positions ADD COLUMN engine_error TEXT",
         # sandbox_account seed row (ensure at least one row exists)
         "INSERT OR IGNORE INTO sandbox_account (id, total_funds) VALUES (1, 0.0)",
+        # portfolio_manager_settings seed row
+        "INSERT OR IGNORE INTO portfolio_manager_settings (id, enabled, transfer_pct, transfer_interval_s, indicator_interval_s, min_position_funds, deploy_available_funds, deploy_target, deploy_target_symbol) VALUES (1, 0, 0.5, 300, 120, 100.0, 1, 'most_bearish', '')",
     ]
     for stmt in migrations:
         try:
