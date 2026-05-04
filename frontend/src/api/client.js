@@ -72,3 +72,8 @@ export const getSandboxAnalytics = () => api.get('/sandbox/analytics').then(r =>
 export const getSandboxEngineState = () => api.get('/sandbox/engine/state').then(r => r.data)
 export const toggleAllSandboxEngines = () => api.post('/sandbox/engine/toggle-all').then(r => r.data)
 export const toggleSandboxEngine = (symbol) => api.post(`/sandbox/engine/toggle/${symbol}`).then(r => r.data)
+
+// Portfolio Manager
+export const getPortfolioManagerState = () => api.get('/sandbox/manager/state').then(r => r.data)
+export const updatePortfolioManagerSettings = (payload) => api.patch('/sandbox/manager/settings', payload).then(r => r.data)
+export const togglePortfolioManager = () => api.post('/sandbox/manager/toggle').then(r => r.data)

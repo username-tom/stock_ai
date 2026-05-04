@@ -2,6 +2,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   SignalIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, ArrowPathIcon, XMarkIcon,
+  CpuChipIcon,
 } from '@heroicons/react/24/outline'
 import {
   getSandboxAccount, getSandboxPositions,
@@ -11,6 +12,7 @@ import {
   getBulkQuotes, getIBStatus,
   getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
   getSandboxAnalytics,
+  getPortfolioManagerState, togglePortfolioManager,
 } from '../api/client'
 import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy } from './sandbox/sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY } from './sandbox/sandboxConstants'
@@ -87,6 +89,7 @@ export default function SandboxPanel() {
   // engine state & analytics
   const { data: engineState } = useQuery({ queryKey: ['sandbox-engine-state'], queryFn: getSandboxEngineState, refetchInterval: 10000 })
   const { data: analytics } = useQuery({ queryKey: ['sandbox-analytics'], queryFn: getSandboxAnalytics, refetchInterval: 30000 })
+  const { data: managerState } = useQuery({ queryKey: ['portfolio-manager-state'], queryFn: getPortfolioManagerState, refetchInterval: 10000 })
 
   // mutations
   const removeSymbolMut = useMutation({
@@ -127,6 +130,10 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-engine-state'] })
     },
+  })
+  const toggleManagerMut = useMutation({
+    mutationFn: togglePortfolioManager,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] }),
   })
 
   // handlers
@@ -233,6 +240,25 @@ export default function SandboxPanel() {
                   {toggleAllEnginesMut.isPending ? '…' : allRunning ? 'Stop All Engines' : 'Start All Engines'}
                 </button>
               ) : null
+            })()}
+            {/* Portfolio Manager toggle */}
+            {(() => {
+              const pmEnabled = managerState?.settings?.enabled ?? false
+              return (
+                <button
+                  className={`flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 ${
+                    pmEnabled
+                      ? 'border-violet-700/50 text-violet-400 hover:bg-violet-900/20'
+                      : 'border-slate-600 text-slate-300 hover:bg-dark-700'
+                  }`}
+                  onClick={() => toggleManagerMut.mutate()}
+                  disabled={toggleManagerMut.isPending}
+                  title={pmEnabled ? 'Disable portfolio manager' : 'Enable portfolio manager'}
+                >
+                  <CpuChipIcon className="h-3.5 w-3.5" />
+                  {toggleManagerMut.isPending ? '…' : pmEnabled ? 'Manager On' : 'Manager Off'}
+                </button>
+              )
             })()}
             <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50"
               onClick={handleExport} disabled={exportLoading} title="Export sandbox as JSON">

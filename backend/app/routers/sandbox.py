@@ -399,6 +399,40 @@ async def get_ib_mode():
     return {"mode": settings.TRADING_MODE}
 
 
+# ── portfolio manager ─────────────────────────────────────────────────────── #
+
+class PortfolioManagerSettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    transfer_pct: Optional[float] = Field(default=None, ge=0.01, le=1.0)
+    transfer_interval_s: Optional[int] = Field(default=None, ge=30)
+    indicator_interval_s: Optional[int] = Field(default=None, ge=30)
+    min_position_funds: Optional[float] = Field(default=None, ge=0)
+
+
+@router.get("/manager/state")
+async def get_manager_state():
+    """Return current portfolio manager state + settings."""
+    from app.services.portfolio_manager import get_manager_state
+    return get_manager_state()
+
+
+@router.patch("/manager/settings")
+async def update_manager_settings(req: PortfolioManagerSettingsRequest):
+    """Update one or more portfolio manager settings."""
+    from app.services.portfolio_manager import update_manager_settings
+    payload = {k: v for k, v in req.model_dump().items() if v is not None}
+    return update_manager_settings(payload)
+
+
+@router.post("/manager/toggle")
+async def toggle_manager():
+    """Toggle the portfolio manager on/off."""
+    from app.services.portfolio_manager import get_manager_settings, update_manager_settings
+    current = get_manager_settings()
+    new_enabled = not current["enabled"]
+    return update_manager_settings({"enabled": new_enabled})
+
+
 # ── export / import / reset ───────────────────────────────────────────────── #
 
 @router.get("/export")

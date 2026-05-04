@@ -8,6 +8,7 @@ import {
 import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import PieTooltipContent from './PieTooltipContent'
+import PortfolioManagerPanel from './PortfolioManagerPanel'
 
 export default function PortfolioOverview({
   ibMode,
@@ -58,6 +59,9 @@ export default function PortfolioOverview({
           <div className="text-xs text-slate-500 mt-0.5">All closed trades</div>
         </div>
       </div>
+
+      {/* Portfolio Manager */}
+      <PortfolioManagerPanel />
 
       {/* Pie chart + breakdown table */}
       {pieData.length > 0 ? (

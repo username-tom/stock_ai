@@ -11,6 +11,7 @@ from app.database import init_db
 from app.routers import trading, backtest, market_data, ws, scripts, sandbox
 from app.services import market_service, symbol_registry
 from app.services.sandbox_engine import run_engine
+from app.services.portfolio_manager import run_portfolio_manager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(symbol_registry.ensure_registry())
     asyncio.create_task(_daily_registry_refresh())
     asyncio.create_task(run_engine())
+    asyncio.create_task(run_portfolio_manager())
     yield
     logger.info("Application shutdown.")
 
