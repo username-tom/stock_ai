@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = _DEFAULT_CORS
     TRADING_MODE: str = "paper"
     REPORTS_DIR: str = "reports_output"
+    LOCAL_STORAGE_DIR: str = "local_storage"
 
     @property
     def cors_origins_list(self) -> List[str]:
@@ -33,3 +34,7 @@ class Settings(BaseSettings):
 settings = Settings()
 
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)
+os.makedirs(settings.LOCAL_STORAGE_DIR, exist_ok=True)
+os.makedirs(os.path.join(settings.LOCAL_STORAGE_DIR, "backtest_reports"), exist_ok=True)
+os.makedirs(os.path.join(settings.LOCAL_STORAGE_DIR, "trade_logs"), exist_ok=True)
+os.makedirs(os.path.join(settings.LOCAL_STORAGE_DIR, "portfolio_activities"), exist_ok=True)

@@ -28,6 +28,7 @@ class BacktestReport(Base):
     result_data = Column(JSON, nullable=True)
 
     html_report_path = Column(String(500), nullable=True)
+    result_data_path = Column(String(500), nullable=True)  # path to offloaded JSON on local storage
     # Snapshot of the custom script code at the time the backtest was run
     script_snapshot = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

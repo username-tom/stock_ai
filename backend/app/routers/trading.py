@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -10,6 +11,10 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
 from app.services.ib_service import ib_service
+from app.services.local_storage import (
+    save_trade_logs_csv, save_trade_logs_json, list_trade_log_files,
+    records_to_csv_bytes, records_to_json_bytes,
+)
 
 router = APIRouter(prefix="/api/trading", tags=["trading"])
 
@@ -175,3 +180,62 @@ async def trade_history(
             for t in trades
         ]
     }
+
+
+@router.get("/history/export")
+async def export_trade_history(
+    fmt: str = "csv",
+    save: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download the full trade history log as CSV or JSON.
+
+    - ``fmt``  – ``csv`` (default) or ``json``
+    - ``save`` – if ``true``, also persist a copy to local PC storage
+    """
+    result = await db.execute(select(Trade).order_by(Trade.created_at.desc()))
+    trades = result.scalars().all()
+    records = [
+        {
+            "id": t.id,
+            "symbol": t.symbol,
+            "side": t.side.value,
+            "quantity": t.quantity,
+            "price": t.price,
+            "status": t.status.value,
+            "mode": t.mode.value,
+            "ib_order_id": t.ib_order_id,
+            "strategy_name": t.strategy_name,
+            "pnl": t.pnl,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "filled_at": t.filled_at.isoformat() if t.filled_at else None,
+        }
+        for t in trades
+    ]
+
+    if save:
+        if fmt == "json":
+            local_storage.save_trade_logs_json(records, filename_prefix="trade_logs")
+        else:
+            local_storage.save_trade_logs_csv(records, filename_prefix="trade_logs")
+
+    if fmt == "json":
+        content = local_storage.records_to_json_bytes(records)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="trade_logs.json"'},
+        )
+
+    content = local_storage.records_to_csv_bytes(records)
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="trade_logs.csv"'},
+    )
+
+
+@router.get("/history/local-storage/files")
+async def list_trade_log_files():
+    """List all trade log files saved to local PC storage."""
+    return {"files": local_storage.list_trade_log_files()}

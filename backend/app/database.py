@@ -51,6 +51,8 @@ async def _migrate(conn):
             note TEXT,
             created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
         )""",
+        # backtest_reports.result_data_path (offloaded JSON on local storage)
+        "ALTER TABLE backtest_reports ADD COLUMN result_data_path VARCHAR(500)",
     ]
     for stmt in migrations:
         try:

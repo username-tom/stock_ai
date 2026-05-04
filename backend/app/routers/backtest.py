@@ -5,6 +5,7 @@ import asyncio
 import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 
 logger = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
@@ -19,6 +20,10 @@ from app.services.reporter import generate_html_report
 from app.services.strategies import list_strategies
 from app.services.data_provider import DataSource, list_data_sources
 from app.services.script_executor import validate_script
+from app.services.local_storage import (
+    save_backtest_report, load_backtest_report, list_backtest_report_files,
+    records_to_csv_bytes, records_to_json_bytes, _safe_filename,
+)
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -169,6 +174,12 @@ async def run_backtest_endpoint(
             f"    return {params_repr}\n"
         )
 
+    result_data_payload = {
+        "equity_curve": result["equity_curve"],
+        "trades": result["trades"],
+        "ohlcv": result["ohlcv"],
+    }
+
     report = BacktestReport(
         name=name,
         symbol=req.symbol.upper(),
@@ -184,17 +195,34 @@ async def run_backtest_endpoint(
         max_drawdown_pct=m["max_drawdown_pct"],
         win_rate_pct=m["win_rate_pct"],
         total_trades=m["total_trades"],
-        result_data={
-            "equity_curve": result["equity_curve"],
-            "trades": result["trades"],
-            "ohlcv": result["ohlcv"],
-        },
+        result_data=result_data_payload,
         html_report_path=html_path,
         script_snapshot=frozen_snapshot,
     )
     db.add(report)
     await db.commit()
     await db.refresh(report)
+
+    # Offload full result data (equity curve, trades, OHLCV) to local storage
+    try:
+        offload_payload = {
+            "id": report.id,
+            "name": name,
+            "symbol": req.symbol.upper(),
+            "strategy_type": effective_strategy_type,
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "initial_capital": req.initial_capital,
+            "metrics": m,
+            "result_data": result_data_payload,
+            "script_snapshot": frozen_snapshot,
+            "created_at": report.created_at.isoformat() if report.created_at else None,
+        }
+        saved_path = local_storage.save_backtest_report(report.id, name, offload_payload)
+        report.result_data_path = saved_path
+        await db.commit()
+    except Exception:
+        logger.exception("Failed to offload backtest report %s to local storage", report.id)
 
     return {
         "id": report.id,
@@ -274,3 +302,106 @@ async def delete_report(report_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(r)
     await db.commit()
     return {"status": "deleted", "id": report_id}
+
+
+# ---------------------------------------------------------------------------
+# Local-storage offload / download endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/reports/{report_id}/download")
+async def download_report(
+    report_id: int,
+    fmt: str = "json",
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a backtest report as JSON or CSV (trades only).
+
+    - ``fmt=json``  → full report JSON (metrics + equity curve + trades + OHLCV)
+    - ``fmt=csv``   → trades list only as CSV
+    """
+    r = await db.get(BacktestReport, report_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found.")
+
+    # Try local-storage file first; fall back to DB result_data
+    file_data = local_storage.load_backtest_report(r.id, r.name)
+    if file_data is None:
+        # Build payload from DB columns
+        file_data = {
+            "id": r.id,
+            "name": r.name,
+            "symbol": r.symbol,
+            "strategy_type": r.strategy_type,
+            "start_date": r.start_date,
+            "end_date": r.end_date,
+            "initial_capital": r.initial_capital,
+            "metrics": {
+                "final_value": r.final_value,
+                "total_return_pct": r.total_return_pct,
+                "annualized_return_pct": r.annualized_return_pct,
+                "sharpe_ratio": r.sharpe_ratio,
+                "max_drawdown_pct": r.max_drawdown_pct,
+                "win_rate_pct": r.win_rate_pct,
+                "total_trades": r.total_trades,
+            },
+            "result_data": r.result_data or {},
+            "script_snapshot": r.script_snapshot,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+
+    safe_name = local_storage._safe_filename(r.name)
+
+    if fmt == "csv":
+        trades = (file_data.get("result_data") or {}).get("trades", [])
+        content = local_storage.records_to_csv_bytes(trades)
+        return Response(
+            content=content,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}_trades.csv"'},
+        )
+
+    content = local_storage.records_to_json_bytes(file_data)
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.json"'},
+    )
+
+
+@router.get("/reports/{report_id}/offload")
+async def offload_report_to_storage(report_id: int, db: AsyncSession = Depends(get_db)):
+    """Manually save (or re-save) a backtest report to local PC storage."""
+    r = await db.get(BacktestReport, report_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Report not found.")
+    payload = {
+        "id": r.id,
+        "name": r.name,
+        "symbol": r.symbol,
+        "strategy_type": r.strategy_type,
+        "start_date": r.start_date,
+        "end_date": r.end_date,
+        "initial_capital": r.initial_capital,
+        "metrics": {
+            "final_value": r.final_value,
+            "total_return_pct": r.total_return_pct,
+            "annualized_return_pct": r.annualized_return_pct,
+            "sharpe_ratio": r.sharpe_ratio,
+            "max_drawdown_pct": r.max_drawdown_pct,
+            "win_rate_pct": r.win_rate_pct,
+            "total_trades": r.total_trades,
+        },
+        "result_data": r.result_data or {},
+        "script_snapshot": r.script_snapshot,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+    saved_path = local_storage.save_backtest_report(r.id, r.name, payload)
+    r.result_data_path = saved_path
+    await db.commit()
+    return {"status": "saved", "path": saved_path}
+
+
+@router.get("/local-storage/files")
+async def list_local_report_files():
+    """List all backtest report files saved to local PC storage."""
+    return {"files": local_storage.list_backtest_report_files()}

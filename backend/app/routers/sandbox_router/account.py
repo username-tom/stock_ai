@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -9,6 +10,10 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.sandbox import SandboxPosition, SandboxFundEvent
 from app.routers.sandbox_router._helpers import get_account
+from app.services.local_storage import (
+    save_portfolio_activities_csv, save_portfolio_activities_json,
+    list_portfolio_activity_files, records_to_csv_bytes, records_to_json_bytes,
+)
 
 router = APIRouter()
 
@@ -141,3 +146,91 @@ async def repair_funds(db: AsyncSession = Depends(get_db)):
         "available_funds": round(account.total_funds - total_allocated, 4),
         "correction": round(correct_total - old_total, 4),
     }
+
+
+# ---------------------------------------------------------------------------
+# Portfolio activity export / local-storage offload
+# ---------------------------------------------------------------------------
+
+@router.get("/activities/export")
+async def export_portfolio_activities(
+    fmt: str = "csv",
+    save: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download all portfolio activities (sandbox trades + fund events) as CSV or JSON.
+
+    - ``fmt``  – ``csv`` (default) or ``json``
+    - ``save`` – if ``true``, also persist a copy to local PC storage
+    """
+    from app.models.sandbox import SandboxTrade
+
+    trades_res = await db.execute(select(SandboxTrade).order_by(SandboxTrade.created_at))
+    trades = trades_res.scalars().all()
+
+    events_res = await db.execute(select(SandboxFundEvent).order_by(SandboxFundEvent.created_at))
+    events = events_res.scalars().all()
+
+    trade_records = [
+        {
+            "type": "trade",
+            "id": t.id,
+            "symbol": t.symbol,
+            "side": t.side,
+            "quantity": t.quantity,
+            "price": t.price,
+            "total": t.total,
+            "strategy_name": t.strategy_name,
+            "reason": t.reason,
+            "pnl": t.pnl,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        }
+        for t in trades
+    ]
+    event_records = [
+        {
+            "type": "fund_event",
+            "id": e.id,
+            "symbol": None,
+            "side": e.event_type,
+            "quantity": None,
+            "price": None,
+            "total": e.amount,
+            "strategy_name": None,
+            "reason": e.note,
+            "pnl": None,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in events
+    ]
+    activities = sorted(
+        trade_records + event_records,
+        key=lambda x: x["created_at"] or "",
+    )
+
+    if save:
+        if fmt == "json":
+            local_storage.save_portfolio_activities_json(activities)
+        else:
+            local_storage.save_portfolio_activities_csv(activities)
+
+    if fmt == "json":
+        content = local_storage.records_to_json_bytes(activities)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="portfolio_activities.json"'},
+        )
+
+    content = local_storage.records_to_csv_bytes(activities)
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="portfolio_activities.csv"'},
+    )
+
+
+@router.get("/activities/local-storage/files")
+async def list_portfolio_activity_files():
+    """List all portfolio activity files saved to local PC storage."""
+    return {"files": local_storage.list_portfolio_activity_files()}

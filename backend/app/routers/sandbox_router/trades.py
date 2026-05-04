@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -11,6 +12,10 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade
 from app.routers.sandbox_router._helpers import get_account, position_dict
+from app.services.local_storage import (
+    save_trade_logs_csv, save_trade_logs_json, list_trade_log_files,
+    records_to_csv_bytes, records_to_json_bytes,
+)
 
 router = APIRouter()
 
@@ -160,3 +165,70 @@ async def get_analytics(db: AsyncSession = Depends(get_db)):
         "win_loss": {"wins": wins, "losses": losses, "breakeven": breakeven},
         "total_trades": len(trades),
     }
+
+
+def _trade_dicts(trades) -> list[dict]:
+    return [
+        {
+            "id": t.id,
+            "symbol": t.symbol,
+            "side": t.side,
+            "quantity": t.quantity,
+            "price": t.price,
+            "total": t.total,
+            "strategy_name": t.strategy_name,
+            "reason": t.reason,
+            "pnl": t.pnl,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        }
+        for t in trades
+    ]
+
+
+@router.get("/trades/export")
+async def export_trades(
+    fmt: str = "csv",
+    symbol: Optional[str] = None,
+    save: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download sandbox trade logs as CSV or JSON.
+
+    - ``fmt``    – ``csv`` (default) or ``json``
+    - ``symbol`` – optional filter by ticker symbol
+    - ``save``   – if ``true``, also persist a copy to local PC storage
+    """
+    q = select(SandboxTrade).order_by(SandboxTrade.created_at.desc())
+    if symbol:
+        q = q.where(SandboxTrade.symbol == symbol.upper())
+    result = await db.execute(q)
+    trades = result.scalars().all()
+    records = _trade_dicts(trades)
+
+    if save:
+        prefix = f"sandbox_trades_{symbol.upper()}" if symbol else "sandbox_trades"
+        if fmt == "json":
+            local_storage.save_trade_logs_json(records, filename_prefix=prefix)
+        else:
+            local_storage.save_trade_logs_csv(records, filename_prefix=prefix)
+
+    if fmt == "json":
+        content = local_storage.records_to_json_bytes(records)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="sandbox_trades.json"'},
+        )
+
+    content = local_storage.records_to_csv_bytes(records)
+    return Response(
+        content=content,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="sandbox_trades.csv"'},
+    )
+
+
+@router.get("/trades/local-storage/files")
+async def list_trade_log_files():
+    """List all trade log files saved to local PC storage."""
+    return {"files": local_storage.list_trade_log_files()}
