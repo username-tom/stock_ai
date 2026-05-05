@@ -48,6 +48,12 @@ export const updateScript = (id, payload) => api.put(`/scripts/${id}`, payload).
 export const deleteScript = (id) => api.delete(`/scripts/${id}`).then(r => r.data)
 export const validateScript = (id) => api.post(`/scripts/${id}/validate`).then(r => r.data)
 export const validateScriptCode = (payload) => api.post('/scripts/validate', payload).then(r => r.data)
+export const chatWithScriptAI = (messages) =>
+  fetch('/api/scripts/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  })
 
 export default api
 

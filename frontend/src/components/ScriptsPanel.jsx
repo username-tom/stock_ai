@@ -2,6 +2,7 @@ import { useScriptsPanel } from './scripts/useScriptsPanel'
 import ScriptList from './scripts/ScriptList'
 import ScriptEditor from './scripts/ScriptEditor'
 import FunctionReference from './scripts/FunctionReference'
+import ScriptChatbot from './scripts/ScriptChatbot'
 
 export default function ScriptsPanel() {
   const {
@@ -98,6 +99,9 @@ export default function ScriptsPanel() {
 
       {/* Function reference (fixed floating tab) */}
       <FunctionReference />
+
+      {/* AI Chatbot – bottom-right, above live ticker */}
+      <ScriptChatbot />
     </div>
   )
 }
