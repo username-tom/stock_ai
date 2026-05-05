@@ -171,6 +171,14 @@ export default function PositionDetail({
           <div className="text-xs text-slate-500 mb-1">Shares Held</div>
           <div className="text-xl font-bold text-slate-100">{selectedPos.shares > 0 ? selectedPos.shares.toFixed(4) : '—'}</div>
           {selectedPos.shares > 0 && <div className="text-xs text-slate-500 mt-0.5">Avg ${selectedPos.avg_cost?.toFixed(2)}</div>}
+          {selectedPos.pending_shares > 0 && (
+            <div className="flex items-center gap-1.5 mt-1.5 px-2 py-1 rounded-md bg-amber-900/20 border border-amber-700/30">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
+              <span className="text-xs text-amber-400 font-medium">
+                {selectedPos.pending_shares.toFixed(4)} sh pending @ ${selectedPos.pending_avg_cost?.toFixed(2)}
+              </span>
+            </div>
+          )}
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Market Value</div>
@@ -269,7 +277,7 @@ export default function PositionDetail({
                 : <span className="text-slate-600 italic">No strategy assigned</span>}
             </div>
             {selectedPos.strategy_name && (
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <><div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 <div className="bg-dark-900/60 rounded-lg p-2.5 border border-dark-600">
                   <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
                     <BoltIcon className="h-3 w-3" />Last Signal
@@ -302,7 +310,21 @@ export default function PositionDetail({
                   </div>
                 </div>
               </div>
-            )}
+              {selectedPos.pending_shares > 0 && (
+                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30">
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs text-amber-400 font-semibold">Pending Order — awaiting fill</span>
+                    <div className="text-xs text-amber-300/70 mt-0.5">
+                      {selectedPos.pending_shares.toFixed(4)} sh @ ${selectedPos.pending_avg_cost?.toFixed(2)} avg cost
+                      {selectedPos.pending_since && (
+                        <span className="text-amber-400/50"> · placed {new Date(selectedPos.pending_since).toLocaleTimeString()}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>)}
             {selectedPos.engine_error && (
               <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-900/20 border border-amber-700/30 text-xs text-amber-400">
                 <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0 mt-0.5" />

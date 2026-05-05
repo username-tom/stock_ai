@@ -20,7 +20,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime, timezone, time as dt_time
+import random
+from datetime import datetime, timezone, timedelta, time as dt_time
 from typing import Any
 import zoneinfo
 
@@ -182,7 +183,7 @@ async def _process_symbol(
 
         strat_label = strategy_name.split(':')[0]
 
-        if trade_signal > 0 and pos.shares == 0:
+        if trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0:
             action = "BUY"
             reason = signal_source if signal_source else f"{strat_label} buy @ ${current_price:.2f}"
 
@@ -270,10 +271,20 @@ async def _execute_trade(
                 # Remove the drawn cash from total_funds so available_funds
                 # (= total_funds - sum(allocated_funds)) decreases correctly.
                 account.total_funds -= extra_needed
-            new_shares = position.shares + quantity
-            position.avg_cost = (position.avg_cost * position.shares + total) / new_shares
-            position.shares = new_shares
+            # Place shares into the pending (open order) state.
+            # A background settler will convert them to real shares after
+            # a random 5–10 second delay, simulating order fill latency.
+            new_pending = position.pending_shares + quantity
+            position.pending_avg_cost = (
+                (position.pending_avg_cost * position.pending_shares + total) / new_pending
+            )
+            position.pending_shares = new_pending
+            position.pending_since = datetime.now(timezone.utc)
             position.allocated_funds -= total
+            logger.info(
+                "Engine BUY %s x%.4f @ $%.2f — pending settlement",
+                pos.symbol, quantity, price,
+            )
 
         elif side == "SELL":
             quantity = position.shares
@@ -306,7 +317,78 @@ async def _execute_trade(
         )
         db.add(trade)
         await db.commit()
-        logger.info("Engine %s %s x%.4f @ $%.2f (PnL: %s)", side, pos.symbol, quantity, price, pnl)
+        if side != "BUY":
+            logger.info("Engine %s %s x%.4f @ $%.2f (PnL: %s)", side, pos.symbol, quantity, price, pnl)
+
+
+# ── pending-order settlement ─────────────────────────────────────────────── #
+
+PENDING_SETTLE_MIN_S = 5   # minimum seconds before a pending order settles
+PENDING_SETTLE_MAX_S = 10  # maximum seconds before a pending order settles
+
+
+async def _settle_pending_shares() -> None:
+    """Convert any pending (open-order) shares to settled shares when their
+    random settlement delay has elapsed (5–10 seconds after the BUY order)."""
+    now = datetime.now(timezone.utc)
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+
+        result = await db.execute(
+            sa_select(SandboxPosition).where(SandboxPosition.pending_shares > 0)
+        )
+        positions = result.scalars().all()
+
+        for position in positions:
+            if position.pending_since is None:
+                continue
+
+            # Ensure pending_since is timezone-aware for comparison
+            ps = position.pending_since
+            if ps.tzinfo is None:
+                ps = ps.replace(tzinfo=timezone.utc)
+
+            # Each position gets its own deterministic-but-random delay derived
+            # from its id so that different symbols settle at different times.
+            rng = random.Random(position.id ^ int(ps.timestamp()))
+            delay_s = rng.randint(PENDING_SETTLE_MIN_S, PENDING_SETTLE_MAX_S)
+
+            if (now - ps) < timedelta(seconds=delay_s):
+                continue  # not yet time to settle
+
+            # Settle: merge pending into real shares
+            pending_qty = position.pending_shares
+            pending_cost = position.pending_avg_cost
+
+            new_total_shares = position.shares + pending_qty
+            if new_total_shares > 0:
+                position.avg_cost = (
+                    (position.avg_cost * position.shares + pending_cost * pending_qty)
+                    / new_total_shares
+                )
+            position.shares = new_total_shares
+
+            # Also update the legacy shares_open / avg_cost_open tracking
+            new_open = position.shares_open + pending_qty
+            if new_open > 0:
+                position.avg_cost_open = (
+                    (position.avg_cost_open * position.shares_open + pending_cost * pending_qty)
+                    / new_open
+                )
+            position.shares_open = new_open
+
+            # Clear pending state
+            position.pending_shares = 0.0
+            position.pending_avg_cost = 0.0
+            position.pending_since = None
+
+            logger.info(
+                "Engine settled pending BUY %s x%.4f @ avg $%.2f -> shares=%.4f",
+                position.symbol, pending_qty, pending_cost, position.shares,
+            )
+
+        await db.commit()
 
 
 # ── main loop ─────────────────────────────────────────────────────────────── #
@@ -314,6 +396,9 @@ async def _execute_trade(
 async def _tick(loop: asyncio.AbstractEventLoop) -> None:
     """One engine tick — load all enabled positions and process them."""
     global _last_tick
+
+    # Settle any pending (open-order) shares whose delay has elapsed
+    await _settle_pending_shares()
 
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select

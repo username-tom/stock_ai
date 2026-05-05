@@ -53,6 +53,10 @@ async def _migrate(conn):
         )""",
         # backtest_reports.result_data_path (offloaded JSON on local storage)
         "ALTER TABLE backtest_reports ADD COLUMN result_data_path VARCHAR(500)",
+        # sandbox_positions pending open-order columns (simulated order fill latency)
+        "ALTER TABLE sandbox_positions ADD COLUMN pending_shares REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE sandbox_positions ADD COLUMN pending_avg_cost REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE sandbox_positions ADD COLUMN pending_since DATETIME",
     ]
     for stmt in migrations:
         try:

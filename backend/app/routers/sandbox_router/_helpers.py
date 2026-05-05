@@ -37,4 +37,7 @@ def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict
         "market_value": round(market_val, 4),
         "is_on_watchlist": p.is_on_watchlist,
         "created_at": p.created_at.isoformat() if p.created_at else None,
+        "pending_shares": p.pending_shares,
+        "pending_avg_cost": p.pending_avg_cost,
+        "pending_since": p.pending_since.isoformat() if p.pending_since else None,
     }

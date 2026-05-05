@@ -50,6 +50,12 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
             {quote?.last_price != null ? `$${quote.last_price.toFixed(2)}` : pos.shares > 0 ? fmtMoney(equity) : '—'}
           </span>
         </div>
+        {pos.pending_shares > 0 && (
+          <div className="flex items-center gap-1 mt-0.5">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
+            <span className="text-xs text-amber-400/80">{pos.pending_shares.toFixed(4)} sh pending</span>
+          </div>
+        )}
         {pos.shares > 0 && (
           <div className="flex items-center justify-between text-xs mt-0.5">
             <span className="text-slate-600">Equity {fmtMoney(equity)}</span>
@@ -169,6 +175,22 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
               <div className="flex justify-between">
                 <span className="text-slate-500">Unrealised</span>
                 <span className={`font-semibold ${unrealised >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(unrealised)}</span>
+              </div>
+            </div>
+          )}
+          {pos.pending_shares > 0 && (
+            <div className="border-t border-dark-500 pt-1.5 space-y-1">
+              <div className="flex items-center gap-1 text-amber-400 font-semibold">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                Pending Order
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Qty</span>
+                <span className="text-amber-300 font-mono">{pos.pending_shares.toFixed(4)} sh</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Avg Cost</span>
+                <span className="text-amber-300 font-mono">${pos.pending_avg_cost?.toFixed(2)}</span>
               </div>
             </div>
           )}

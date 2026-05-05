@@ -22,6 +22,9 @@ class SandboxPosition(Base):
     allocated_funds = Column(Float, default=0.0)   # cash assigned to this symbol
     shares = Column(Float, default=0.0)            # current shares held
     avg_cost = Column(Float, default=0.0)          # average cost basis per share
+    pending_shares = Column(Float, default=0.0)         # shares awaiting settlement (open order)
+    pending_avg_cost = Column(Float, default=0.0)       # avg cost of the pending shares
+    pending_since = Column(DateTime(timezone=True), nullable=True)  # UTC time the pending order was placed
     strategy_name = Column(String(100), nullable=True)
     # Automated engine columns
     strategy_enabled = Column(Boolean, default=False, nullable=False)  # engine active

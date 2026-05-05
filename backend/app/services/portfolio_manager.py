@@ -247,10 +247,10 @@ def _pick_deploy_target(
         return max(scored, key=lambda x: x[1])[0] if scored else None
 
     if deploy_target == "most_held":
-        return max(positions, key=lambda p: p.shares * (p.avg_cost or 0))
+        return max(positions, key=lambda p: (p.shares * (p.avg_cost or 0)) + (p.pending_shares * (p.pending_avg_cost or 0)))
 
     if deploy_target == "least_held":
-        return min(positions, key=lambda p: p.shares * (p.avg_cost or 0))
+        return min(positions, key=lambda p: (p.shares * (p.avg_cost or 0)) + (p.pending_shares * (p.pending_avg_cost or 0)))
 
     return None
 
@@ -280,8 +280,15 @@ async def _do_transfer() -> None:
     for p in positions:
         sc = scores.get(p.symbol, {})
         cls = sc.get("classification", "neutral")
-        idle_cash = p.allocated_funds - p.avg_cost * p.shares
-        if cls == "bearish" and idle_cash > min_funds:
+        # allocated_funds is already reduced by the cost of any pending order
+        # (the engine debits it at order placement).  Subtract settled shares
+        # cost basis to get truly idle cash.  Positions with an active pending
+        # order should not be drained — their funds are already committed.
+        settled_cost = p.avg_cost * p.shares
+        pending_cost = p.pending_avg_cost * p.pending_shares
+        idle_cash = p.allocated_funds - settled_cost
+        has_pending = p.pending_shares > 0
+        if cls == "bearish" and idle_cash > min_funds and not has_pending:
             bearish_pos.append((p, idle_cash))
         elif cls == "bullish":
             bullish_pos.append(p)
@@ -328,7 +335,11 @@ async def _do_transfer() -> None:
             account = acct_res.scalar_one_or_none()
             if account:
                 for pos in fresh_positions:
-                    # idle cash = allocated minus what's locked in open shares
+                    # Skip positions with an active pending order — their
+                    # funds are already committed and should not be moved.
+                    if pos.pending_shares > 0:
+                        continue
+                    # idle cash = allocated minus what's locked in settled shares
                     cost_basis = pos.avg_cost * pos.shares
                     idle = pos.allocated_funds - cost_basis
                     # how much we can safely pull out
@@ -336,7 +347,6 @@ async def _do_transfer() -> None:
                     movable = math.floor(movable * transfer_pct * 100) / 100
                     if movable > 0:
                         pos.allocated_funds -= movable
-                        account.total_funds += movable
                         total_freed += movable
                 await db.commit()
         if total_freed > 0:
@@ -345,49 +355,49 @@ async def _do_transfer() -> None:
             _state["last_transfer_at"] = datetime.now(timezone.utc)
             _log_activity(f"Freed ${total_freed:.2f} idle cash from positions → available funds")
         return
+    else:
+        # ── to_stock: bearish → bullish rebalance ─────────────────────── #
+        if not bearish_pos or not bullish_pos:
+            return
 
-    # ── to_stock: bearish → bullish rebalance ─────────────────────── #
-    if not bearish_pos or not bullish_pos:
-        return
+        total_to_move = 0.0
+        transfers_from: list[tuple[SandboxPosition, float]] = []
+        for p, idle in bearish_pos:
+            movable = max(0.0, (idle - min_funds) * transfer_pct)
+            movable = math.floor(movable * 100) / 100
+            if movable > 0:
+                transfers_from.append((p, movable))
+                total_to_move += movable
 
-    total_to_move = 0.0
-    transfers_from: list[tuple[SandboxPosition, float]] = []
-    for p, idle in bearish_pos:
-        movable = max(0.0, (idle - min_funds) * transfer_pct)
-        movable = math.floor(movable * 100) / 100
-        if movable > 0:
-            transfers_from.append((p, movable))
-            total_to_move += movable
+        if total_to_move <= 0:
+            return
 
-    if total_to_move <= 0:
-        return
+        per_bullish = math.floor((total_to_move / len(bullish_pos)) * 100) / 100
 
-    per_bullish = math.floor((total_to_move / len(bullish_pos)) * 100) / 100
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select as sa_select
 
-    async with AsyncSessionLocal() as db:
-        from sqlalchemy import select as sa_select
+            for src_pos, amount in transfers_from:
+                res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == src_pos.id))
+                pos = res.scalar_one_or_none()
+                if pos:
+                    pos.allocated_funds = max(0.0, pos.allocated_funds - amount)
 
-        for src_pos, amount in transfers_from:
-            res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == src_pos.id))
-            pos = res.scalar_one_or_none()
-            if pos:
-                pos.allocated_funds = max(0.0, pos.allocated_funds - amount)
+            for dst_pos in bullish_pos:
+                res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == dst_pos.id))
+                pos = res.scalar_one_or_none()
+                if pos:
+                    pos.allocated_funds += per_bullish
 
-        for dst_pos in bullish_pos:
-            res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == dst_pos.id))
-            pos = res.scalar_one_or_none()
-            if pos:
-                pos.allocated_funds += per_bullish
+            await db.commit()
 
-        await db.commit()
+        _state["total_transferred"] = round(_state["total_transferred"] + total_to_move, 2)
+        _state["transfers_today"] += 1
+        _state["last_transfer_at"] = datetime.now(timezone.utc)
 
-    _state["total_transferred"] = round(_state["total_transferred"] + total_to_move, 2)
-    _state["transfers_today"] += 1
-    _state["last_transfer_at"] = datetime.now(timezone.utc)
-
-    from_desc = ", ".join(f"{p.symbol} (−${a:.2f})" for p, a in transfers_from)
-    to_desc = ", ".join(f"{p.symbol} (+${per_bullish:.2f})" for p in bullish_pos)
-    _log_activity(f"Transferred ${total_to_move:.2f} | from: {from_desc} | to: {to_desc}")
+        from_desc = ", ".join(f"{p.symbol} (−${a:.2f})" for p, a in transfers_from)
+        to_desc = ", ".join(f"{p.symbol} (+${per_bullish:.2f})" for p in bullish_pos)
+        _log_activity(f"Transferred ${total_to_move:.2f} | from: {from_desc} | to: {to_desc}")
 
 
 # ── main loop ─────────────────────────────────────────────────────────────── #
