@@ -210,13 +210,15 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
 
     if side == "BUY":
         # Check allocated funds vs cost
-        if pos.allocated_funds < total:
+        from app.services import portfolio_manager
+        allow_outside = portfolio_manager.get_manager_settings().get("allow_buy_outside_allocation", False)
+        if pos.allocated_funds < total and not allow_outside:
             raise HTTPException(400, f"Insufficient allocated funds. Allocated: ${pos.allocated_funds:.2f}, Cost: ${total:.2f}")
         # Update position
         new_shares = pos.shares + req.quantity
         pos.avg_cost = (pos.avg_cost * pos.shares + total) / new_shares
         pos.shares = new_shares
-        pos.allocated_funds -= total
+        pos.allocated_funds -= min(total, pos.allocated_funds)  # Only deduct up to allocated funds
 
     elif side == "SELL":
         if pos.shares < req.quantity:
@@ -413,6 +415,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     deploy_available_funds: Optional[bool] = None
     deploy_target: Optional[str] = Field(default=None, pattern="^(most_bearish|most_bullish|most_held|least_held|specific)$")
     deploy_target_symbol: Optional[str] = None
+    allow_buy_outside_allocation: Optional[bool] = None
 
 
 @router.get("/manager/state")

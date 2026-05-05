@@ -96,6 +96,8 @@ async def get_settings():
     def v(key: str, default: str = "") -> str:
         return env.get(key, default)
 
+    # Add portfolio manager settings
+    from app.services.portfolio_manager import get_manager_settings
     return {
         "ib_connection": {
             "IB_HOST":      v("IB_HOST",      settings.IB_HOST),
@@ -113,6 +115,7 @@ async def get_settings():
         "network": {
             "CORS_ORIGINS": v("CORS_ORIGINS", settings.CORS_ORIGINS),
         },
+        "portfolio_manager_settings": get_manager_settings(),
         "restart_required_keys": list(RESTART_REQUIRED_KEYS),
     }
 

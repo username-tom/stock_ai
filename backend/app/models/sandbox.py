@@ -99,4 +99,5 @@ class PortfolioManagerSettings(Base):
     deploy_target_symbol = Column(String(20), default="", nullable=False)
     reallocation_enabled = Column(Boolean, default=True, nullable=False)
     reallocation_mode = Column(String(20), default="to_stock", nullable=False)
+    allow_buy_outside_allocation = Column(Boolean, default=False, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

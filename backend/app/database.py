@@ -41,6 +41,7 @@ async def _migrate(conn):
         # portfolio_manager_settings reallocation columns (added for reallocation mode feature)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN reallocation_enabled INTEGER NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN reallocation_mode VARCHAR(20) NOT NULL DEFAULT 'to_stock'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN allow_buy_outside_allocation BOOLEAN NOT NULL DEFAULT 0",
         # sandbox_account total_deposited column (added to track cumulative deposits for repair logic)
         "ALTER TABLE sandbox_account ADD COLUMN total_deposited REAL NOT NULL DEFAULT 0.0",
         # sandbox_fund_events table (deposit/withdrawal history)

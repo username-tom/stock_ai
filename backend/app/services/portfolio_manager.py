@@ -43,6 +43,7 @@ _settings: dict[str, Any] = {
     "deploy_target_symbol": "",        # used when deploy_target == 'specific'
     "reallocation_enabled": True,      # enable bearish→bullish (or →available) rebalancing
     "reallocation_mode": "to_stock",   # to_stock | to_available
+    "allow_buy_outside_allocation": False, # allow sandbox buy with funds outside allocation
 }
 
 # ── runtime state ─────────────────────────────────────────────────────────── #
@@ -87,6 +88,7 @@ async def _load_settings_from_db() -> None:
             _settings["deploy_target_symbol"] = row.deploy_target_symbol or ""
             _settings["reallocation_enabled"] = bool(row.reallocation_enabled) if row.reallocation_enabled is not None else True
             _settings["reallocation_mode"] = row.reallocation_mode or "to_stock"
+            _settings["allow_buy_outside_allocation"] = bool(getattr(row, "allow_buy_outside_allocation", False))
 
 
 async def _save_settings_to_db() -> None:
@@ -110,13 +112,14 @@ async def _save_settings_to_db() -> None:
         row.deploy_target_symbol = _settings["deploy_target_symbol"]
         row.reallocation_enabled = _settings["reallocation_enabled"]
         row.reallocation_mode = _settings["reallocation_mode"]
+        row.allow_buy_outside_allocation = _settings["allow_buy_outside_allocation"]
         await db.commit()
 
 
 def update_manager_settings(new: dict) -> dict:
     allowed = {"transfer_pct", "transfer_interval_s", "indicator_interval_s", "min_position_funds",
                "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
-               "reallocation_enabled", "reallocation_mode"}
+               "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
