@@ -445,17 +445,20 @@ export default function PositionDetail({
           Activity Log — {selectedSymbol}
         </h3>
         {(() => {
-          // Merge trades + fund events + allocation events into a single timeline
-          const tradeEntries = trades.map(t => ({
-            id: `t-${t.id}`,
-            kind: 'trade',
-            side: t.side,
-            date: t.created_at,
-            label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}`,
-            sub: t.strategy_name ? `${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || null,
-            pnl: t.pnl ?? null,
-            total: t.total,
-          }))
+          // Merge trades + fund events + allocation events into a single timeline, filtered by selectedSymbol
+          const tradeEntries = trades
+            .filter(t => t.symbol === selectedSymbol)
+            .map(t => ({
+              id: `t-${t.id}`,
+              kind: 'trade',
+              side: t.side,
+              date: t.created_at,
+              label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}`,
+              sub: t.strategy_name ? `${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || null,
+              pnl: t.pnl ?? null,
+              total: t.total,
+            }))
+          // Only show fund events that are not allocations and are not tied to a symbol (global deposits/withdrawals)
           const fundEntries = fundEvents
             .filter(e => !e.from_symbol && !e.to_symbol)
             .map(e => ({
@@ -467,8 +470,9 @@ export default function PositionDetail({
               pnl: null,
               total: e.amount,
             }))
+          // Only show allocation events where this symbol is involved
           const allocEntries = fundEvents
-            .filter(e => e.from_symbol || e.to_symbol)
+            .filter(e => (e.from_symbol === selectedSymbol || e.to_symbol === selectedSymbol))
             .map(e => {
               let label = ''
               if (e.event_type === 'allocate' || e.event_type === 'deploy') {
