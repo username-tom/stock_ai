@@ -17,6 +17,23 @@ Architecture
 """
 from __future__ import annotations
 
+# Trade activity log and logger function (must be defined before use)
+_trade_activity_log = []  # in-memory log of recent trades (max 20)
+def _log_trade_activity(symbol: str, side: str, shares: float, price: float, reason: str):
+    from datetime import datetime, timezone
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "side": side,
+        "shares": round(shares, 4),
+        "price": round(price, 4),
+        "reason": reason,
+    }
+    _trade_activity_log.insert(0, entry)
+    del _trade_activity_log[20:]
+    logger.info(f"Trade: {side} {symbol} x{shares:.4f} @ ${price:.2f} | {reason}")
+
+
 import asyncio
 import logging
 import math
@@ -62,6 +79,15 @@ def _market_is_active() -> bool:
 _running = False
 _last_tick: datetime | None = None
 _symbol_status: dict[str, dict] = {}   # { symbol: { last_signal, last_run_at, error } }
+_buy_lock: asyncio.Lock | None = None  # serialises concurrent BUY fund allocation
+
+
+def _get_buy_lock() -> asyncio.Lock:
+    """Return the module-level BUY lock, creating it lazily on first call."""
+    global _buy_lock
+    if _buy_lock is None:
+        _buy_lock = asyncio.Lock()
+    return _buy_lock
 
 
 def get_engine_state() -> dict:
@@ -166,14 +192,31 @@ async def _process_symbol(
         # state-based strategies it is still the last bar; for event-based
         # scripts it is the most recent buy or sell event.
         sig_series = df_sig["signal"]
-        nonzero = sig_series[sig_series != 0]
-        trade_signal = int(nonzero.iloc[-1]) if len(nonzero) > 0 else 0
+        buy_bars  = sig_series[sig_series == 1]
+        sell_bars = sig_series[sig_series == -1]
+        last_buy_idx  = buy_bars.index[-1]  if len(buy_bars)  > 0 else None
+        last_sell_idx = sell_bars.index[-1] if len(sell_bars) > 0 else None
 
-        # Grab the signal_source from the last non-zero bar (if available)
-        last_sig_idx = nonzero.index[-1] if len(nonzero) > 0 else None
+        # Determine the relevant signal index for signal_source lookup.
+        # When holding shares: the exit (SELL) signal is relevant.
+        # When flat:           the entry (BUY) signal is relevant.
+        def _idx_after(a, b):
+            """Return True if index a comes strictly after index b (or b is None)."""
+            return b is None or (a is not None and a > b)
+
+        if pos.shares > 0:
+            # TP / SL / exit: a SELL that fired AFTER the last BUY
+            trade_signal = -1 if _idx_after(last_sell_idx, last_buy_idx) else 0
+            ref_idx = last_sell_idx
+        else:
+            # Entry: a BUY that fired AFTER the last SELL
+            trade_signal = 1 if _idx_after(last_buy_idx, last_sell_idx) else 0
+            ref_idx = last_buy_idx
+
+        # Grab the signal_source from the relevant bar (if available)
         signal_source = ""
-        if last_sig_idx is not None and "signal_source" in df_sig.columns:
-            signal_source = str(df_sig.loc[last_sig_idx, "signal_source"]).strip()
+        if ref_idx is not None and "signal_source" in df_sig.columns:
+            signal_source = str(df_sig.loc[ref_idx, "signal_source"]).strip()
 
         status["last_signal"] = current_signal
 
@@ -246,53 +289,74 @@ async def _execute_trade(
         pnl = None
 
         if side == "BUY":
-            # Use allocated funds + any unallocated account balance
-            acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
-            account = acct_res.scalar_one_or_none()
-            if account:
-                from app.routers.sandbox_router._helpers import compute_available_cash
-                all_pos_res = await db.execute(sa_select(SandboxPosition))
-                all_positions = all_pos_res.scalars().all()
-                account_available = await compute_available_cash(db, account, all_positions)
-            else:
-                account_available = 0.0
+            # Acquire the buy lock so that concurrent ticks cannot both see
+            # the same available funds and each place a full-size order.
+            async with _get_buy_lock():
+                # Re-fetch the position inside the lock to get the latest state
+                result2 = await db.execute(
+                    sa_select(SandboxPosition).where(SandboxPosition.id == pos.id)
+                )
+                position = result2.scalar_one_or_none()
+                if not position:
+                    return
 
-            available = position.allocated_funds + account_available
-            if available < price:
-                logger.debug("Engine BUY skipped for %s — insufficient funds ($%.2f)", pos.symbol, available)
-                return
-            quantity = math.floor(available / price)
-            if quantity <= 0:
-                return
-            total = quantity * price
-            # Draw any shortfall from the unallocated pool into this position
-            extra_needed = max(0.0, total - position.allocated_funds)
-            if extra_needed > 0 and account:
-                # Draw from the unallocated pool into this position's allocation.
-                # Log it so repair can replay it correctly.
-                position.allocated_funds += extra_needed
-                from app.models.sandbox import SandboxAllocationEvent
-                db.add(SandboxAllocationEvent(
-                    event_type="deploy",
-                    from_symbol=None,
-                    to_symbol=position.symbol,
-                    amount=round(extra_needed, 4),
-                    note="Engine: draw from unallocated pool for BUY",
-                ))
-            # Place shares into the pending (open order) state.
-            # A background settler will convert them to real shares after
-            # a random 5–10 second delay, simulating order fill latency.
-            new_pending = position.pending_shares + quantity
-            position.pending_avg_cost = (
-                (position.pending_avg_cost * position.pending_shares + total) / new_pending
-            )
-            position.pending_shares = new_pending
-            position.pending_since = datetime.now(timezone.utc)
-            position.allocated_funds -= total
-            logger.info(
-                "Engine BUY %s x%.4f @ $%.2f — pending settlement",
-                pos.symbol, quantity, price,
-            )
+                # Use allocated funds + any unallocated account balance
+                acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+                account = acct_res.scalar_one_or_none()
+                if account:
+                    from app.routers.sandbox_router._helpers import compute_available_cash
+                    all_pos_res = await db.execute(sa_select(SandboxPosition))
+                    all_positions = all_pos_res.scalars().all()
+                    account_available = await compute_available_cash(db, account, all_positions)
+                else:
+                    account_available = 0.0
+
+                available = position.allocated_funds + account_available
+                if available < price:
+                    logger.debug("Engine BUY skipped for %s — insufficient funds ($%.2f)", pos.symbol, available)
+                    return
+                quantity = math.floor(available / price)
+                if quantity <= 0:
+                    return
+                total = quantity * price
+                # Draw any shortfall from the unallocated pool into this position
+                extra_needed = max(0.0, total - position.allocated_funds)
+                if extra_needed > 0 and account:
+                    # Draw from the unallocated pool into this position's allocation.
+                    # Log it so repair can replay it correctly.
+                    position.allocated_funds += extra_needed
+                    from app.models.sandbox import SandboxAllocationEvent
+                    db.add(SandboxAllocationEvent(
+                        event_type="deploy",
+                        from_symbol=None,
+                        to_symbol=position.symbol,
+                        amount=round(extra_needed, 4),
+                        note="Engine: draw from unallocated pool for BUY",
+                    ))
+                # Place shares into the pending (open order) state.
+                # A background settler will convert them to real shares after
+                # a random 5–10 second delay, simulating order fill latency.
+                new_pending = position.pending_shares + quantity
+                position.pending_avg_cost = (
+                    (position.pending_avg_cost * position.pending_shares + total) / new_pending
+                )
+                position.pending_shares = new_pending
+                position.pending_since = datetime.now(timezone.utc)
+                position.allocated_funds -= total
+                trade = SandboxTrade(
+                    symbol=position.symbol,
+                    side="BUY",
+                    quantity=quantity,
+                    price=price,
+                    total=round(total, 4),
+                    strategy_name=position.strategy_name,
+                    reason=reason,
+                    pnl=None,
+                )
+                db.add(trade)
+                await db.commit()
+                _log_trade_activity(pos.symbol, "BUY", quantity, price, reason)
+            return
 
         elif side == "SELL":
             quantity = position.shares
@@ -325,7 +389,7 @@ async def _execute_trade(
         db.add(trade)
         await db.commit()
         if side != "BUY":
-            logger.info("Engine %s %s x%.4f @ $%.2f (PnL: %s)", side, pos.symbol, quantity, price, pnl)
+            _log_trade_activity(pos.symbol, side, quantity, price, reason)
 
 
 # ── pending-order settlement ─────────────────────────────────────────────── #

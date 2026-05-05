@@ -292,7 +292,7 @@ async def _do_transfer() -> None:
             bullish_pos.append(p)
 
     # ── deploy unallocated account funds to target position ─────── #
-    if _settings.get("deploy_available_funds") and account:
+    if _settings.get("deploy_available_funds") and account and _settings.get("reallocation_mode", "to_stock") != "to_available":
         from app.routers.sandbox_router._helpers import compute_available_cash
         available = await compute_available_cash(None, account, positions)  # type: ignore[arg-type]
         deployable = math.floor(available * transfer_pct * 100) / 100

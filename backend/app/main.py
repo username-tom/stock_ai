@@ -14,6 +14,15 @@ from app.routers.sandbox_router import router as sandbox_router
 from app.services import market_service, symbol_registry
 from app.services.sandbox_engine import run_engine
 from app.services.portfolio_manager import run_portfolio_manager
+class Suppress200OKFilter(logging.Filter):
+    def filter(self, record):
+        msg = getattr(record, 'msg', '')
+        if '" 200 OK"' in msg:
+            return False
+        return True
+
+access_logger = logging.getLogger("uvicorn.access")
+access_logger.addFilter(Suppress200OKFilter())
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

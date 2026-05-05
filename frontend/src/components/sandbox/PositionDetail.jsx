@@ -98,57 +98,66 @@ export default function PositionDetail({
     }
   }
 
+  // Fill quantity field with all shares currently held (max sell)
+  function fillMaxSellShares() {
+    if (selectedPos?.shares > 0) {
+      setTradeForm(f => ({ ...f, quantity: selectedPos.shares.toFixed(4) }))
+    }
+  }
+
   function getScriptName(strategyName) {
     if (!strategyName?.startsWith('custom:')) return null
     const scriptId = parseInt(strategyName.split(':')[1], 10)
     return scripts.find(s => s.id === scriptId)?.name ?? null
   }
   return (
-    <>
-      {/* Header */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-3xl font-bold text-slate-100">{selectedSymbol}</h1>
-            {quotes[selectedSymbol]?.change_pct != null && (
-              <span className={`text-base font-semibold ${quotes[selectedSymbol].change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {quotes[selectedSymbol].change_pct >= 0 ? '+' : ''}{quotes[selectedSymbol].change_pct.toFixed(2)}%
-              </span>
-            )}
-          </div>
-          {quotes[selectedSymbol]?.company_name && (
-            <div className="text-sm text-slate-400 mt-0.5">{quotes[selectedSymbol].company_name}</div>
-          )}
-          <div className="flex items-center gap-3 mt-1.5 flex-wrap">
-            <span className="text-sm text-slate-500">Market: <span className="text-slate-200 font-semibold">${selectedPrice?.toFixed(2)}</span></span>
-            {quotes[selectedSymbol]?.day_high != null && (
-              <span className="text-xs text-slate-500">
-                H: <span className="text-slate-300">${quotes[selectedSymbol].day_high.toFixed(2)}</span>
-                {' '}L: <span className="text-slate-300">${quotes[selectedSymbol].day_low?.toFixed(2)}</span>
-              </span>
-            )}
-            {quotes[selectedSymbol]?.volume != null && (
-              <span className="text-xs text-slate-500">Vol: <span className="text-slate-300">{(quotes[selectedSymbol].volume / 1e6).toFixed(2)}M</span></span>
-            )}
-            {selectedPos.strategy_name && !editingStrategy && (
-              <span className="text-sm text-blue-400 bg-blue-900/20 border border-blue-800/30 px-2 py-0.5 rounded">
-                {selectedPos.strategy_name.split(':')[0]}
-                {getScriptName(selectedPos.strategy_name) && (
-                  <span className="text-slate-400"> · {getScriptName(selectedPos.strategy_name)}</span>
+    <div className="flex flex-col h-full min-h-0">
+      {/* Top section */}
+      <div className="flex-1 flex flex-col min-h-0">
+        {/* Header and summary */}
+        <div className="mb-4">
+          <div className="flex items-start justify-between flex-wrap gap-3">
+            <div>
+              <div className="flex items-center gap-3">
+                <h1 className="text-3xl font-bold text-slate-100">{selectedSymbol}</h1>
+                {quotes[selectedSymbol]?.change_pct != null && (
+                  <span className={`text-base font-semibold ${quotes[selectedSymbol].change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {quotes[selectedSymbol].change_pct >= 0 ? '+' : ''}{quotes[selectedSymbol].change_pct.toFixed(2)}%
+                  </span>
                 )}
-              </span>
-            )}
+              </div>
+              {quotes[selectedSymbol]?.company_name && (
+                <div className="text-sm text-slate-400 mt-0.5">{quotes[selectedSymbol].company_name}</div>
+              )}
+              <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                <span className="text-sm text-slate-500">Market: <span className="text-slate-200 font-semibold">${selectedPrice?.toFixed(2)}</span></span>
+                {quotes[selectedSymbol]?.day_high != null && (
+                  <span className="text-xs text-slate-500">
+                    H: <span className="text-slate-300">${quotes[selectedSymbol].day_high.toFixed(2)}</span>
+                    {' '}L: <span className="text-slate-300">${quotes[selectedSymbol].day_low?.toFixed(2)}</span>
+                  </span>
+                )}
+                {quotes[selectedSymbol]?.volume != null && (
+                  <span className="text-xs text-slate-500">Vol: <span className="text-slate-300">{(quotes[selectedSymbol].volume / 1e6).toFixed(2)}M</span></span>
+                )}
+                {selectedPos.strategy_name && !editingStrategy && (
+                  <span className="text-sm text-blue-400 bg-blue-900/20 border border-blue-800/30 px-2 py-0.5 rounded">
+                    {selectedPos.strategy_name.split(':')[0]}
+                    {getScriptName(selectedPos.strategy_name) && (
+                      <span className="text-slate-400"> · {getScriptName(selectedPos.strategy_name)}</span>
+                    )}
+                  </span>
+                )}
+              </div>
+            </div>
+            <button className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded-lg px-2.5 py-1.5 hover:bg-red-900/20 transition-colors"
+              onClick={() => { if (window.confirm(`Remove ${selectedSymbol} from sandbox?`)) removeSymbolMut.mutate(selectedSymbol) }}>
+              <TrashIcon className="h-3.5 w-3.5" />Remove
+            </button>
           </div>
-        </div>
-        <button className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded-lg px-2.5 py-1.5 hover:bg-red-900/20 transition-colors"
-          onClick={() => { if (window.confirm(`Remove ${selectedSymbol} from sandbox?`)) removeSymbolMut.mutate(selectedSymbol) }}>
-          <TrashIcon className="h-3.5 w-3.5" />Remove
-        </button>
-      </div>
-
-      {/* Summary cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="card">
+          {/* Summary cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+            <div className="card">
           <div className="text-xs text-slate-500 mb-1">Allocated Funds</div>
           {editingAlloc ? (
             <div className="flex items-center gap-1 mt-1">
@@ -197,34 +206,43 @@ export default function PositionDetail({
         </div>
       </div>
 
-      {/* 1D Price Chart */}
-      <div className="card">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Today — 1D</h3>
-          <button
-            title={`Open ${selectedSymbol} in dashboard`}
-            onClick={() => navigate(`/?symbol=${selectedSymbol}`)}
-            className="flex items-center gap-1 text-xs text-slate-500 hover:text-amber-400 transition-colors"
-          >
-            <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
-            Dashboard
-          </button>
         </div>
-        {chartData.length > 0
-          ? <CandlestickChart data={chartData} prevClose={prevClose} height={200} />
-          : <div className="flex items-center justify-center h-[200px] text-slate-500 text-sm">Loading chart…</div>
-        }
-      </div>
-
-      {/* Symbol Detail Panel */}
-      <SymbolDetailPanel
-        symbol={selectedSymbol}
-        quoteData={quotes[selectedSymbol] ?? null}
-        isLoading={false}
-      />
-
-      {/* Strategy card */}
-      <div className="card">
+        {/* Main content row: SymbolDetailPanel left, rest right */}
+        <div className="flex flex-row gap-6 mt-6 min-h-0">
+          {/* Symbol detail left - fill vertical space */}
+          <div className="w-full max-w-xs flex-shrink-0 flex flex-col min-h-0">
+            <div className="flex-1 min-h-0">
+              <SymbolDetailPanel
+                symbol={selectedSymbol}
+                quoteData={quotes[selectedSymbol] ?? null}
+                isLoading={false}
+              />
+            </div>
+          </div>
+          {/* Right side: chart, strategy, trade */}
+          <div className="flex-1 flex flex-col gap-6 min-h-0">
+            {/* 1D Price Chart - flex-grow to fill available space */}
+            <div className="card flex flex-col flex-1 min-h-0">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Today — 1D</h3>
+                <button
+                  title={`Open ${selectedSymbol} in dashboard`}
+                  onClick={() => navigate(`/?symbol=${selectedSymbol}`)}
+                  className="flex items-center gap-1 text-xs text-slate-500 hover:text-amber-400 transition-colors"
+                >
+                  <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5" />
+                  Dashboard
+                </button>
+              </div>
+              <div className="flex-1 min-h-0">
+                {chartData.length > 0
+                  ? <CandlestickChart data={chartData} prevClose={prevClose} height={undefined} className="h-full w-full" />
+                  : <div className="flex items-center justify-center h-full text-slate-500 text-sm">Loading chart…</div>
+                }
+              </div>
+            </div>
+            {/* Strategy card */}
+            <div className="card">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Strategy</h3>
@@ -362,8 +380,8 @@ export default function PositionDetail({
         )}
       </div>
 
-      {/* Trade form */}
-      <div className="card">
+            {/* Trade form */}
+            <div className="card">
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">Place Trade</h3>
         <form onSubmit={handleTrade} className="flex flex-wrap gap-3 items-end">
           <div>
@@ -386,6 +404,11 @@ export default function PositionDetail({
                 <button type="button" title={`Max shares from ${fmtMoney(totalBuyableCash)} (position: ${fmtMoney(positionCashRemaining)} + available: ${fmtMoney(accountAvailable)})`}
                   className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-800/40 rounded px-1.5 py-1 whitespace-nowrap"
                   onClick={fillMaxShares}>Max</button>
+              )}
+              {tradeForm.side === 'SELL' && selectedPos?.shares > 0 && (
+                <button type="button" title={`Sell all ${selectedPos.shares} shares`}
+                  className="text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded px-1.5 py-1 whitespace-nowrap"
+                  onClick={fillMaxSellShares}>Max</button>
               )}
             </div>
           </div>
@@ -413,8 +436,11 @@ export default function PositionDetail({
         )}
       </div>
 
-      {/* Activity Log */}
-      <div className="card">
+          </div>
+        </div>
+      </div>
+      {/* Bottom section: Activity Log */}
+      <div className="card mt-6">
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">
           Activity Log — {selectedSymbol}
         </h3>
@@ -506,6 +532,6 @@ export default function PositionDetail({
           )
         })()}
       </div>
-    </>
+    </div>
   )
 }

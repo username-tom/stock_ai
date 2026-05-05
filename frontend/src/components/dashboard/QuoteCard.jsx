@@ -1,3 +1,5 @@
+import { useState, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { ArrowUpIcon, ArrowDownIcon } from '@heroicons/react/24/solid'
 import MiniSparkline from './MiniSparkline'
 
@@ -8,12 +10,12 @@ function fmtVol(v) {
   return `${(v / 1e3).toFixed(0)}K`
 }
 
-function Tooltip({ data, price, changePct, changeAbs, positive }) {
-  return (
-    <div className="absolute left-full top-1/2 -translate-y-1/2 ml-2 z-50 w-56
-                    rounded-lg bg-dark-600 border border-dark-400 shadow-2xl
-                    opacity-0 group-hover:opacity-100 pointer-events-none
-                    transition-opacity duration-150">
+function Tooltip({ data, price, changePct, changeAbs, positive, style }) {
+  return createPortal(
+    <div
+      className="fixed z-[9999] w-56 rounded-lg bg-dark-600 border border-dark-400 shadow-2xl pointer-events-none transition-opacity duration-150"
+      style={style}
+    >
       {/* Header */}
       <div className="px-3 py-2 border-b border-dark-500">
         <div className="flex items-center justify-between gap-2">
@@ -55,11 +57,29 @@ function Tooltip({ data, price, changePct, changeAbs, positive }) {
           <div className="font-mono text-slate-200">{fmtVol(data.volume)}</div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
 export default function QuoteCard({ data, isLoading, symbol, isActive }) {
+  const [tooltipStyle, setTooltipStyle] = useState(null)
+  const cardRef = useRef(null)
+
+  function handleMouseEnter() {
+    if (!cardRef.current) return
+    const rect = cardRef.current.getBoundingClientRect()
+    setTooltipStyle({
+      top: rect.top + rect.height / 2,
+      left: rect.right + 8,
+      transform: 'translateY(-50%)',
+      opacity: 1,
+    })
+  }
+
+  function handleMouseLeave() {
+    setTooltipStyle(null)
+  }
   if (isLoading)
     return (
       <div className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-all ${isActive ? 'bg-dark-700 border-dark-500' : 'border-transparent hover:bg-dark-800/60'}`}>
@@ -99,7 +119,12 @@ export default function QuoteCard({ data, isLoading, symbol, isActive }) {
   const positive = changePct >= 0
 
   return (
-    <div className={`group relative flex items-center gap-2 px-3 py-2 rounded-lg border transition-all cursor-pointer ${isActive ? 'bg-dark-700 border-emerald-600/50' : 'border-transparent hover:bg-dark-800/60 hover:border-dark-600'}`}>
+    <div
+      ref={cardRef}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      className={`relative flex items-center gap-2 px-3 py-2 rounded-lg border transition-all cursor-pointer ${isActive ? 'bg-dark-700 border-emerald-600/50' : 'border-transparent hover:bg-dark-800/60 hover:border-dark-600'}`}
+    >
       {/* Left: symbol + sparkline row, H/L row, company name row */}
       <div className="flex-1 min-w-0">
         {/* Row 1: symbol ticker + sparkline side by side */}
@@ -132,13 +157,14 @@ export default function QuoteCard({ data, isLoading, symbol, isActive }) {
       </div>
 
       {/* Hover tooltip */}
-      <Tooltip
+      {tooltipStyle && <Tooltip
         data={data}
         price={price}
         changePct={changePct}
         changeAbs={changeAbs}
         positive={positive}
-      />
+        style={tooltipStyle}
+      />}
     </div>
   )
 }

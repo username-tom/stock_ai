@@ -243,7 +243,7 @@ export default function SymbolDetailPanel({ symbol, quoteData, isLoading }) {
       <div className="pb-3 border-b border-dark-700">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="text-lg font-bold font-mono text-slate-100 leading-tight">{q.symbol}</div>
+            <div className="text-xlg font-bold font-mono text-slate-100 leading-tight">{q.symbol}</div>
             {q.company_name && (
               <div className="text-xs text-slate-500 mt-0.5 leading-snug">{q.company_name}</div>
             )}
