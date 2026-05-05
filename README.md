@@ -160,17 +160,30 @@ stock_ai/
 
 ## Quick Start
 
+
 ### Option A — Docker Compose (recommended)
 
+#### 1. Prerequisites
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
+- (Optional) [Git](https://git-scm.com/) to clone the repository
+
+#### 2. Clone the repository (if you haven't already)
+```bash
+git clone https://github.com/username-tom/stock_ai.git
+cd stock_ai
+```
+
+#### 3. Copy environment file and start containers
 ```bash
 cp backend/.env.example backend/.env
 docker-compose up --build
 ```
 
+#### 4. Access the app
 - Frontend: http://localhost:3000
 - Backend API + Swagger: http://localhost:8000/docs
 
-### Option B — Local development
+### Option B — Local development (untested)
 
 **Backend:**
 ```bash
