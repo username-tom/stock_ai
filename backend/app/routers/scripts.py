@@ -14,6 +14,9 @@ from app.config import settings
 from app.database import get_db
 from app.models.custom_script import CustomScript
 from app.services.script_executor import DEFAULT_SCRIPT, validate_script
+from app.services.local_storage import (
+    save_custom_script, delete_custom_script_file, get_custom_script_path,
+)
 
 router = APIRouter(prefix="/api/scripts", tags=["scripts"])
 
@@ -48,6 +51,7 @@ def _serialize(s: CustomScript) -> dict:
         "script_code": s.script_code,
         "created_at": s.created_at.isoformat() if s.created_at else None,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        "file_path": get_custom_script_path(s.id, s.name),
     }
 
 
@@ -63,11 +67,12 @@ async def get_template():
 
 @router.get("/storage-info")
 async def get_storage_info():
-    """Return the resolved path of the database file that stores custom scripts."""
+    """Return the resolved path of the database file and local scripts folder."""
+    from app.services.local_storage import _SCRIPTS_DIR
     raw_url = settings.DATABASE_URL  # e.g. sqlite+aiosqlite:////app/data/stock_ai.db
     parsed = urlparse(raw_url)
     db_path = parsed.path  # absolute path portion after the scheme
-    return {"db_path": db_path}
+    return {"db_path": db_path, "scripts_dir": str(_SCRIPTS_DIR.resolve())}
 
 
 @router.get("/builtin-templates")
@@ -114,6 +119,7 @@ async def create_script(body: ScriptCreate, db: AsyncSession = Depends(get_db)):
     db.add(script)
     await db.commit()
     await db.refresh(script)
+    save_custom_script(script.id, script.name, script.script_code)
     return _serialize(script)
 
 
@@ -150,6 +156,8 @@ async def update_script(
                 status_code=409,
                 detail=f"A script named '{body.name}' already exists.",
             )
+        # Remove old file before renaming so stale files don't accumulate
+        delete_custom_script_file(script.id, script.name)
         script.name = body.name
 
     if body.description is not None:
@@ -160,15 +168,17 @@ async def update_script(
 
     await db.commit()
     await db.refresh(script)
+    save_custom_script(script.id, script.name, script.script_code)
     return _serialize(script)
 
 
-@router.delete("/{script_id}", status_code=204)
+@router.delete
 async def delete_script(script_id: int, db: AsyncSession = Depends(get_db)):
     """Delete a script."""
     script = await db.get(CustomScript, script_id)
     if not script:
         raise HTTPException(status_code=404, detail="Script not found.")
+    delete_custom_script_file(script.id, script.name)
     await db.delete(script)
     await db.commit()
 

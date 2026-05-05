@@ -20,6 +20,7 @@ from app.config import settings
 _BACKTEST_DIR = Path(settings.LOCAL_STORAGE_DIR) / "backtest_reports"
 _TRADE_DIR = Path(settings.LOCAL_STORAGE_DIR) / "trade_logs"
 _PORTFOLIO_DIR = Path(settings.LOCAL_STORAGE_DIR) / "portfolio_activities"
+_SCRIPTS_DIR = Path(settings.LOCAL_STORAGE_DIR) / "custom_scripts"
 
 
 # ---------------------------------------------------------------------------
@@ -187,3 +188,53 @@ def _safe_filename(name: str, max_len: int = 80) -> str:
     """Strip characters that are unsafe in file names."""
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
     return safe[:max_len]
+
+
+# ---------------------------------------------------------------------------
+# Custom script helpers
+# ---------------------------------------------------------------------------
+
+def save_custom_script(script_id: int, name: str, code: str) -> str:
+    """Persist a custom script as a .py file on local storage.
+
+    Returns the path of the saved file as a string.
+    """
+    _SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(name)
+    filename = f"{script_id}_{safe_name}.py"
+    path = _SCRIPTS_DIR / filename
+    path.write_text(code, encoding="utf-8")
+    return str(path)
+
+
+def delete_custom_script_file(script_id: int, name: str) -> None:
+    """Remove the .py file for a custom script if it exists."""
+    safe_name = _safe_filename(name)
+    filename = f"{script_id}_{safe_name}.py"
+    path = _SCRIPTS_DIR / filename
+    if path.exists():
+        path.unlink()
+
+
+def get_custom_script_path(script_id: int, name: str) -> str | None:
+    """Return the local file path for a custom script, or None if not saved yet."""
+    safe_name = _safe_filename(name)
+    filename = f"{script_id}_{safe_name}.py"
+    path = _SCRIPTS_DIR / filename
+    return str(path) if path.exists() else None
+
+
+def list_custom_script_files() -> list[dict[str, Any]]:
+    """List all custom script .py files with metadata."""
+    if not _SCRIPTS_DIR.exists():
+        return []
+    files = []
+    for p in sorted(_SCRIPTS_DIR.glob("*.py")):
+        stat = p.stat()
+        files.append({
+            "filename": p.name,
+            "path": str(p),
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        })
+    return files

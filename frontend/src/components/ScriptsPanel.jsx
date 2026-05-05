@@ -272,9 +272,9 @@ export default function ScriptsPanel() {
           <p className="text-sm text-slate-400 mt-0.5">
             Write Python scripts that define automated trading conditions
           </p>
-          {storageInfo?.db_path && (
+          {storageInfo?.scripts_dir && (
             <p className="text-xs text-slate-500 mt-1 font-mono">
-              Saved to: {storageInfo.db_path}
+              Saved to: {storageInfo.scripts_dir}
             </p>
           )}
         </div>
@@ -383,14 +383,21 @@ export default function ScriptsPanel() {
           <div className="xl:col-span-2 space-y-4">
             <div className="card space-y-3">
               <div className="flex items-center justify-between flex-wrap gap-2">
-                <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">
-                  {selectedTemplate ? (
-                    <span className="flex items-center gap-1.5">
-                      <LockClosedIcon className="h-3.5 w-3.5 text-amber-400" />
-                      Template (read-only)
-                    </span>
-                  ) : 'Editor'}
-                </h2>
+                <div className="space-y-0.5">
+                  <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">
+                    {selectedTemplate ? (
+                      <span className="flex items-center gap-1.5">
+                        <LockClosedIcon className="h-3.5 w-3.5 text-amber-400" />
+                        Template (read-only)
+                      </span>
+                    ) : 'Editor'}
+                  </h2>
+                  {selectedScript?.file_path && (
+                    <p className="text-xs text-slate-500 font-mono">
+                      Local file: {selectedScript.file_path}
+                    </p>
+                  )}
+                </div>
                 <div className="flex gap-2">
                   {selectedScript && (
                     <>
