@@ -51,6 +51,10 @@ export const validateScriptCode = (payload) => api.post('/scripts/validate', pay
 
 export default api
 
+// Settings
+export const getSettings = () => api.get('/settings').then(r => r.data)
+export const updateSettings = (payload) => api.patch('/settings', payload).then(r => r.data)
+
 // Sandbox
 export const getSandboxAccount = () => api.get('/sandbox/account').then(r => r.data)
 export const addSandboxFunds = (amount) => api.post('/sandbox/account/add-funds', { amount }).then(r => r.data)

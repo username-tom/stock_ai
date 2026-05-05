@@ -4,6 +4,7 @@ import { ArrowUpIcon, ArrowDownIcon, EyeIcon, EyeSlashIcon, ChevronDownIcon, Che
 import SubplotChart from '../charts/SubplotChart'
 import { getMovers, getHistory } from '../../api/client'
 import { useMarketOpen } from '../../hooks/useMarketOpen'
+import { useAppSettings } from '../../hooks/useAppSettings'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 
 function fmt(n, digits = 2) { return n != null ? n.toFixed(digits) : '—' }
@@ -267,6 +268,7 @@ function MoverRow({ q, rank, inWatchlist, onToggleWatchlist }) {
 
 export default function MoversTab({ watchlist = [], toggleSymbol }) {
   const marketOpen = useMarketOpen()
+  const appSettings = useAppSettings()
   const queryClient = useQueryClient()
   const [forceLoading, setForceLoading] = useState(false)
 
@@ -274,7 +276,7 @@ export default function MoversTab({ watchlist = [], toggleSymbol }) {
     queryKey: ['movers'],
     queryFn: () => getMovers(25),
     staleTime: marketOpen ? 4 * 60_000 : 10 * 60_000,
-    refetchInterval: marketOpen ? 5 * 60_000 : false,
+    refetchInterval: marketOpen ? appSettings.movers_refresh_ms : false,
     refetchIntervalInBackground: true,
   })
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { SignalIcon, ExclamationTriangleIcon } from '@heroicons/react/24/solid'
 import { getBulkQuotes } from '../api/client'
 import { isMarketHours } from '../utils/marketHours'
+import { useAppSettings } from '../hooks/useAppSettings'
 
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
 const STORAGE_KEY = 'dashboard_watchlist'
@@ -15,6 +16,7 @@ function readWatchlist() {
 }
 
 export default function LivePriceTicker() {
+  const appSettings = useAppSettings()
   const [symbols, setSymbols] = useState(readWatchlist)
   const [prices, setPrices] = useState({})
   const [wsOk, setWsOk] = useState(true)
@@ -88,9 +90,9 @@ export default function LivePriceTicker() {
         setPrices(normalized)
       }).catch(() => {})
     load()
-    const id = setInterval(load, 60_000)
+    const id = setInterval(load, appSettings.quotes_refresh_ms)
     return () => clearInterval(id)
-  }, [wsOk, symbols.join(',')])
+  }, [wsOk, symbols.join(','), appSettings.quotes_refresh_ms])
 
   const items = symbols.map(s => prices[s]).filter(Boolean)
   const marketState = items[0]?.market_state ?? 'CLOSED'
@@ -123,7 +125,10 @@ export default function LivePriceTicker() {
         )}
       </div>
       <div className="flex-1 overflow-hidden">
-        <div className="flex gap-6 animate-marquee whitespace-nowrap" style={{ width: 'max-content' }}>
+        <div
+          className="flex gap-6 whitespace-nowrap animate-marquee"
+          style={{ width: 'max-content', animationDuration: `${appSettings.ticker_scroll_speed_s}s` }}
+        >
           {[...items, ...items].map((p, i) => (
             <span key={i} className="text-xs font-mono whitespace-nowrap text-slate-300">
               <span className="text-slate-400 font-semibold">{p.symbol} </span>

@@ -17,6 +17,7 @@ import {
 } from '../api/client'
 import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy } from './sandbox/sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandbox/sandboxConstants'
+import { useAppSettings } from '../hooks/useAppSettings'
 import SandboxSidebar from './sandbox/SandboxSidebar'
 import PortfolioOverview from './sandbox/PortfolioOverview'
 import PositionDetail from './sandbox/PositionDetail'
@@ -26,6 +27,7 @@ import StrategySelector from './sandbox/StrategySelector'
 
 export default function SandboxPanel() {
   const qc = useQueryClient()
+  const appSettings = useAppSettings()
   const importInputRef = useRef(null)
 
   const [selectedSymbol, setSelectedSymbol] = useState(null)
@@ -60,27 +62,27 @@ export default function SandboxPanel() {
   const [bulkStratParams, setBulkStratParams] = useState({})
 
   // IB status
-  const { data: ibStatus } = useQuery({ queryKey: ['ib-status'], queryFn: getIBStatus, refetchInterval: 5000 })
+  const { data: ibStatus } = useQuery({ queryKey: ['ib-status'], queryFn: getIBStatus, refetchInterval: appSettings.trading_status_ms })
   const ibConnected = ibStatus?.connected === true
   const ibMode = ibConnected ? (ibStatus?.mode ?? 'paper') : null
 
   // queries
-  const { data: accountData } = useQuery({ queryKey: ['sandbox-account'], queryFn: getSandboxAccount, refetchInterval: 10000 })
-  const { data: posData } = useQuery({ queryKey: ['sandbox-positions'], queryFn: getSandboxPositions, refetchInterval: 10000 })
+  const { data: accountData } = useQuery({ queryKey: ['sandbox-account'], queryFn: getSandboxAccount, refetchInterval: appSettings.sandbox_account_ms })
+  const { data: posData } = useQuery({ queryKey: ['sandbox-positions'], queryFn: getSandboxPositions, refetchInterval: appSettings.sandbox_account_ms })
   const positions = posData?.positions ?? []
   const symbols = positions.map(p => p.symbol)
   const { data: quotesData } = useQuery({
     queryKey: ['sandbox-quotes', symbols.join(',')],
     queryFn: () => symbols.length ? getBulkQuotes(symbols) : Promise.resolve({}),
     enabled: symbols.length > 0,
-    refetchInterval: 30000,
+    refetchInterval: appSettings.sandbox_quotes_ms,
   })
   const quotes = quotesData ?? {}
   const { data: tradesData } = useQuery({
     queryKey: ['sandbox-trades', selectedSymbol],
     queryFn: () => getSandboxTrades(selectedSymbol),
     enabled: !!selectedSymbol,
-    refetchInterval: 15000,
+    refetchInterval: appSettings.sandbox_trades_ms,
   })
   const trades = tradesData?.trades ?? []
   const selectedPos = positions.find(p => p.symbol === selectedSymbol)
@@ -109,15 +111,15 @@ export default function SandboxPanel() {
   const selectedUnrealised = selectedPos ? selectedMarketValue - selectedPos.avg_cost * selectedPos.shares : 0
 
   // engine state & analytics
-  const { data: engineState } = useQuery({ queryKey: ['sandbox-engine-state'], queryFn: getSandboxEngineState, refetchInterval: 10000 })
-  const { data: analytics } = useQuery({ queryKey: ['sandbox-analytics'], queryFn: getSandboxAnalytics, refetchInterval: 30000 })
-  const { data: managerState } = useQuery({ queryKey: ['portfolio-manager-state'], queryFn: getPortfolioManagerState, refetchInterval: 10000 })
+  const { data: engineState } = useQuery({ queryKey: ['sandbox-engine-state'], queryFn: getSandboxEngineState, refetchInterval: appSettings.sandbox_engine_ms })
+  const { data: analytics } = useQuery({ queryKey: ['sandbox-analytics'], queryFn: getSandboxAnalytics, refetchInterval: appSettings.sandbox_quotes_ms })
+  const { data: managerState } = useQuery({ queryKey: ['portfolio-manager-state'], queryFn: getPortfolioManagerState, refetchInterval: appSettings.sandbox_engine_ms })
 
   // all recent trades (for notification + activity log)
   const { data: allTradesData } = useQuery({
     queryKey: ['sandbox-trades-all'],
     queryFn: () => getSandboxTrades(undefined, 50),
-    refetchInterval: 8000,
+    refetchInterval: appSettings.sandbox_trades_ms,
   })
   const allTrades = allTradesData?.trades ?? []
   const engineTrades = allTrades.filter(t => t.strategy_name)

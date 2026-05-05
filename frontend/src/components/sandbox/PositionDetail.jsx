@@ -8,6 +8,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getScripts, getHistory, getSandboxFundEvents } from '../../api/client'
+import { useAppSettings } from '../../hooks/useAppSettings'
 import { fmt, fmtMoney, stratLabel } from './sandboxHelpers'
 import StrategySelector from './StrategySelector'
 import TradeRow from './TradeRow'
@@ -50,6 +51,7 @@ export default function PositionDetail({
   accountData,
 }) {
   const navigate = useNavigate()
+  const appSettings = useAppSettings()
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
 
@@ -57,7 +59,7 @@ export default function PositionDetail({
     queryKey: ['history', selectedSymbol, '1d'],
     queryFn: () => getHistory(selectedSymbol, '1d'),
     staleTime: 60000,
-    refetchInterval: 60000,
+    refetchInterval: appSettings.portfolio_detail_ms,
     enabled: !!selectedSymbol,
   })
   const chartData = histData?.data ?? []
@@ -66,7 +68,7 @@ export default function PositionDetail({
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
     queryFn: getSandboxFundEvents,
-    refetchInterval: 15000,
+    refetchInterval: appSettings.portfolio_detail_ms,
   })
   const fundEvents = fundEventsData?.events ?? []
 

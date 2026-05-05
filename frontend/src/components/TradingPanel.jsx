@@ -5,6 +5,7 @@ import {
   getIBPositions, getIBOrders, getTradeHistory,
   placeOrder, cancelOrder,
 } from '../api/client'
+import { useAppSettings } from '../hooks/useAppSettings'
 import SymbolAutocomplete from './shared/SymbolAutocomplete'
 import {
   BoltIcon, SignalIcon, SignalSlashIcon,
@@ -20,6 +21,7 @@ function StatusDot({ connected }) {
 
 export default function TradingPanel() {
   const qc = useQueryClient()
+  const appSettings = useAppSettings()
   const [orderForm, setOrderForm] = useState({
     symbol: 'AAPL',
     side: 'BUY',
@@ -34,21 +36,21 @@ export default function TradingPanel() {
   const { data: ibStatus } = useQuery({
     queryKey: ['ib-status'],
     queryFn: getIBStatus,
-    refetchInterval: 5000,
+    refetchInterval: appSettings.trading_status_ms,
   })
 
   const { data: positions, isLoading: positionsLoading } = useQuery({
     queryKey: ['ib-positions'],
     queryFn: getIBPositions,
     enabled: ibStatus?.connected,
-    refetchInterval: 10000,
+    refetchInterval: appSettings.trading_positions_ms,
   })
 
   const { data: openOrders, isLoading: ordersLoading } = useQuery({
     queryKey: ['ib-orders'],
     queryFn: getIBOrders,
     enabled: ibStatus?.connected,
-    refetchInterval: 5000,
+    refetchInterval: appSettings.trading_orders_ms,
   })
 
   const { data: histData, isLoading: histLoading, refetch: refetchHistory } = useQuery({

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BellAlertIcon, ArrowTopRightOnSquareIcon, CalendarDaysIcon, StarIcon } from '@heroicons/react/24/solid'
 import { getEarnings } from '../../api/client'
+import { useAppSettings } from '../../hooks/useAppSettings'
 
 function EarningsCard({ item }) {
   const urgency =
@@ -83,6 +84,7 @@ function SkeletonCard() {
 }
 
 export default function EarningsTab({ watchlist }) {
+  const appSettings = useAppSettings()
   const queryClient = useQueryClient()
   const [forceLoading, setForceLoading] = useState(false)
 
@@ -90,7 +92,7 @@ export default function EarningsTab({ watchlist }) {
     queryKey: ['earnings', watchlist],
     queryFn: () => getEarnings(watchlist),
     staleTime: 0,
-    refetchInterval: 15 * 60_000,
+    refetchInterval: appSettings.earnings_refresh_ms,
     refetchIntervalInBackground: true,
   })
 

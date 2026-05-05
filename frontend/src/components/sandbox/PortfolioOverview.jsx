@@ -8,6 +8,7 @@ import {
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
 import { getSandboxFundEvents } from '../../api/client'
+import { useAppSettings } from '../../hooks/useAppSettings'
 import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import PieTooltipContent from './PieTooltipContent'
@@ -26,10 +27,11 @@ export default function PortfolioOverview({
   allTrades = [],
   onSelectSymbol,
 }) {
+  const appSettings = useAppSettings()
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
     queryFn: getSandboxFundEvents,
-    refetchInterval: 15000,
+    refetchInterval: appSettings.portfolio_detail_ms,
   })
   const fundEvents = fundEventsData?.events ?? []
 

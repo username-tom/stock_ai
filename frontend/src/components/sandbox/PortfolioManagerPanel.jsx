@@ -5,6 +5,7 @@ import {
   ChartBarIcon, CheckCircleIcon, XCircleIcon,
 } from '@heroicons/react/24/outline'
 import { getPortfolioManagerState, updatePortfolioManagerSettings } from '../../api/client'
+import { useAppSettings } from '../../hooks/useAppSettings'
 import { fmtMoney } from './sandboxHelpers'
 
 const BULL_COLOR = '#10b981'
@@ -35,13 +36,14 @@ function SettingRow({ label, hint, children }) {
 
 export default function PortfolioManagerPanel() {
   const qc = useQueryClient()
+  const appSettings = useAppSettings()
   const [editSettings, setEditSettings] = useState(false)
   const [draft, setDraft] = useState(null)
 
   const { data: managerData, isLoading } = useQuery({
     queryKey: ['portfolio-manager-state'],
     queryFn: getPortfolioManagerState,
-    refetchInterval: 10000,
+    refetchInterval: appSettings.portfolio_positions_ms,
   })
 
   const updateMut = useMutation({

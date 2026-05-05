@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { NewspaperIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/solid'
 import { getNews } from '../../api/client'
 import { useMarketOpen } from '../../hooks/useMarketOpen'
+import { useAppSettings } from '../../hooks/useAppSettings'
 
 const INITIAL_VISIBLE = 50
 const PAGE_SIZE = 25
@@ -109,6 +110,7 @@ function LoadMoreArrow({ onClick }) {
 
 export default function NewsTab({ watchlist }) {
   const marketOpen = useMarketOpen()
+  const appSettings = useAppSettings()
   const queryClient = useQueryClient()
   const [forceLoading, setForceLoading] = useState(false)
 
@@ -116,7 +118,7 @@ export default function NewsTab({ watchlist }) {
     queryKey: ['news', watchlist],
     queryFn: () => getNews(watchlist),
     staleTime: 0,
-    refetchInterval: marketOpen ? 30 * 60_000 : 60 * 60_000,
+    refetchInterval: marketOpen ? appSettings.news_refresh_ms : appSettings.news_refresh_ms * 2,
     refetchIntervalInBackground: true,
     enabled: watchlist.length > 0,
   })

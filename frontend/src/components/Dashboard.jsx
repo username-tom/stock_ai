@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getBulkQuotes, getHistory } from '../api/client'
 import { useMarketOpen } from '../hooks/useMarketOpen'
 import { useWatchlist } from '../hooks/useWatchlist'
+import { useAppSettings } from '../hooks/useAppSettings'
 import WatchlistPanel from './dashboard/WatchlistPanel'
 import PriceChartPanel from './dashboard/PriceChartPanel'
 import MoversTab from './dashboard/MoversTab'
@@ -18,6 +19,7 @@ const TABS = [
 ]
 
 export default function Dashboard() {
+  const appSettings = useAppSettings()
   const watchlistState = useWatchlist()
   const { watchlist, updateWatchlist } = watchlistState
 
@@ -57,7 +59,7 @@ export default function Dashboard() {
     queryKey: ['bulk-quotes', watchlist],
     queryFn: () => getBulkQuotes(watchlist),
     staleTime: 30_000,
-    refetchInterval: marketOpen ? 30_000 : 5 * 60_000,
+    refetchInterval: marketOpen ? appSettings.quotes_refresh_ms : 5 * 60_000,
     refetchIntervalInBackground: true,
     enabled: watchlist.length > 0,
   })
@@ -66,8 +68,8 @@ export default function Dashboard() {
   useEffect(() => { setQuotesMapForHook(quotesMap ?? null) }, [quotesMap])
 
   const shortPeriod = ['1d', '2d', '5d', '2w'].includes(chartPeriod)
-  const histRefetchInterval = shortPeriod ? (marketOpen ? 60_000 : 5 * 60_000) : 15 * 60_000
-  const histStaleTime       = shortPeriod ? (marketOpen ? 55_000 : 4 * 60_000) : 840_000
+  const histRefetchInterval = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms : 5 * 60_000) : 15 * 60_000
+  const histStaleTime       = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms - 5_000 : 4 * 60_000) : 840_000
 
   const { data: histData, isLoading: histLoading } = useQuery({
     queryKey: ['history', chartSymbol, chartPeriod],

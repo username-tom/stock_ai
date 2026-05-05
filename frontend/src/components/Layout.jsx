@@ -7,6 +7,7 @@ import {
   BoltIcon,
   CodeBracketIcon,
   BriefcaseIcon,
+  Cog6ToothIcon,
 } from '@heroicons/react/24/outline'
 import LivePriceTicker from './LivePriceTicker'
 
@@ -17,6 +18,7 @@ const navItems = [
   { to: '/reports', label: 'Reports', icon: DocumentChartBarIcon },
   { to: '/trading', label: 'Trading', icon: BoltIcon },
   { to: '/scripts', label: 'Scripts', icon: CodeBracketIcon },
+  { to: '/settings', label: 'Settings', icon: Cog6ToothIcon },
 ]
 
 const EXPAND_DELAY = 3000 // ms before expanding
