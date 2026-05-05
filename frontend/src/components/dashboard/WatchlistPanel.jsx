@@ -1,5 +1,38 @@
-import { CheckIcon, PencilSquareIcon, PlusIcon, XMarkIcon, Bars3Icon } from '@heroicons/react/24/solid'
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { CheckIcon, PencilSquareIcon, PlusIcon, XMarkIcon, Bars3Icon, ChevronDownIcon } from '@heroicons/react/24/solid'
 import QuoteCard from './QuoteCard'
+import { getBulkQuotes } from '../../api/client'
+import { useMarketOpen } from '../../hooks/useMarketOpen'
+import { useAppSettings } from '../../hooks/useAppSettings'
+
+const PRESET_LISTS = {
+  watchlist: { label: 'My Watchlist', symbols: null /* dynamic */ },
+  major_markets: {
+    label: 'Major Markets',
+    symbols: ['SPY', 'QQQ', 'DIA', 'IWM', 'VTI', 'EFA', 'EEM', 'GLD', 'TLT', 'VIXY'],
+  },
+  notable_sectors: {
+    label: 'Notable Sectors',
+    symbols: ['XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLC', 'XLY', 'XLRE', 'XLB', 'XLU'],
+  },
+  gainers: {
+    label: 'Top Gainers',
+    symbols: ['NVDA', 'META', 'AVGO', 'SMCI', 'ARM', 'PLTR', 'MSTR', 'CRWD', 'PANW', 'SNOW'],
+  },
+  losers: {
+    label: 'Recent Losers',
+    symbols: ['INTC', 'PFE', 'WBA', 'MPW', 'PARA', 'DISH', 'BBBY', 'NCLH', 'AAL', 'UAL'],
+  },
+  big_tech: {
+    label: 'Big Tech',
+    symbols: ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'TSLA', 'NFLX', 'ADBE', 'CRM'],
+  },
+  crypto_etfs: {
+    label: 'Crypto & Alt',
+    symbols: ['IBIT', 'FBTC', 'BITO', 'GBTC', 'ARKW', 'ARKK', 'BLOK', 'BITB', 'HODL', 'BTCO'],
+  },
+}
 
 export default function WatchlistPanel({
   watchlist, quotesMap, quotesLoading, chartSymbol, setChartSymbol,
@@ -8,26 +41,78 @@ export default function WatchlistPanel({
   handleAdd, handleAddInputChange, handleAddKey, setShowSuggestions,
   removeSymbol, onDragStart, onDragEnter, onDragEnd,
 }) {
+  const appSettings = useAppSettings()
+  const marketOpen = useMarketOpen(null)
+  const [selectedList, setSelectedList] = useState('watchlist')
+  const [dropdownOpen, setDropdownOpen] = useState(false)
+
+  const isWatchlist = selectedList === 'watchlist'
+  const presetSymbols = isWatchlist ? watchlist : (PRESET_LISTS[selectedList]?.symbols ?? [])
+
+  const { data: presetQuotesMap, isLoading: presetLoading } = useQuery({
+    queryKey: ['bulk-quotes', presetSymbols],
+    queryFn: () => getBulkQuotes(presetSymbols),
+    staleTime: 30_000,
+    refetchInterval: marketOpen ? appSettings.quotes_refresh_ms : 5 * 60_000,
+    refetchIntervalInBackground: true,
+    enabled: !isWatchlist && presetSymbols.length > 0,
+  })
+
+  const activeQuotesMap = isWatchlist ? quotesMap : presetQuotesMap
+  const activeLoading = isWatchlist ? quotesLoading : presetLoading
+  const activeSymbols = presetSymbols
+
   return (
-    <div>
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Watchlist</h2>
+    <div className="flex flex-col h-full">
+      {/* Dropdown selector */}
+      <div className="relative mb-2">
         <button
-          onClick={toggleEditing}
-          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border transition-colors ${
-            editing
-              ? 'bg-emerald-600/20 border-emerald-600 text-emerald-400'
-              : 'border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400'
-          }`}
+          onClick={() => setDropdownOpen(o => !o)}
+          className="w-full flex items-center justify-between px-3 py-2 rounded-lg bg-dark-700 border border-dark-500 hover:border-dark-400 transition-colors text-sm font-medium text-slate-200"
         >
-          {editing ? <CheckIcon className="h-3.5 w-3.5" /> : <PencilSquareIcon className="h-3.5 w-3.5" />}
-          {editing ? 'Done' : 'Edit'}
+          <span>{PRESET_LISTS[selectedList]?.label ?? 'Watchlist'}</span>
+          <ChevronDownIcon className={`h-4 w-4 text-slate-400 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} />
         </button>
+        {dropdownOpen && (
+          <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-dark-700 border border-dark-500 rounded-lg shadow-2xl overflow-hidden">
+            {Object.entries(PRESET_LISTS).map(([key, { label }]) => (
+              <button
+                key={key}
+                onClick={() => { setSelectedList(key); setDropdownOpen(false) }}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
+                  selectedList === key
+                    ? 'bg-emerald-600/20 text-emerald-400'
+                    : 'text-slate-300 hover:bg-dark-600 hover:text-slate-100'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {editing && (
-        <div className="flex items-start gap-2 mb-5">
-          <div className="relative flex-1 max-w-xs">
+      {/* Edit controls — only for watchlist */}
+      {isWatchlist && (
+        <div className="flex items-center justify-end mb-2">
+          <button
+            onClick={toggleEditing}
+            className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md border transition-colors ${
+              editing
+                ? 'bg-emerald-600/20 border-emerald-600 text-emerald-400'
+                : 'border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400'
+            }`}
+          >
+            {editing ? <CheckIcon className="h-3.5 w-3.5" /> : <PencilSquareIcon className="h-3.5 w-3.5" />}
+            {editing ? 'Done' : 'Edit'}
+          </button>
+        </div>
+      )}
+
+      {/* Add input — only when editing watchlist */}
+      {isWatchlist && editing && (
+        <div className="flex items-start gap-2 mb-3">
+          <div className="relative flex-1">
             <input
               value={addInput}
               onChange={handleAddInputChange}
@@ -71,43 +156,43 @@ export default function WatchlistPanel({
         </div>
       )}
 
+      {/* Scrollable symbol list */}
       <div
-        className="overflow-y-auto mt-1 px-1 pt-1 pb-2"
+        className="flex-1 overflow-y-auto overflow-x-visible space-y-0.5 pr-0.5"
         style={{ scrollbarWidth: 'thin', scrollbarColor: '#334155 transparent' }}
       >
-        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
-          {watchlist.map((sym, idx) => (
+        {activeSymbols.map((sym, idx) => (
           <div
             key={sym}
-            draggable={editing}
-            onDragStart={() => onDragStart(idx)}
-            onDragEnter={() => onDragEnter(idx)}
-            onDragEnd={onDragEnd}
+            draggable={isWatchlist && editing}
+            onDragStart={() => isWatchlist && onDragStart(idx)}
+            onDragEnter={() => isWatchlist && onDragEnter(idx)}
+            onDragEnd={() => isWatchlist && onDragEnd()}
             onDragOver={e => e.preventDefault()}
             onClick={() => { if (!editing) setChartSymbol(sym) }}
-            className={`relative rounded-xl transition-all ${
-              sym === chartSymbol && !editing
-                ? 'ring-2 ring-emerald-400'
-                : ''
-            } ${editing ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
+            className={`relative ${isWatchlist && editing ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
           >
-            <QuoteCard data={quotesMap?.[sym]} isLoading={quotesLoading} symbol={sym} />
-            {editing && (
+            <QuoteCard
+              data={activeQuotesMap?.[sym]}
+              isLoading={activeLoading}
+              symbol={sym}
+              isActive={sym === chartSymbol}
+            />
+            {isWatchlist && editing && (
               <>
                 <button
                   onClick={e => { e.stopPropagation(); removeSymbol(sym) }}
-                  className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-red-500 hover:bg-red-400 flex items-center justify-center shadow-lg transition-colors z-10"
+                  className="absolute top-1/2 -translate-y-1/2 -right-1 h-5 w-5 rounded-full bg-red-500 hover:bg-red-400 flex items-center justify-center shadow-lg transition-colors z-10"
                 >
                   <XMarkIcon className="h-3 w-3 text-white" />
                 </button>
-                <div className="absolute top-1.5 left-1.5 text-slate-500 pointer-events-none">
+                <div className="absolute top-1/2 -translate-y-1/2 left-0 text-slate-600 pointer-events-none">
                   <Bars3Icon className="h-3.5 w-3.5" />
                 </div>
               </>
             )}
           </div>
-          ))}
-        </div>
+        ))}
       </div>
     </div>
   )

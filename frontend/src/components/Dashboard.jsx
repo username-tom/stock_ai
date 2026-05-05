@@ -7,12 +7,13 @@ import { useWatchlist } from '../hooks/useWatchlist'
 import { useAppSettings } from '../hooks/useAppSettings'
 import WatchlistPanel from './dashboard/WatchlistPanel'
 import PriceChartPanel from './dashboard/PriceChartPanel'
+import SymbolDetailPanel from './dashboard/SymbolDetailPanel'
 import MoversTab from './dashboard/MoversTab'
 import NewsTab from './dashboard/NewsTab'
 import EarningsTab from './dashboard/EarningsTab'
 
 const TABS = [
-  { key: 'overview', label: 'Overview' },
+  { key: 'charts', label: 'Charts' },
   { key: 'movers',   label: 'Gainers & Losers' },
   { key: 'news',     label: 'News' },
   { key: 'earnings', label: 'Earnings' },
@@ -36,7 +37,7 @@ export default function Dashboard() {
     }
   }, [searchParams])
   const [indicators, setIndicators] = useState({ bb: true, fastMa: true, slowMa: true, rsi: true, macd: true })
-  const [activeTab, setActiveTab] = useState('overview')
+  const [activeTab, setActiveTab] = useState('charts')
 
   const toggleIndicator = (key) => setIndicators(prev => ({ ...prev, [key]: !prev[key] }))
 
@@ -85,7 +86,7 @@ export default function Dashboard() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-100">Dashboard</h1>
-          <p className="text-sm text-slate-400 mt-0.5">Real-time market overview</p>
+          <p className="text-sm text-slate-400 mt-0.5">Real-time market charts</p>
         </div>
         <div className="text-right">
           <div className="flex items-center justify-end gap-1.5">
@@ -130,26 +131,40 @@ export default function Dashboard() {
         <EarningsTab watchlist={watchlist} />
       )}
 
-      {activeTab === 'overview' && (
-        <>
-          <WatchlistPanel
-            {...watchlistState}
-            updateWatchlist={wrappedUpdateWatchlist}
-            quotesMap={quotesMap}
-            quotesLoading={quotesLoading}
-            chartSymbol={chartSymbol}
-            setChartSymbol={setChartSymbol}
-          />
-          <PriceChartPanel
-            chartSymbol={chartSymbol}
-            chartPeriod={chartPeriod}
-            setChartPeriod={setChartPeriod}
-            indicators={indicators}
-            toggleIndicator={toggleIndicator}
-            histData={histData}
-            histLoading={histLoading}
-          />
-        </>
+      {activeTab === 'charts' && (
+        <div className="flex gap-4" style={{ minHeight: '520px' }}>
+          {/* Left: scrollable symbol list */}
+          <div className="w-72 flex-shrink-0 card flex flex-col overflow-visible" style={{ maxHeight: '80vh', minHeight: '400px' }}>
+            <WatchlistPanel
+              {...watchlistState}
+              updateWatchlist={wrappedUpdateWatchlist}
+              quotesMap={quotesMap}
+              quotesLoading={quotesLoading}
+              chartSymbol={chartSymbol}
+              setChartSymbol={setChartSymbol}
+            />
+          </div>
+          {/* Middle: symbol details */}
+          <div className="w-52 flex-shrink-0">
+            <SymbolDetailPanel
+              symbol={chartSymbol}
+              quoteData={quotesMap?.[chartSymbol] ?? null}
+              isLoading={quotesLoading}
+            />
+          </div>
+          {/* Right: price chart */}
+          <div className="flex-1 min-w-0">
+            <PriceChartPanel
+              chartSymbol={chartSymbol}
+              chartPeriod={chartPeriod}
+              setChartPeriod={setChartPeriod}
+              indicators={indicators}
+              toggleIndicator={toggleIndicator}
+              histData={histData}
+              histLoading={histLoading}
+            />
+          </div>
+        </div>
       )}
     </div>
   )

@@ -578,16 +578,29 @@ async def get_news(watchlist: list[str], extra_topics: list[str] | None = None, 
     return result
 
 
+INTRADAY_DF_TTL = 55   # seconds – just under the 60 s engine tick so each tick gets a fresh bar
+
 async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
                           include_pre_post: bool = False) -> "pd.DataFrame":
     """Return a pandas DataFrame of recent OHLCV bars for *symbol*.
 
     This is a shared helper used by the sandbox engine and portfolio manager
-    so bar-fetching logic lives in one place.
+    so bar-fetching logic lives in one place.  Results are cached for
+    INTRADAY_DF_TTL seconds so that multiple engine positions tracking the
+    same symbol only trigger one Yahoo Finance request per tick cycle, and
+    Yahoo rate-limits (429) are avoided.
     """
     import pandas as pd  # optional heavy import – kept local
 
-    chart = await _yf_chart(symbol.upper(), range_=range_, interval=interval,
+    sym = symbol.upper()
+    cache_key = f"intraday_df:{sym}:{range_}:{interval}:{'pre' if include_pre_post else 'reg'}"
+    cached = await _cache.get(cache_key, INTRADAY_DF_TTL)
+    if cached is not None:
+        df = pd.DataFrame(cached)
+        df.index = pd.RangeIndex(len(df))
+        return df
+
+    chart = await _yf_chart(sym, range_=range_, interval=interval,
                             include_pre_post=include_pre_post)
     timestamps = chart.get("timestamp", [])
     quotes = chart.get("indicators", {}).get("quote", [{}])[0]
@@ -614,6 +627,7 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
     if not rows:
         raise ValueError(f"No intraday data returned for {symbol}")
 
+    await _cache.set(cache_key, rows)
     df = pd.DataFrame(rows)
     df.index = pd.RangeIndex(len(df))
     return df
