@@ -64,6 +64,26 @@ class SandboxTrade(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class SandboxAllocationEvent(Base):
+    """Records every time funds are moved between positions or the account pool.
+
+    event_type values:
+      'allocate'     – funds moved from account pool → position (add/update allocation)
+      'deallocate'   – funds moved from position → account pool
+      'reallocate'   – funds moved between positions (portfolio manager rebalance)
+      'deploy'       – unallocated account cash deployed to a position by PM
+    """
+    __tablename__ = "sandbox_allocation_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String(20), nullable=False)
+    from_symbol = Column(String(20), nullable=True)   # None = account pool
+    to_symbol = Column(String(20), nullable=True)     # None = account pool
+    amount = Column(Float, nullable=False)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class PortfolioManagerSettings(Base):
     """Persisted portfolio manager configuration (single row, id=1)."""
     __tablename__ = "portfolio_manager_settings"

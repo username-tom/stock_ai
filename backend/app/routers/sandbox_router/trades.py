@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade
-from app.routers.sandbox_router._helpers import get_account, position_dict
+from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade, SandboxAllocationEvent
+from app.routers.sandbox_router._helpers import get_account, position_dict, compute_available_cash
 from app.services.local_storage import (
     save_trade_logs_csv, save_trade_logs_json, list_trade_log_files,
     records_to_csv_bytes, records_to_json_bytes,
@@ -43,12 +43,33 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
     pnl = None
 
     if side == "BUY":
-        if pos.allocated_funds < total:
-            raise HTTPException(400, f"Insufficient allocated funds. Allocated: ${pos.allocated_funds:.2f}, Cost: ${total:.2f}")
+        # How much extra cash must be pulled from the account's unallocated pool?
+        shortfall = round(max(0.0, total - pos.allocated_funds), 4)
+        if shortfall > 0:
+            account = await get_account(db)
+            all_pos_res = await db.execute(select(SandboxPosition))
+            all_positions = all_pos_res.scalars().all()
+            account_available = await compute_available_cash(db, account, all_positions)
+            if shortfall > account_available:
+                raise HTTPException(
+                    400,
+                    f"Insufficient funds. Position: ${pos.allocated_funds:.2f}, "
+                    f"Account available: ${account_available:.2f}, Need: ${total:.2f}"
+                )
+            # Draw shortfall from the unallocated pool into this position
+            pos.allocated_funds += shortfall
+            db.add(SandboxAllocationEvent(
+                event_type="deploy",
+                from_symbol=None,
+                to_symbol=symbol,
+                amount=shortfall,
+                note="Manual BUY: draw from unallocated pool",
+            ))
         new_shares = pos.shares + req.quantity
         pos.avg_cost = (pos.avg_cost * pos.shares + total) / new_shares
         pos.shares = new_shares
         pos.allocated_funds -= total
+        # Note: total_funds is unchanged — cash is now equity (shares × avg_cost)
     elif side == "SELL":
         if pos.shares < req.quantity:
             raise HTTPException(400, f"Insufficient shares. Held: {pos.shares}, Sell: {req.quantity}")
@@ -58,8 +79,7 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
         pos.realized_pnl += pnl
         if pos.shares == 0:
             pos.avg_cost = 0.0
-        # Credit profit / debit loss to account.total_funds so that
-        # available_funds = total_funds - sum(allocated_funds) stays accurate.
+        # Realized P/L changes total_funds: gains add to cash, losses reduce it.
         account = await get_account(db)
         account.total_funds += pnl
 

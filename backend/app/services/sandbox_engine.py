@@ -250,13 +250,14 @@ async def _execute_trade(
             acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
             account = acct_res.scalar_one_or_none()
             if account:
+                from app.routers.sandbox_router._helpers import compute_available_cash
                 all_pos_res = await db.execute(sa_select(SandboxPosition))
-                total_allocated = sum(p.allocated_funds for p in all_pos_res.scalars().all())
-                unallocated = max(0.0, account.total_funds - total_allocated)
+                all_positions = all_pos_res.scalars().all()
+                account_available = await compute_available_cash(db, account, all_positions)
             else:
-                unallocated = 0.0
+                account_available = 0.0
 
-            available = position.allocated_funds + unallocated
+            available = position.allocated_funds + account_available
             if available < price:
                 logger.debug("Engine BUY skipped for %s — insufficient funds ($%.2f)", pos.symbol, available)
                 return
@@ -267,10 +268,17 @@ async def _execute_trade(
             # Draw any shortfall from the unallocated pool into this position
             extra_needed = max(0.0, total - position.allocated_funds)
             if extra_needed > 0 and account:
+                # Draw from the unallocated pool into this position's allocation.
+                # Log it so repair can replay it correctly.
                 position.allocated_funds += extra_needed
-                # Remove the drawn cash from total_funds so available_funds
-                # (= total_funds - sum(allocated_funds)) decreases correctly.
-                account.total_funds -= extra_needed
+                from app.models.sandbox import SandboxAllocationEvent
+                db.add(SandboxAllocationEvent(
+                    event_type="deploy",
+                    from_symbol=None,
+                    to_symbol=position.symbol,
+                    amount=round(extra_needed, 4),
+                    note="Engine: draw from unallocated pool for BUY",
+                ))
             # Place shares into the pending (open order) state.
             # A background settler will convert them to real shares after
             # a random 5–10 second delay, simulating order fill latency.
@@ -296,8 +304,7 @@ async def _execute_trade(
             position.allocated_funds += total
             position.realized_pnl += pnl
             position.avg_cost = 0.0
-            # Credit profit / debit loss to account.total_funds so that
-            # available_funds = total_funds - sum(allocated_funds) stays accurate.
+            # Realized P/L adjusts total_funds: gains add to cash, losses reduce it.
             acct_res2 = await db.execute(sa_select(SandboxAccount).limit(1))
             acct2 = acct_res2.scalar_one_or_none()
             if acct2:

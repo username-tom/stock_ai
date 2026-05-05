@@ -8,8 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.models.sandbox import SandboxPosition, SandboxFundEvent
-from app.routers.sandbox_router._helpers import get_account
+from app.models.sandbox import SandboxPosition, SandboxFundEvent, SandboxAllocationEvent
+from app.routers.sandbox_router._helpers import get_account, compute_available_cash
 from app.services.local_storage import (
     save_portfolio_activities_csv, save_portfolio_activities_json,
     list_portfolio_activity_files, records_to_csv_bytes, records_to_json_bytes,
@@ -24,10 +24,13 @@ async def get_account_info(db: AsyncSession = Depends(get_db)):
     positions_res = await db.execute(select(SandboxPosition))
     positions = positions_res.scalars().all()
     allocated = sum(p.allocated_funds for p in positions)
+    equity = sum(p.shares * p.avg_cost for p in positions)
+    available = await compute_available_cash(db, account, positions)
     return {
         "total_funds": account.total_funds,
-        "allocated_funds": allocated,
-        "available_funds": account.total_funds - allocated,
+        "allocated_funds": round(allocated, 4),
+        "equity": round(equity, 4),
+        "available_funds": available,
         "updated_at": account.updated_at.isoformat() if account.updated_at else None,
     }
 
@@ -44,7 +47,15 @@ async def add_funds(req: AddFundsRequest, db: AsyncSession = Depends(get_db)):
     db.add(SandboxFundEvent(event_type="deposit", amount=req.amount))
     await db.commit()
     await db.refresh(account)
-    return {"total_funds": account.total_funds, "added": req.amount}
+    # Recompute available after deposit
+    positions_res = await db.execute(select(SandboxPosition))
+    positions = positions_res.scalars().all()
+    available = await compute_available_cash(db, account, positions)
+    return {
+        "total_funds": account.total_funds,
+        "available_funds": available,
+        "added": req.amount,
+    }
 
 
 class WithdrawFundsRequest(BaseModel):
@@ -53,98 +64,216 @@ class WithdrawFundsRequest(BaseModel):
 
 @router.post("/account/withdraw-funds")
 async def withdraw_funds(req: WithdrawFundsRequest, db: AsyncSession = Depends(get_db)):
+    from fastapi import HTTPException
     account = await get_account(db)
     positions_res = await db.execute(select(SandboxPosition))
     positions = positions_res.scalars().all()
+    available = await compute_available_cash(db, account, positions)
     allocated = sum(p.allocated_funds for p in positions)
-    available = account.total_funds - allocated
     if req.amount > available:
-        from fastapi import HTTPException
-        raise HTTPException(400, f"Insufficient available funds. Available: ${available:.2f}")
+        raise HTTPException(
+            400,
+            f"Insufficient available funds. "
+            f"Available: ${available:.2f}, Requested: ${req.amount:.2f}. "
+            f"Note: ${allocated:.2f} is allocated to positions and cannot be withdrawn."
+        )
     account.total_funds -= req.amount
     account.total_deposited = max(0.0, (account.total_deposited or 0.0) - req.amount)
     db.add(SandboxFundEvent(event_type="withdrawal", amount=req.amount))
     await db.commit()
     await db.refresh(account)
-    return {"total_funds": account.total_funds, "withdrawn": req.amount}
+    new_available = await compute_available_cash(db, account, positions)
+    return {
+        "total_funds": account.total_funds,
+        "available_funds": round(new_available, 4),
+        "withdrawn": req.amount,
+    }
 
 
 @router.get("/account/fund-events")
 async def get_fund_events(limit: int = 200, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
+    fund_res = await db.execute(
         select(SandboxFundEvent).order_by(SandboxFundEvent.created_at.desc()).limit(limit)
     )
-    events = result.scalars().all()
-    return {"events": [
-        {"id": e.id, "event_type": e.event_type, "amount": e.amount, "note": e.note,
-         "created_at": e.created_at.isoformat() if e.created_at else None}
-        for e in events
-    ]}
+    alloc_res = await db.execute(
+        select(SandboxAllocationEvent).order_by(SandboxAllocationEvent.created_at.desc()).limit(limit)
+    )
+    fund_events = fund_res.scalars().all()
+    alloc_events = alloc_res.scalars().all()
+
+    events = [
+        {
+            "id": f"f-{e.id}",
+            "event_type": e.event_type,
+            "amount": e.amount,
+            "note": e.note,
+            "from_symbol": None,
+            "to_symbol": None,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in fund_events
+    ] + [
+        {
+            "id": f"a-{e.id}",
+            "event_type": e.event_type,
+            "amount": e.amount,
+            "note": e.note,
+            "from_symbol": e.from_symbol,
+            "to_symbol": e.to_symbol,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in alloc_events
+    ]
+    events.sort(key=lambda x: x["created_at"] or "", reverse=True)
+    return {"events": events[:limit]}
 
 
 @router.post("/account/repair-funds")
 async def repair_funds(db: AsyncSession = Depends(get_db)):
-    """
-    Recompute account.total_funds and per-position realized_pnl from the
-    activity log (fund events + trade records) — the only source of truth.
+    """Rebuild all account and position state by replaying the full activity
+    log in chronological order.
 
-      net_deposits   = sum(fund_events: deposit) - sum(fund_events: withdrawal)
-      realized_pnl   = sum(trades: pnl  where side=SELL)
-      correct_total  = net_deposits + realized_pnl
+    Replay order:
+      1. SandboxFundEvent  (deposit / withdrawal)   → total_funds
+      2. SandboxAllocationEvent (allocate / deallocate / reallocate / deploy)
+         → per-position allocated_funds, total_funds unchanged (reallocate
+           keeps total constant; allocate/deallocate move between pool and pos)
+      3. SandboxTrade  (BUY / SELL)
+         → per-position shares, avg_cost, allocated_funds, realized_pnl
+         → total_funds only changes on SELL (gains/losses realized)
 
-    Also resets pos.realized_pnl for each symbol from its SELL trade history.
+    After replay the live DB values are updated to match.
     """
     from app.models.sandbox import SandboxTrade
 
     account = await get_account(db)
 
-    # --- fund events → net deposits ---
-    fund_res = await db.execute(select(SandboxFundEvent))
-    fund_events = fund_res.scalars().all()
-    net_deposits = sum(
-        e.amount if e.event_type == "deposit" else -e.amount
-        for e in fund_events
+    # ── load all events ────────────────────────────────────────────────── #
+    fund_res = await db.execute(
+        select(SandboxFundEvent).order_by(SandboxFundEvent.created_at)
     )
+    fund_events = fund_res.scalars().all()
 
-    # --- trade history → realized pnl per symbol + total ---
-    trades_res = await db.execute(select(SandboxTrade))
+    alloc_res = await db.execute(
+        select(SandboxAllocationEvent).order_by(SandboxAllocationEvent.created_at)
+    )
+    alloc_events = alloc_res.scalars().all()
+
+    trades_res = await db.execute(
+        select(SandboxTrade).order_by(SandboxTrade.created_at)
+    )
     all_trades = trades_res.scalars().all()
 
-    pnl_by_symbol: dict[str, float] = {}
-    total_realized_pnl = 0.0
-    for t in all_trades:
-        if t.side == "SELL" and t.pnl is not None:
-            pnl_by_symbol[t.symbol] = pnl_by_symbol.get(t.symbol, 0.0) + t.pnl
-            total_realized_pnl += t.pnl
+    positions_res = await db.execute(select(SandboxPosition))
+    positions = positions_res.scalars().all()
+    known_symbols = {p.symbol for p in positions}
 
-    # --- correct total_funds ---
-    correct_total = round(net_deposits + total_realized_pnl, 4)
+    # ── replay ────────────────────────────────────────────────────────── #
+    total_funds: float = 0.0
+    # per-symbol state
+    alloc: dict[str, float] = {p.symbol: 0.0 for p in positions}
+    shares: dict[str, float] = {p.symbol: 0.0 for p in positions}
+    avg_cost: dict[str, float] = {p.symbol: 0.0 for p in positions}
+    realized_pnl: dict[str, float] = {p.symbol: 0.0 for p in positions}
+
+    # Merge everything into one timeline sorted by created_at
+    timeline: list[tuple[str, object]] = (
+        [("fund", e) for e in fund_events] +
+        [("alloc", e) for e in alloc_events] +
+        [("trade", t) for t in all_trades]
+    )
+    timeline.sort(key=lambda x: (x[1].created_at or ""))
+
+    for kind, evt in timeline:
+        if kind == "fund":
+            if evt.event_type == "deposit":
+                total_funds += evt.amount
+            elif evt.event_type == "withdrawal":
+                total_funds -= evt.amount
+
+        elif kind == "alloc":
+            amt = evt.amount
+            etype = evt.event_type
+            src = evt.from_symbol   # None = account pool
+            dst = evt.to_symbol     # None = account pool
+
+            if etype in ("allocate", "deploy"):
+                # pool → position: total_funds unchanged, position alloc grows
+                if dst and dst in alloc:
+                    alloc[dst] = round(alloc[dst] + amt, 4)
+
+            elif etype == "deallocate":
+                # position → pool: total_funds unchanged, position alloc shrinks
+                if src and src in alloc:
+                    alloc[src] = round(max(0.0, alloc[src] - amt), 4)
+
+            elif etype == "reallocate":
+                # position → position: total_funds unchanged
+                if src and src in alloc:
+                    alloc[src] = round(max(0.0, alloc[src] - amt), 4)
+                if dst and dst in alloc:
+                    alloc[dst] = round(alloc[dst] + amt, 4)
+
+        elif kind == "trade":
+            sym = evt.symbol
+            if sym not in known_symbols:
+                continue
+            if evt.side == "BUY":
+                qty = evt.quantity
+                cost = evt.total
+                new_shares = shares[sym] + qty
+                if new_shares > 0:
+                    avg_cost[sym] = round(
+                        (avg_cost[sym] * shares[sym] + cost) / new_shares, 6
+                    )
+                shares[sym] = round(new_shares, 6)
+                alloc[sym] = round(max(0.0, alloc[sym] - cost), 4)
+                # total_funds unchanged — cash is now equity, not gone
+            elif evt.side == "SELL":
+                qty = evt.quantity
+                proceeds = evt.total
+                pnl = round((evt.price - avg_cost[sym]) * qty, 4) if avg_cost[sym] else 0.0
+                # Use stored pnl if available (more accurate)
+                if evt.pnl is not None:
+                    pnl = evt.pnl
+                shares[sym] = round(max(0.0, shares[sym] - qty), 6)
+                if shares[sym] == 0:
+                    avg_cost[sym] = 0.0
+                alloc[sym] = round(alloc[sym] + proceeds, 4)
+                realized_pnl[sym] = round(realized_pnl[sym] + pnl, 4)
+                total_funds = round(total_funds + pnl, 4)
+
+    # ── apply to DB ───────────────────────────────────────────────────── #
     old_total = account.total_funds
-    account.total_funds = correct_total
-    # keep total_deposited in sync with the fund events log
+    account.total_funds = round(total_funds, 4)
     account.total_deposited = round(
         sum(e.amount for e in fund_events if e.event_type == "deposit"), 4
     )
 
-    # --- correct per-position realized_pnl ---
-    positions_res = await db.execute(select(SandboxPosition))
-    positions = positions_res.scalars().all()
     for pos in positions:
-        pos.realized_pnl = round(pnl_by_symbol.get(pos.symbol, 0.0), 4)
-
-    total_allocated = sum(p.allocated_funds for p in positions)
+        pos.allocated_funds = alloc[pos.symbol]
+        pos.shares = shares[pos.symbol]
+        pos.avg_cost = avg_cost[pos.symbol]
+        pos.realized_pnl = realized_pnl[pos.symbol]
 
     await db.commit()
     await db.refresh(account)
 
+    # Compute available after applying repaired state
+    positions_res2 = await db.execute(select(SandboxPosition))
+    positions_after = positions_res2.scalars().all()
+    available = await compute_available_cash(db, account, positions_after)
+
     return {
         "repaired": True,
-        "net_deposits": round(net_deposits, 4),
-        "total_realized_pnl": round(total_realized_pnl, 4),
         "total_funds_before": round(old_total, 4),
         "total_funds_after": round(account.total_funds, 4),
-        "available_funds": round(account.total_funds - total_allocated, 4),
-        "correction": round(correct_total - old_total, 4),
+        "available_funds": available,
+        "correction": round(account.total_funds - old_total, 4),
+        "net_deposits": round(
+            sum(e.amount if e.event_type == "deposit" else -e.amount for e in fund_events), 4
+        ),
+        "total_realized_pnl": round(sum(realized_pnl.values()), 4),
     }
 
 

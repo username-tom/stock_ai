@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.models.sandbox import SandboxPosition
-from app.routers.sandbox_router._helpers import get_account, position_dict
+from app.models.sandbox import SandboxPosition, SandboxAllocationEvent
+from app.routers.sandbox_router._helpers import get_account, position_dict, compute_available_cash
 
 router = APIRouter()
 
@@ -44,9 +44,18 @@ async def add_symbol(req: AddSymbolRequest, db: AsyncSession = Depends(get_db)):
     if req.allocated_funds > 0:
         account = await get_account(db)
         all_pos = (await db.execute(select(SandboxPosition))).scalars().all()
-        available = account.total_funds - sum(p.allocated_funds for p in all_pos)
+        available = await compute_available_cash(db, account, all_pos)
         # Cap allocation to what is actually available — do NOT inflate total_funds
-        req = req.model_copy(update={"allocated_funds": min(req.allocated_funds, max(0.0, available))})
+        capped = min(req.allocated_funds, max(0.0, available))
+        req = req.model_copy(update={"allocated_funds": capped})
+        if capped > 0:
+            db.add(SandboxAllocationEvent(
+                event_type="allocate",
+                from_symbol=None,
+                to_symbol=symbol,
+                amount=capped,
+                note="Initial allocation on add",
+            ))
 
     pos = SandboxPosition(
         symbol=symbol,
@@ -82,9 +91,29 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
     if req.allocated_funds is not None:
         account = await get_account(db)
         all_pos = (await db.execute(select(SandboxPosition))).scalars().all()
-        available = account.total_funds - sum(p.allocated_funds for p in all_pos if p.id != pos.id)
+        # Compute available cash treating equity (shares × avg_cost) as committed.
+        # Exclude current position's allocation since we are replacing it.
+        available = await compute_available_cash(db, account, all_pos) + pos.allocated_funds
         if req.allocated_funds > available:
-            account.total_funds += req.allocated_funds - available
+            raise HTTPException(400, f"Insufficient available funds. Available: ${available:.2f}")
+        old_alloc = pos.allocated_funds
+        diff = round(req.allocated_funds - old_alloc, 4)
+        if diff > 0:
+            db.add(SandboxAllocationEvent(
+                event_type="allocate",
+                from_symbol=None,
+                to_symbol=symbol,
+                amount=diff,
+                note="Manual allocation increase",
+            ))
+        elif diff < 0:
+            db.add(SandboxAllocationEvent(
+                event_type="deallocate",
+                from_symbol=symbol,
+                to_symbol=None,
+                amount=abs(diff),
+                note="Manual allocation decrease",
+            ))
         pos.allocated_funds = req.allocated_funds
 
     await db.commit()

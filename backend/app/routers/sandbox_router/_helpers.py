@@ -18,6 +18,36 @@ async def get_account(db: AsyncSession) -> SandboxAccount:
     return account
 
 
+async def compute_available_cash(
+    db: AsyncSession | None,
+    account: SandboxAccount | None = None,
+    positions: list[SandboxPosition] | None = None,
+) -> float:
+    """Return the cash that is free to spend.
+
+    Accounting model:
+        total_funds   = net cash ledger (deposits - withdrawals + realized P/L)
+        allocated     = cash reserved for a position but not yet spent on shares
+        equity        = cash already converted to shares  (shares × avg_cost)
+        available     = total_funds - allocated - equity
+
+    Both ``allocated`` and ``equity`` represent cash that has already been
+    committed, so subtracting only ``allocated`` (as the old code did) would
+    ignore the equity portion and overstate availability after a BUY.
+    """
+    if account is None:
+        account = await get_account(db)
+    if positions is None:
+        res = await db.execute(select(SandboxPosition))
+        positions = res.scalars().all()
+    allocated = sum(p.allocated_funds for p in positions)
+    equity = sum(p.shares * p.avg_cost for p in positions)
+    # Also include pending orders (cash committed to open orders not yet settled)
+    pending_equity = sum(p.pending_shares * p.pending_avg_cost for p in positions)
+    available = account.total_funds - allocated - equity - pending_equity
+    return round(max(0.0, available), 4)
+
+
 def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict:
     market_val = (market_price or p.avg_cost) * p.shares if p.shares else 0.0
     unrealised_pnl = market_val - p.avg_cost * p.shares if p.shares else 0.0

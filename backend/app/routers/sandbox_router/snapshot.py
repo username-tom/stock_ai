@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
 from app.database import get_db
-from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade
+from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade, SandboxAllocationEvent
 from app.routers.sandbox_router._helpers import get_account
 
 router = APIRouter()
@@ -77,6 +77,7 @@ async def import_sandbox(file: UploadFile = File(...), db: AsyncSession = Depend
 
     await db.execute(delete(SandboxTrade))
     await db.execute(delete(SandboxPosition))
+    await db.execute(delete(SandboxAllocationEvent))
     await db.execute(delete(SandboxAccount))
     await db.flush()
 
@@ -128,8 +129,11 @@ async def import_sandbox(file: UploadFile = File(...), db: AsyncSession = Depend
 @router.post("/reset")
 async def reset_sandbox(db: AsyncSession = Depends(get_db)):
     """Wipe all sandbox data and start fresh."""
+    from app.models.sandbox import SandboxFundEvent
     await db.execute(delete(SandboxTrade))
     await db.execute(delete(SandboxPosition))
+    await db.execute(delete(SandboxFundEvent))
+    await db.execute(delete(SandboxAllocationEvent))
     await db.execute(delete(SandboxAccount))
     await db.flush()
     db.add(SandboxAccount(total_funds=0.0))
@@ -146,8 +150,9 @@ async def reset_sandbox_soft(db: AsyncSession = Depends(get_db)):
     all allocated funds (available cash becomes zero, ready to trade fresh).
     Strategy assignments and watchlist membership are also preserved.
     """
-    # Delete all trade history
+    # Delete all trade history and allocation movements (position state is reset)
     await db.execute(delete(SandboxTrade))
+    await db.execute(delete(SandboxAllocationEvent))
 
     # Reset per-position counters while keeping symbol / allocation / strategy
     positions_res = await db.execute(select(SandboxPosition))
@@ -162,14 +167,24 @@ async def reset_sandbox_soft(db: AsyncSession = Depends(get_db)):
         pos.engine_error = None
         pos.strategy_enabled = False
 
-    # Reset account funds to zero — clean slate
+    # Restore total_funds from the preserved fund-event log (deposits minus withdrawals).
+    # Trades are wiped but deposit history is kept, so total_funds = net deposits.
+    from app.models.sandbox import SandboxFundEvent
     account = await get_account(db)
-    account.total_funds = 0.0
+    fund_res = await db.execute(select(SandboxFundEvent))
+    fund_events = fund_res.scalars().all()
+    net_deposits = round(
+        sum(e.amount if e.event_type == "deposit" else -e.amount for e in fund_events), 4
+    )
+    account.total_funds = net_deposits
+    account.total_deposited = round(
+        sum(e.amount for e in fund_events if e.event_type == "deposit"), 4
+    )
 
     await db.commit()
     return {
         "status": "ok",
-        "message": "Portfolio counters and funds reset. Symbols and strategies preserved.",
+        "message": "Portfolio counters reset. Symbols, strategies, and deposit history preserved.",
         "positions_kept": len(positions),
-        "total_funds": 0.0,
+        "total_funds": net_deposits,
     }

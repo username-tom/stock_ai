@@ -169,12 +169,26 @@ export default function SandboxSidebar({
           </div>
         )}
         {showWithdraw && (
-          <div className="flex gap-2 mb-3" onClick={e => e.stopPropagation()}>
-            <input className="input flex-1 py-1.5 text-sm" type="number" min="1" placeholder="Amount $"
-              value={withdrawInput} onChange={e => setWithdrawInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && withdrawInput && withdrawMut.mutate(parseFloat(withdrawInput))} />
-            <button className="btn-secondary py-1.5 px-3 text-xs" disabled={!withdrawInput || withdrawMut.isPending}
-              onClick={() => withdrawMut.mutate(parseFloat(withdrawInput))}>Withdraw</button>
+          <div className="mb-3 space-y-1.5" onClick={e => e.stopPropagation()}>
+            <div className="flex gap-2">
+              <input className="input flex-1 py-1.5 text-sm" type="number" min="1" placeholder="Amount $"
+                value={withdrawInput} onChange={e => setWithdrawInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && withdrawInput) {
+                    const amt = parseFloat(withdrawInput)
+                    const avail = accountData?.available_funds ?? 0
+                    if (amt <= avail) withdrawMut.mutate(amt)
+                  }
+                }} />
+              <button className="btn-secondary py-1.5 px-3 text-xs"
+                disabled={!withdrawInput || withdrawMut.isPending || parseFloat(withdrawInput) > (accountData?.available_funds ?? 0)}
+                onClick={() => withdrawMut.mutate(parseFloat(withdrawInput))}>Withdraw</button>
+            </div>
+            {withdrawInput && parseFloat(withdrawInput) > (accountData?.available_funds ?? 0) && (
+              <div className="text-xs text-amber-400 px-1">
+                ⚠ Exceeds available funds ({fmtMoney(accountData?.available_funds ?? 0)}). Allocated funds cannot be withdrawn.
+              </div>
+            )}
           </div>
         )}
         {repairMsg && (

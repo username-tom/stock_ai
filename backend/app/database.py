@@ -57,6 +57,16 @@ async def _migrate(conn):
         "ALTER TABLE sandbox_positions ADD COLUMN pending_shares REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE sandbox_positions ADD COLUMN pending_avg_cost REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE sandbox_positions ADD COLUMN pending_since DATETIME",
+        # sandbox_allocation_events table (fund movement history between positions / pool)
+        """CREATE TABLE IF NOT EXISTS sandbox_allocation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type VARCHAR(20) NOT NULL,
+            from_symbol VARCHAR(20),
+            to_symbol VARCHAR(20),
+            amount REAL NOT NULL,
+            note TEXT,
+            created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
+        )""",
     ]
     for stmt in migrations:
         try:

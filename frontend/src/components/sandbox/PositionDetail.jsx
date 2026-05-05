@@ -2,7 +2,7 @@ import {
   TrashIcon, PencilSquareIcon, CheckIcon, XMarkIcon,
   ArrowUpIcon, ArrowDownIcon, BoltIcon, PlayIcon, StopCircleIcon,
   ClockIcon, SignalIcon, ExclamationTriangleIcon, ArrowTopRightOnSquareIcon,
-  BanknotesIcon,
+  BanknotesIcon, ArrowsRightLeftIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
@@ -13,6 +13,7 @@ import { fmt, fmtMoney, stratLabel } from './sandboxHelpers'
 import StrategySelector from './StrategySelector'
 import TradeRow from './TradeRow'
 import CandlestickChart from '../charts/CandlestickChart'
+import SymbolDetailPanel from '../dashboard/SymbolDetailPanel'
 
 export default function PositionDetail({
   selectedSymbol,
@@ -79,16 +80,20 @@ export default function PositionDetail({
     }
   }, [selectedPrice])
 
-  // Undeployed cash within this position's allocation
+  // Cash available within this position's own allocation (idle, not tied up in shares)
   const positionCashRemaining = selectedPos
     ? Math.max(0, selectedPos.allocated_funds - selectedPos.avg_cost * selectedPos.shares)
     : 0
 
-  // Fill quantity field with max shares buyable from available position cash
+  // Total buyable cash = position's own idle cash + account-level unallocated available funds
+  const accountAvailable = Math.max(0, accountData?.available_funds ?? 0)
+  const totalBuyableCash = positionCashRemaining + accountAvailable
+
+  // Fill quantity field with max shares buyable from all available cash
   function fillMaxShares() {
     const price = parseFloat(tradeForm.price) || selectedPrice
-    if (price > 0 && positionCashRemaining > 0) {
-      const maxShares = Math.floor((positionCashRemaining / price) * 10000) / 10000
+    if (price > 0 && totalBuyableCash > 0) {
+      const maxShares = Math.floor((totalBuyableCash / price) * 10000) / 10000
       setTradeForm(f => ({ ...f, quantity: maxShares.toFixed(4) }))
     }
   }
@@ -210,6 +215,13 @@ export default function PositionDetail({
           : <div className="flex items-center justify-center h-[200px] text-slate-500 text-sm">Loading chart…</div>
         }
       </div>
+
+      {/* Symbol Detail Panel */}
+      <SymbolDetailPanel
+        symbol={selectedSymbol}
+        quoteData={quotes[selectedSymbol] ?? null}
+        isLoading={false}
+      />
 
       {/* Strategy card */}
       <div className="card">
@@ -370,8 +382,8 @@ export default function PositionDetail({
             <div className="flex items-center gap-1">
               <input className="input w-28" type="number" min="0.0001" step="0.0001" placeholder="Shares"
                 value={tradeForm.quantity} onChange={e => setTradeForm(f => ({ ...f, quantity: e.target.value }))} required />
-              {tradeForm.side === 'BUY' && positionCashRemaining > 0 && (
-                <button type="button" title={`Max shares from ${fmtMoney(positionCashRemaining)} cash`}
+              {tradeForm.side === 'BUY' && totalBuyableCash > 0 && (
+                <button type="button" title={`Max shares from ${fmtMoney(totalBuyableCash)} (position: ${fmtMoney(positionCashRemaining)} + available: ${fmtMoney(accountAvailable)})`}
                   className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-800/40 rounded px-1.5 py-1 whitespace-nowrap"
                   onClick={fillMaxShares}>Max</button>
               )}
@@ -407,7 +419,7 @@ export default function PositionDetail({
           Activity Log — {selectedSymbol}
         </h3>
         {(() => {
-          // Merge trades + fund events into a single timeline
+          // Merge trades + fund events + allocation events into a single timeline
           const tradeEntries = trades.map(t => ({
             id: `t-${t.id}`,
             kind: 'trade',
@@ -418,16 +430,42 @@ export default function PositionDetail({
             pnl: t.pnl ?? null,
             total: t.total,
           }))
-          const fundEntries = fundEvents.map(e => ({
-            id: `f-${e.id}`,
-            kind: e.event_type,
-            date: e.created_at,
-            label: `${e.event_type === 'deposit' ? 'Deposit' : 'Withdrawal'} $${Math.abs(e.amount).toFixed(2)}`,
-            sub: e.note || null,
-            pnl: null,
-            total: e.amount,
-          }))
-          const all = [...tradeEntries, ...fundEntries].sort((a, b) =>
+          const fundEntries = fundEvents
+            .filter(e => !e.from_symbol && !e.to_symbol)
+            .map(e => ({
+              id: `f-${e.id}`,
+              kind: e.event_type,
+              date: e.created_at,
+              label: `${e.event_type === 'deposit' ? 'Deposit' : 'Withdrawal'} $${Math.abs(e.amount).toFixed(2)}`,
+              sub: e.note || null,
+              pnl: null,
+              total: e.amount,
+            }))
+          const allocEntries = fundEvents
+            .filter(e => e.from_symbol || e.to_symbol)
+            .map(e => {
+              let label = ''
+              if (e.event_type === 'allocate' || e.event_type === 'deploy') {
+                label = `Allocated $${e.amount.toFixed(2)} → ${e.to_symbol}`
+              } else if (e.event_type === 'deallocate') {
+                label = `Deallocated $${e.amount.toFixed(2)} ← ${e.from_symbol}`
+              } else if (e.event_type === 'reallocate') {
+                label = `Reallocated $${e.amount.toFixed(2)}: ${e.from_symbol} → ${e.to_symbol}`
+              } else {
+                label = `${e.event_type} $${e.amount.toFixed(2)}`
+              }
+              return {
+                id: `a-${e.id}`,
+                kind: 'allocation',
+                event_type: e.event_type,
+                date: e.created_at,
+                label,
+                sub: e.note || null,
+                pnl: null,
+                total: e.amount,
+              }
+            })
+          const all = [...tradeEntries, ...fundEntries, ...allocEntries].sort((a, b) =>
             new Date(b.date) - new Date(a.date)
           )
           if (all.length === 0) return (
@@ -442,6 +480,8 @@ export default function PositionDetail({
                       entry.side === 'BUY'
                         ? <ArrowUpIcon className="h-3.5 w-3.5 text-emerald-400" />
                         : <ArrowDownIcon className="h-3.5 w-3.5 text-red-400" />
+                    ) : entry.kind === 'allocation' ? (
+                      <ArrowsRightLeftIcon className="h-3.5 w-3.5 text-purple-400" />
                     ) : (
                       <BanknotesIcon className={`h-3.5 w-3.5 ${entry.kind === 'deposit' ? 'text-blue-400' : 'text-amber-400'}`} />
                     )}

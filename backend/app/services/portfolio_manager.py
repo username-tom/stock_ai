@@ -293,8 +293,8 @@ async def _do_transfer() -> None:
 
     # ── deploy unallocated account funds to target position ─────── #
     if _settings.get("deploy_available_funds") and account:
-        total_allocated = sum(p.allocated_funds for p in positions)
-        available = account.total_funds - total_allocated
+        from app.routers.sandbox_router._helpers import compute_available_cash
+        available = await compute_available_cash(None, account, positions)  # type: ignore[arg-type]
         deployable = math.floor(available * transfer_pct * 100) / 100
         if deployable > 0:
             target = _pick_deploy_target(positions, scores)
@@ -308,7 +308,17 @@ async def _do_transfer() -> None:
                     acct2 = acct_res2.scalar_one_or_none()
                     if pos and acct2:
                         pos.allocated_funds += deployable
-                        acct2.total_funds -= deployable
+                        # Do NOT touch total_funds — deploying to a position just
+                        # moves cash from the unallocated pool to the position.
+                        # Capital is preserved; available = total_funds - allocated - equity.
+                        from app.models.sandbox import SandboxAllocationEvent
+                        db.add(SandboxAllocationEvent(
+                            event_type="deploy",
+                            from_symbol=None,
+                            to_symbol=target.symbol,
+                            amount=round(deployable, 4),
+                            note=f"PM deploy [{_settings['deploy_target']}]",
+                        ))
                         await db.commit()
                         _state["last_transfer_at"] = datetime.now(timezone.utc)
                         sc = scores.get(target.symbol, {})
@@ -348,6 +358,14 @@ async def _do_transfer() -> None:
                     if movable > 0:
                         pos.allocated_funds -= movable
                         total_freed += movable
+                        from app.models.sandbox import SandboxAllocationEvent
+                        db.add(SandboxAllocationEvent(
+                            event_type="deallocate",
+                            from_symbol=pos.symbol,
+                            to_symbol=None,
+                            amount=round(movable, 4),
+                            note="PM: return idle cash to available pool",
+                        ))
                 await db.commit()
         if total_freed > 0:
             _state["last_transfer_at"] = datetime.now(timezone.utc)
@@ -374,6 +392,7 @@ async def _do_transfer() -> None:
 
         async with AsyncSessionLocal() as db:
             from sqlalchemy import select as sa_select
+            from app.models.sandbox import SandboxAllocationEvent
 
             for src_pos, amount in transfers_from:
                 res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == src_pos.id))
@@ -386,6 +405,19 @@ async def _do_transfer() -> None:
                 pos = res.scalar_one_or_none()
                 if pos:
                     pos.allocated_funds += per_bullish
+
+            # Log a single reallocate event per (source → destination) pair
+            for src_pos, amount in transfers_from:
+                for dst_pos in bullish_pos:
+                    share = math.floor((amount / len(bullish_pos)) * 100) / 100
+                    if share > 0:
+                        db.add(SandboxAllocationEvent(
+                            event_type="reallocate",
+                            from_symbol=src_pos.symbol,
+                            to_symbol=dst_pos.symbol,
+                            amount=round(share, 4),
+                            note="PM: bearish→bullish rebalance",
+                        ))
 
             await db.commit()
 
