@@ -51,8 +51,6 @@ _state: dict[str, Any] = {
     "running": False,
     "last_transfer_at": None,
     "last_score_at": None,
-    "transfers_today": 0,
-    "total_transferred": 0.0,
     "scores": {},          # { symbol: { score, classification, updated_at } }
     "last_activity": [],   # list of recent log entries (max 20)
 }
@@ -303,13 +301,15 @@ async def _do_transfer() -> None:
             if target:
                 async with AsyncSessionLocal() as db:
                     from sqlalchemy import select as sa_select
+                    from app.models.sandbox import SandboxAccount as _SandboxAccount
                     res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == target.id))
                     pos = res.scalar_one_or_none()
-                    if pos:
+                    acct_res2 = await db.execute(sa_select(_SandboxAccount).limit(1))
+                    acct2 = acct_res2.scalar_one_or_none()
+                    if pos and acct2:
                         pos.allocated_funds += deployable
+                        acct2.total_funds -= deployable
                         await db.commit()
-                        _state["total_transferred"] = round(_state["total_transferred"] + deployable, 2)
-                        _state["transfers_today"] += 1
                         _state["last_transfer_at"] = datetime.now(timezone.utc)
                         sc = scores.get(target.symbol, {})
                         score_str = f" (score {sc['score']:+.3f})" if sc.get("score") is not None else ""
@@ -350,8 +350,6 @@ async def _do_transfer() -> None:
                         total_freed += movable
                 await db.commit()
         if total_freed > 0:
-            _state["total_transferred"] = round(_state["total_transferred"] + total_freed, 2)
-            _state["transfers_today"] += 1
             _state["last_transfer_at"] = datetime.now(timezone.utc)
             _log_activity(f"Freed ${total_freed:.2f} idle cash from positions → available funds")
         return
@@ -391,8 +389,6 @@ async def _do_transfer() -> None:
 
             await db.commit()
 
-        _state["total_transferred"] = round(_state["total_transferred"] + total_to_move, 2)
-        _state["transfers_today"] += 1
         _state["last_transfer_at"] = datetime.now(timezone.utc)
 
         from_desc = ", ".join(f"{p.symbol} (−${a:.2f})" for p, a in transfers_from)

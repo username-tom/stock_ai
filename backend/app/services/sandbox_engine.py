@@ -369,15 +369,6 @@ async def _settle_pending_shares() -> None:
                 )
             position.shares = new_total_shares
 
-            # Also update the legacy shares_open / avg_cost_open tracking
-            new_open = position.shares_open + pending_qty
-            if new_open > 0:
-                position.avg_cost_open = (
-                    (position.avg_cost_open * position.shares_open + pending_cost * pending_qty)
-                    / new_open
-                )
-            position.shares_open = new_open
-
             # Clear pending state
             position.pending_shares = 0.0
             position.pending_avg_cost = 0.0
