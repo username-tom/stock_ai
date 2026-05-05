@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, useCallback, Component } from 'react'
 
-/* ?? Error boundary — any render crash logs to console ??????????? */
+/* ?? Error boundary ï¿½ any render crash logs to console ??????????? */
 class ChartErrorBoundary extends Component {
   constructor(props) {
     super(props)
@@ -16,7 +16,7 @@ class ChartErrorBoundary extends Component {
     if (this.state.error) {
       return (
         <div className="flex items-center justify-center h-40 text-red-400 text-xs p-4 text-center">
-          Chart failed to render — see browser console for details.
+          Chart failed to render ï¿½ see browser console for details.
         </div>
       )
     }
@@ -26,7 +26,7 @@ class ChartErrorBoundary extends Component {
 
 /* ?? Helpers ????????????????????????????????????????????????????? */
 const timeOf = (s) => s?.slice(6) ?? ''                        // "MM/DD HH:MM" ? "HH:MM"
-const fmt2   = (n) => (n != null ? n.toFixed(2) : '—')
+const fmt2   = (n) => (n != null ? n.toFixed(2) : 'ï¿½')
 const fmtVol = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : `${(n / 1e3).toFixed(0)}K`
 
 /* ?? Floating tooltip div ???????????????????????????????????????? */
@@ -70,7 +70,7 @@ function TooltipBox({ bar, x, y, chartWidth }) {
   )
 }
 
-/* ?? Pure-SVG chart — zero recharts, zero invariant risk ????????? */
+/* ?? Pure-SVG chart ï¿½ zero recharts, zero invariant risk ????????? */
 function CandlestickInner({ data = [], prevClose, height = 260 }) {
   const containerRef = useRef(null)
   const [width, setWidth]   = useState(800)
@@ -133,6 +133,7 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
 
   /* reference positions */
   const mktOpenIdx  = bars.findIndex(d => timeOf(d.date) >= '09:30')
+  const mktCloseIdx  = bars.findIndex(d => timeOf(d.date) >= '16:00')
   const prevCloseY  = prevClose != null ? pToY(prevClose) : null
 
   /* axis ticks */
@@ -194,6 +195,17 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
           </g>
         )}
 
+        {/* Market-close vertical line */}
+        {mktCloseIdx >= 0 && (
+          <g>
+            <line
+              x1={xOf(mktCloseIdx)} y1={PAD_TOP} x2={xOf(mktCloseIdx)} y2={PAD_TOP + plotH}
+              stroke="#f59e0b" strokeWidth={1} strokeDasharray="3 3"
+            />
+            <text x={xOf(mktCloseIdx) + 3} y={PAD_TOP + 10} fill="#f59e0b" fontSize={9}>Close</text>
+          </g>
+        )}
+
         {/* Market-open vertical line */}
         {mktOpenIdx >= 0 && (
           <g>
@@ -211,7 +223,7 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
           const x = xOf(i)
           const h = vToH(d.volume)
           return (
-            <rect key={i} x={x - bw / 2} y={PAD_TOP + plotH - h} width={bw} height={h} fill="#475569" opacity={0.25} />
+            <rect key={i} x={x - bw / 2} y={PAD_TOP + plotH - h} width={bw} height={h} fill="#426392" opacity={0.5} />
           )
         })}
 
