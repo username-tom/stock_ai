@@ -128,7 +128,7 @@ export default function QuoteCard({ data, isLoading, symbol, isActive }) {
       {/* Left: symbol + sparkline row, H/L row, company name row */}
       <div className="flex-1 min-w-0">
         {/* Row 1: symbol ticker + sparkline side by side */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-semibold text-slate-200 font-mono leading-tight flex-shrink-0">{data.symbol}</span>
           <div className="flex-shrink-0">
             <MiniSparkline symbol={data.symbol} positive={positive} />

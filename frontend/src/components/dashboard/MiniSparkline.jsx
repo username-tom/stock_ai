@@ -22,7 +22,7 @@ export default function MiniSparkline({ symbol, positive }) {
   // Strip pre-market bars — dates are formatted "MM/DD HH:MM", keep only >= 09:30
   const regular = raw.filter(d => {
     const timePart = d.date?.slice(-5) // "HH:MM"
-    return timePart >= '09:30'
+    return '16:00' >= timePart && timePart >= '09:30'
   })
   const prices = regular.map(d => d.close ?? d.open).filter(v => v != null && v > 0)
   if (prices.length < 2) {
