@@ -73,14 +73,24 @@ function TooltipBox({ bar, x, y, chartWidth }) {
 /* ?? Pure-SVG chart � zero recharts, zero invariant risk ????????? */
 function CandlestickInner({ data = [], prevClose, height = 260 }) {
   const containerRef = useRef(null)
-  const [width, setWidth]   = useState(800)
+  const [width, setWidth] = useState(0)
   const [hovered, setHovered] = useState(null)
 
   useEffect(() => {
-    if (!containerRef.current) return
+    const updateWidth = () => {
+      if (containerRef.current) {
+        setWidth(containerRef.current.offsetWidth)
+      }
+    }
+    updateWidth();
+    if (!containerRef.current) return;
     const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width))
     ro.observe(containerRef.current)
-    return () => ro.disconnect()
+    window.addEventListener('resize', updateWidth)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', updateWidth)
+    }
   }, [])
 
   /* layout */
@@ -167,7 +177,7 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
       onMouseMove={handleMouseMove}
       onMouseLeave={() => setHovered(null)}
     >
-      <svg width={width} height={height} style={{ display: 'block', overflow: 'visible' }}>
+      <svg width={width} height={height} style={{ display: 'block', overflow: 'visible', width: '100%' }}>
 
         {/* Y grid + right-axis labels */}
         {yTicks.map((p, i) => {
