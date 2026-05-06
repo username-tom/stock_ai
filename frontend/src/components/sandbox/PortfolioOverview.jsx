@@ -1,5 +1,5 @@
 import {
-  PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
+  Cell, Tooltip, ResponsiveContainer, Treemap,
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
 } from 'recharts'
 import {
@@ -11,7 +11,6 @@ import { getSandboxFundEvents } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
-import PieTooltipContent from './PieTooltipContent'
 import PortfolioManagerPanel from './PortfolioManagerPanel'
 
 export default function PortfolioOverview({
@@ -41,6 +40,10 @@ export default function PortfolioOverview({
   }, 0)
   const totalDeposited = accountData?.total_deposited ?? netDepositedFromEvents
   const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : 0
+  const marketShareData = pieData.map((entry, i) => ({
+    ...entry,
+    fill: PIE_COLORS[i % PIE_COLORS.length],
+  }))
 
   return (
     <div className="space-y-6">
@@ -95,7 +98,7 @@ export default function PortfolioOverview({
               <TableCellsIcon className="h-4 w-4 text-slate-400" />
               <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Position Breakdown</h2>
             </div>
-            <div className="overflow-x-auto">
+            <div className="max-h-100 overflow-y-auto pr-1">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-slate-500 border-b border-dark-600">
@@ -197,38 +200,45 @@ export default function PortfolioOverview({
                 <ChartPieIcon className="h-4 w-4 text-slate-400" />
                 <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Allocation by Market Value</h2>
               </div>
-              <div style={{ height: 320 + Math.ceil(pieData.length / 2) * 24 }}>
+              <div className="h-80">
                 <ResponsiveContainer width="100%" height="100%">
-                  <PieChart margin={{ top: 20, right: 20, bottom: 0, left: 20 }}>
-                    <Pie
-                      data={pieData}
-                      cx="50%" cy="42%"
-                      innerRadius={65} outerRadius={105}
-                      paddingAngle={2}
-                      dataKey="market_value"
-                      label={false}
-                      labelLine={false}
-                    >
-                      {pieData.map((e, i) => (
-                        <Cell key={e.symbol} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip content={<PieTooltipContent />} />
-                    <Legend
-                      iconType="circle"
-                      iconSize={9}
-                      layout="horizontal"
-                      verticalAlign="bottom"
-                      align="center"
-                      wrapperStyle={{ fontSize: 11, paddingTop: 16 }}
-                      formatter={(value, entry) => (
-                        <span style={{ color: '#cbd5e1' }}>
-                          <span style={{ color: entry.color, fontWeight: 700 }}>{entry.payload.symbol}</span>
-                          {' '}<span style={{ color: '#64748b' }}>{entry.payload.pct}%</span>
-                        </span>
-                      )}
+                  <Treemap
+                    data={marketShareData}
+                    dataKey="market_value"
+                    nameKey="symbol"
+                    stroke="#0f172a"
+                    fill="#334155"
+                    content={({ x, y, width, height, index = 0, depth = 0, name, payload }) => {
+                      if (depth === 0 || width <= 0 || height <= 0) return null
+                      const bg = payload?.fill ?? PIE_COLORS[index % PIE_COLORS.length]
+                      const symbol = payload?.symbol ?? name ?? ''
+                      const pct = payload?.pct
+                      const showSymbol = width > 68 && height > 28
+                      const showPct = width > 100 && height > 48
+                      return (
+                        <g>
+                          <rect x={x} y={y} width={width} height={height} style={{ fill: bg, stroke: '#0f172a', strokeWidth: 1 }} />
+                          {showSymbol && (
+                            <text x={x + 8} y={y + 16} fill="#f8fafc" fontSize={11} fontWeight={700}>
+                              {symbol}
+                            </text>
+                          )}
+                          {showPct && pct != null && (
+                            <text x={x + 8} y={y + 32} fill="#e2e8f0" fontSize={10}>
+                              {pct}%
+                            </text>
+                          )}
+                        </g>
+                      )
+                    }}
+                  >
+                    <Tooltip
+                      contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
+                      labelStyle={{ color: '#94a3b8' }}
+                      itemStyle={{ color: '#cbd5e1' }}
+                      formatter={(value, _name, item) => [fmtMoney(Number(value ?? 0)), `${item?.payload?.symbol ?? item?.name ?? 'Position'} market value`]}
                     />
-                  </PieChart>
+                  </Treemap>
                 </ResponsiveContainer>
               </div>
             </div>
@@ -252,13 +262,13 @@ export default function PortfolioOverview({
                       <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
                       <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
                         tickFormatter={v => `$${v >= 0 ? '+' : ''}${v.toFixed(0)}`} />
-                      <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }} tickLine={false} axisLine={false} width={46} />
+                      <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }} tickLine={false} axisLine={false} />
                       <Tooltip
                         contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
                         labelStyle={{ color: '#94a3b8' }}
                         formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Unrealised P&L']}
                       />
-                      <Bar dataKey="value" name="Unrealised P&L" radius={[0, 3, 3, 0]}>
+                      <Bar dataKey="value" name="Unrealised P&L" radius={[0, 3, 3, 0]} height="100%">
                         {unrealData.map(entry => (
                           <Cell key={entry.symbol} fill={entry.value >= 0 ? '#10b981' : '#ef4444'} />
                         ))}
@@ -344,7 +354,7 @@ export default function PortfolioOverview({
                         tickFormatter={v => `$${v.toFixed(0)}`} />
                       <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }} tickLine={false} axisLine={false} width={46} />
                       <Tooltip
-                        contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
+                        contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11, color: '#94a3b8' }}
                         formatter={(v) => [`$${v.toFixed(2)}`, 'Realised P&L']}
                       />
                       <Bar dataKey="realized_pnl" name="Realised P&L" radius={[0, 3, 3, 0]}>
@@ -362,7 +372,13 @@ export default function PortfolioOverview({
               const wl = analytics.win_loss
               const total = wl.wins + wl.losses + wl.breakeven
               const winRate = ((wl.wins / total) * 100).toFixed(1)
-              const donutData = [
+              const winLossData = [{
+                bucket: 'Trades',
+                Wins: wl.wins,
+                Losses: wl.losses,
+                Breakeven: wl.breakeven,
+              }]
+              const segments = [
                 { name: 'Wins', value: wl.wins, color: '#10b981' },
                 { name: 'Losses', value: wl.losses, color: '#ef4444' },
                 ...(wl.breakeven > 0 ? [{ name: 'Breakeven', value: wl.breakeven, color: '#64748b' }] : []),
@@ -371,18 +387,24 @@ export default function PortfolioOverview({
                 <div className="card flex flex-col">
                   <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Win / Loss Ratio</div>
                   <div className="flex-1 flex items-center gap-4">
-                    <div className="h-40 flex-1">
+                    <div className="h-28 flex-1">
                       <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie data={donutData} cx="50%" cy="50%" innerRadius={44} outerRadius={68}
-                            paddingAngle={3} dataKey="value">
-                            {donutData.map((d) => <Cell key={d.name} fill={d.color} />)}
-                          </Pie>
+                        <BarChart data={winLossData} layout="vertical" margin={{ top: 6, right: 8, left: 8, bottom: 6 }}>
+                          <XAxis type="number" hide domain={[0, total]} />
+                          <YAxis type="category" dataKey="bucket" hide />
                           <Tooltip
                             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
-                            formatter={(v, name) => [v, name]}
+                            labelStyle={{ color: '#94a3b8' }}
+                            itemStyle={{ color: '#cbd5e1' }}
+                            formatter={(v, name) => {
+                              const pct = total > 0 ? ((Number(v ?? 0) / total) * 100).toFixed(1) : '0.0'
+                              return [`${v} (${pct}%)`, name]
+                            }}
                           />
-                        </PieChart>
+                          <Bar dataKey="Wins" stackId="wl" fill="#10b981" radius={[4, 0, 0, 4]} />
+                          <Bar dataKey="Losses" stackId="wl" fill="#ef4444" radius={[0, 0, 0, 0]} />
+                          {wl.breakeven > 0 && <Bar dataKey="Breakeven" stackId="wl" fill="#64748b" radius={[0, 4, 4, 0]} />}
+                        </BarChart>
                       </ResponsiveContainer>
                     </div>
                     <div className="space-y-2 text-xs shrink-0">
@@ -390,7 +412,7 @@ export default function PortfolioOverview({
                         <div className="text-slate-500">Win Rate</div>
                         <div className="text-xl font-bold text-emerald-400">{winRate}%</div>
                       </div>
-                      {donutData.map(d => (
+                      {segments.map(d => (
                         <div key={d.name} className="flex items-center gap-2">
                           <span className="inline-block w-2 h-2 rounded-full" style={{ background: d.color }} />
                           <span className="text-slate-400">{d.name}</span>
@@ -426,6 +448,8 @@ export default function PortfolioOverview({
             side: t.side,
             date: t.created_at,
             symbol: t.symbol,
+            shares: t.quantity ?? null,
+            price: t.price ?? null,
             label: `${t.side} ${(t.quantity ?? 0).toFixed(3)} ${t.symbol} @ $${(t.price ?? 0).toFixed(2)}`,
             total: (t.quantity ?? 0) * (t.price ?? 0),
             pnl: t.pnl ?? null,
@@ -437,6 +461,8 @@ export default function PortfolioOverview({
             side: null,
             date: e.created_at,
             symbol: null,
+            shares: null,
+            price: null,
             label: `${e.event_type === 'deposit' ? 'Deposit' : 'Withdrawal'} $${Math.abs(e.amount).toFixed(2)}`,
             total: e.amount,
             pnl: null,
@@ -447,13 +473,15 @@ export default function PortfolioOverview({
             <div className="text-center text-slate-600 text-sm py-8">No activity yet</div>
           )
           return (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto overflow-y-auto max-h-96 pr-1">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="text-slate-500 border-b border-dark-600">
                     <th className="text-left pb-2 font-medium">Time</th>
                     <th className="text-left pb-2 font-medium">Type</th>
                     <th className="text-left pb-2 font-medium">Details</th>
+                    <th className="text-right pb-2 font-medium">Shares</th>
+                    <th className="text-right pb-2 font-medium">Price</th>
                     <th className="text-right pb-2 font-medium">Amount</th>
                     <th className="text-right pb-2 font-medium">P&amp;L</th>
                     <th className="text-left pb-2 font-medium">Note</th>
@@ -491,6 +519,12 @@ export default function PortfolioOverview({
                           ) : (
                             <span className="text-slate-400">{entry.label}</span>
                           )}
+                        </td>
+                        <td className="py-1.5 text-right font-mono text-slate-300">
+                          {entry.shares != null ? entry.shares.toFixed(3) : '—'}
+                        </td>
+                        <td className="py-1.5 text-right font-mono text-slate-300">
+                          {entry.price != null ? `$${entry.price.toFixed(2)}` : '—'}
                         </td>
                         <td className="py-1.5 text-right font-mono text-slate-200">${entry.total.toFixed(2)}</td>
                         <td className="py-1.5 text-right font-mono">
