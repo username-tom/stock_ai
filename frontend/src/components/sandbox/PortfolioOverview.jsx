@@ -34,6 +34,13 @@ export default function PortfolioOverview({
     refetchInterval: appSettings.portfolio_detail_ms,
   })
   const fundEvents = fundEventsData?.events ?? []
+  const netDepositedFromEvents = fundEvents.reduce((sum, event) => {
+    if (event.event_type === 'deposit') return sum + (event.amount ?? 0)
+    if (event.event_type === 'withdrawal') return sum - (event.amount ?? 0)
+    return sum
+  }, 0)
+  const totalDeposited = accountData?.total_deposited ?? netDepositedFromEvents
+  const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : 0
 
   return (
     <div className="space-y-6">
@@ -48,11 +55,16 @@ export default function PortfolioOverview({
       </div>
 
       {/* Top stat cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Total Funds</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(accountData?.total_funds)}</div>
           <div className="text-xs text-slate-500 mt-0.5">Available: <span className="text-emerald-400">{fmtMoney(accountData?.available_funds)}</span></div>
+        </div>
+        <div className="card">
+          <div className="text-xs text-slate-500 mb-1">Total Deposited</div>
+          <div className="text-xl font-bold text-slate-100">{fmtMoney(totalDeposited)}</div>
+          <div className="text-xs text-slate-500 mt-0.5">Net deposits less withdrawals</div>
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Portfolio Equity</div>
@@ -69,60 +81,16 @@ export default function PortfolioOverview({
         <div className={`card ${totalRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
           <div className="text-xs text-slate-500 mb-1">Realised P&amp;L</div>
           <div className={`text-xl font-bold ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">All closed trades</div>
+          <div className="text-xs text-slate-500 mt-0.5">{realizedPnlPct.toFixed(2)}% of deposited funds</div>
         </div>
       </div>
 
       {/* Portfolio Manager */}
       <PortfolioManagerPanel />
 
-      {/* Pie chart + breakdown table */}
+      {/* Per-position breakdown table */}
       {pieData.length > 0 ? (
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          {/* Pie */}
-          <div className="card lg:col-span-2">
-            <div className="flex items-center gap-2 mb-4">
-              <ChartPieIcon className="h-4 w-4 text-slate-400" />
-              <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Allocation by Market Value</h2>
-            </div>
-            <div style={{ height: 320 + Math.ceil(pieData.length / 2) * 24 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart margin={{ top: 20, right: 20, bottom: 0, left: 20 }}>
-                  <Pie
-                    data={pieData}
-                    cx="50%" cy="42%"
-                    innerRadius={65} outerRadius={105}
-                    paddingAngle={2}
-                    dataKey="market_value"
-                    label={false}
-                    labelLine={false}
-                  >
-                    {pieData.map((e, i) => (
-                      <Cell key={e.symbol} fill={PIE_COLORS[i % PIE_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip content={<PieTooltipContent />} />
-                  <Legend
-                    iconType="circle"
-                    iconSize={9}
-                    layout="horizontal"
-                    verticalAlign="bottom"
-                    align="center"
-                    wrapperStyle={{ fontSize: 11, paddingTop: 16 }}
-                    formatter={(value, entry) => (
-                      <span style={{ color: '#cbd5e1' }}>
-                        <span style={{ color: entry.color, fontWeight: 700 }}>{entry.payload.symbol}</span>
-                        {' '}<span style={{ color: '#64748b' }}>{entry.payload.pct}%</span>
-                      </span>
-                    )}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Per-position breakdown table */}
-          <div className="card lg:col-span-3">
+        <div className="card">
             <div className="flex items-center gap-2 mb-4">
               <TableCellsIcon className="h-4 w-4 text-slate-400" />
               <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Position Breakdown</h2>
@@ -133,11 +101,15 @@ export default function PortfolioOverview({
                   <tr className="text-slate-500 border-b border-dark-600">
                     <th className="text-left pb-2 font-medium">Symbol</th>
                     <th className="text-right pb-2 font-medium">Shares</th>
+                    <th className="text-right pb-2 font-medium">Avg Price</th>
+                    <th className="text-right pb-2 font-medium">Current</th>
                     <th className="text-right pb-2 font-medium">Mkt Value</th>
                     <th className="text-right pb-2 font-medium">Cash</th>
                     <th className="text-right pb-2 font-medium">Alloc</th>
                     <th className="text-right pb-2 font-medium">Unrealised</th>
+                    <th className="text-right pb-2 font-medium">Unrealised %</th>
                     <th className="text-right pb-2 font-medium">Realised</th>
+                    <th className="text-right pb-2 font-medium">Realised %</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-dark-700">
@@ -145,8 +117,12 @@ export default function PortfolioOverview({
                     const q = quotes[pos.symbol]
                     const mp = q?.last_price ?? pos.avg_cost
                     const mv = mp * pos.shares
+                    const costBasis = pos.avg_cost * pos.shares
                     const cashRemaining = Math.max(0, pos.allocated_funds - pos.avg_cost * pos.shares)
-                    const unreal = mv - pos.avg_cost * pos.shares
+                    const unreal = mv - costBasis
+                    const unrealPct = costBasis > 0 ? (unreal / costBasis) * 100 : null
+                    const realizedPctBase = pos.allocated_funds > 0 ? pos.allocated_funds : (costBasis > 0 ? costBasis : 0)
+                    const realizedPct = realizedPctBase > 0 ? ((pos.realized_pnl ?? 0) / realizedPctBase) * 100 : null
                     const pd = pieData.find(d => d.symbol === pos.symbol)
                     return (
                       <tr
@@ -162,14 +138,22 @@ export default function PortfolioOverview({
                           {q?.company_name && <div className="text-slate-600 truncate max-w-[100px] pl-4">{q.company_name}</div>}
                         </td>
                         <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? pos.shares.toFixed(3) : '—'}</td>
+                        <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? fmtMoney(pos.avg_cost) : '—'}</td>
+                        <td className="text-right text-slate-200 font-mono">{pos.shares > 0 ? fmtMoney(mp) : '—'}</td>
                         <td className="text-right text-slate-200 font-mono">{pos.shares > 0 ? fmtMoney(mv) : '—'}</td>
                         <td className="text-right text-blue-300 font-mono">{cashRemaining > 0 ? fmtMoney(cashRemaining) : '—'}</td>
                         <td className="text-right text-slate-400">{pd ? `${pd.pct}%` : '—'}</td>
                         <td className={`text-right font-semibold font-mono ${unreal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                           {pos.shares > 0 ? fmt(unreal) : '—'}
                         </td>
+                        <td className={`text-right font-semibold font-mono ${unrealPct == null ? 'text-slate-600' : unrealPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {unrealPct == null ? '—' : `${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%`}
+                        </td>
                         <td className={`text-right font-semibold font-mono ${pos.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                           {fmt(pos.realized_pnl)}
+                        </td>
+                        <td className={`text-right font-semibold font-mono ${realizedPct == null ? 'text-slate-600' : realizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {realizedPct == null ? '—' : `${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%`}
                         </td>
                       </tr>
                     )
@@ -179,16 +163,23 @@ export default function PortfolioOverview({
                   <tr className="border-t border-dark-500 text-slate-400 font-semibold">
                     <td className="pt-2">Total</td>
                     <td />
+                    <td />
+                    <td />
                     <td className="text-right pt-2 font-mono text-slate-200">{fmtMoney(totalEquity)}</td>
                     <td />
                     <td className="text-right pt-2">100%</td>
                     <td className={`text-right pt-2 font-mono ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalUnrealizedPnl)}</td>
+                    <td className={`text-right pt-2 font-mono ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {totalEquity > 0 ? `${totalUnrealizedPnl >= 0 ? '+' : ''}${((totalUnrealizedPnl / totalEquity) * 100).toFixed(2)}%` : '—'}
+                    </td>
                     <td className={`text-right pt-2 font-mono ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</td>
+                    <td className={`text-right pt-2 font-mono ${realizedPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {totalDeposited > 0 ? `${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%` : '—'}
+                    </td>
                   </tr>
                 </tfoot>
               </table>
             </div>
-          </div>
         </div>
       ) : (
         <div className="flex flex-col items-center justify-center h-48 text-slate-600 text-sm gap-2">
@@ -197,42 +188,89 @@ export default function PortfolioOverview({
         </div>
       )}
 
-      {/* Unrealised P&L by position */}
-      {positions.some(p => p.shares > 0) && (() => {
-        const unrealData = positions
-          .filter(p => p.shares > 0)
-          .map(p => {
-            const mp = quotes[p.symbol]?.last_price ?? p.avg_cost
-            const unreal = (mp - p.avg_cost) * p.shares
-            return { symbol: p.symbol, value: parseFloat(unreal.toFixed(2)) }
-          })
-          .sort((a, b) => b.value - a.value)
-        return (
-          <div className="card">
-            <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Unrealised Gain / Loss by Position</div>
-            <div style={{ height: Math.max(160, unrealData.length * 40 + 24) }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={unrealData} layout="vertical" margin={{ top: 0, right: 24, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
-                  <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
-                    tickFormatter={v => `$${v >= 0 ? '+' : ''}${v.toFixed(0)}`} />
-                  <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }} tickLine={false} axisLine={false} width={46} />
-                  <Tooltip
-                    contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
-                    labelStyle={{ color: '#94a3b8' }}
-                    formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Unrealised P&L']}
-                  />
-                  <Bar dataKey="value" name="Unrealised P&L" radius={[0, 3, 3, 0]}>
-                    {unrealData.map(entry => (
-                      <Cell key={entry.symbol} fill={entry.value >= 0 ? '#10b981' : '#ef4444'} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+      {/* Allocation + Unrealised row */}
+      {(pieData.length > 0 || positions.some(p => p.shares > 0)) && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {pieData.length > 0 && (
+            <div className="card">
+              <div className="flex items-center gap-2 mb-4">
+                <ChartPieIcon className="h-4 w-4 text-slate-400" />
+                <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Allocation by Market Value</h2>
+              </div>
+              <div style={{ height: 320 + Math.ceil(pieData.length / 2) * 24 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart margin={{ top: 20, right: 20, bottom: 0, left: 20 }}>
+                    <Pie
+                      data={pieData}
+                      cx="50%" cy="42%"
+                      innerRadius={65} outerRadius={105}
+                      paddingAngle={2}
+                      dataKey="market_value"
+                      label={false}
+                      labelLine={false}
+                    >
+                      {pieData.map((e, i) => (
+                        <Cell key={e.symbol} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip content={<PieTooltipContent />} />
+                    <Legend
+                      iconType="circle"
+                      iconSize={9}
+                      layout="horizontal"
+                      verticalAlign="bottom"
+                      align="center"
+                      wrapperStyle={{ fontSize: 11, paddingTop: 16 }}
+                      formatter={(value, entry) => (
+                        <span style={{ color: '#cbd5e1' }}>
+                          <span style={{ color: entry.color, fontWeight: 700 }}>{entry.payload.symbol}</span>
+                          {' '}<span style={{ color: '#64748b' }}>{entry.payload.pct}%</span>
+                        </span>
+                      )}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-          </div>
-        )
-      })()}
+          )}
+
+          {positions.some(p => p.shares > 0) && (() => {
+            const unrealData = positions
+              .filter(p => p.shares > 0)
+              .map(p => {
+                const mp = quotes[p.symbol]?.last_price ?? p.avg_cost
+                const unreal = (mp - p.avg_cost) * p.shares
+                return { symbol: p.symbol, value: parseFloat(unreal.toFixed(2)) }
+              })
+              .sort((a, b) => b.value - a.value)
+            return (
+              <div className="card">
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Unrealised Gain / Loss by Position</div>
+                <div style={{ height: Math.max(160, unrealData.length * 40 + 24) }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={unrealData} layout="vertical" margin={{ top: 0, right: 24, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
+                      <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
+                        tickFormatter={v => `$${v >= 0 ? '+' : ''}${v.toFixed(0)}`} />
+                      <YAxis type="category" dataKey="symbol" tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }} tickLine={false} axisLine={false} width={46} />
+                      <Tooltip
+                        contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
+                        labelStyle={{ color: '#94a3b8' }}
+                        formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Unrealised P&L']}
+                      />
+                      <Bar dataKey="value" name="Unrealised P&L" radius={[0, 3, 3, 0]}>
+                        {unrealData.map(entry => (
+                          <Cell key={entry.symbol} fill={entry.value >= 0 ? '#10b981' : '#ef4444'} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )
+          })()}
+        </div>
+      )}
 
       {/* Analytics Charts */}
       {analytics && analytics.total_trades > 0 && (
