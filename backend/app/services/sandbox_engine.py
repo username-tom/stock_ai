@@ -459,6 +459,7 @@ async def _settle_pending_shares() -> None:
                     / new_total_shares
                 )
             position.shares = new_total_shares
+            position.total_invested += pending_cost * pending_qty
 
             # Clear pending state
             position.pending_shares = 0.0

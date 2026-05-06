@@ -69,6 +69,7 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
         pos.avg_cost = (pos.avg_cost * pos.shares + total) / new_shares
         pos.shares = new_shares
         pos.allocated_funds -= total
+        pos.total_invested += total
         # Note: total_funds is unchanged — cash is now equity (shares × avg_cost)
     elif side == "SELL":
         if pos.shares < req.quantity:

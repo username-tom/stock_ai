@@ -32,6 +32,7 @@ class SandboxPosition(Base):
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     engine_error = Column(Text, nullable=True)
     realized_pnl = Column(Float, default=0.0)
+    total_invested = Column(Float, default=0.0)    # cumulative cost of all BUY fills
     is_on_watchlist = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

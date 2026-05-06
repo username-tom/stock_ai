@@ -124,8 +124,7 @@ export default function PortfolioOverview({
                     const cashRemaining = Math.max(0, pos.allocated_funds - pos.avg_cost * pos.shares)
                     const unreal = mv - costBasis
                     const unrealPct = costBasis > 0 ? (unreal / costBasis) * 100 : null
-                    const realizedPctBase = pos.allocated_funds > 0 ? pos.allocated_funds : (costBasis > 0 ? costBasis : 0)
-                    const realizedPct = realizedPctBase > 0 ? ((pos.realized_pnl ?? 0) / realizedPctBase) * 100 : null
+                    const realizedPct = pos.total_invested > 0.01 ? ((pos.realized_pnl ?? 0) / pos.total_invested) * 100 : null
                     const pd = pieData.find(d => d.symbol === pos.symbol)
                     return (
                       <tr

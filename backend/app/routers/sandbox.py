@@ -45,6 +45,7 @@ def _position_dict(p: SandboxPosition, market_price: float | None = None) -> dic
         "last_run_at": p.last_run_at.isoformat() if p.last_run_at else None,
         "engine_error": p.engine_error,
         "realized_pnl": p.realized_pnl,
+        "total_invested": p.total_invested,
         "unrealized_pnl": round(unrealised_pnl, 4),
         "market_value": round(market_val, 4),
         "is_on_watchlist": p.is_on_watchlist,
@@ -219,6 +220,7 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
         pos.avg_cost = (pos.avg_cost * pos.shares + total) / new_shares
         pos.shares = new_shares
         pos.allocated_funds -= min(total, pos.allocated_funds)  # Only deduct up to allocated funds
+        pos.total_invested += total
 
     elif side == "SELL":
         if pos.shares < req.quantity:

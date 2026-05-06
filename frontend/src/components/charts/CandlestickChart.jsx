@@ -29,6 +29,27 @@ const timeOf = (s) => s?.slice(6) ?? ''                        // "MM/DD HH:MM" 
 const fmt2   = (n) => (n != null ? n.toFixed(2) : '�')
 const fmtVol = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : `${(n / 1e3).toFixed(0)}K`
 
+function shouldHidePremarket() {
+  const now = new Date()
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  }).formatToParts(now)
+
+  const day = parts.find((p) => p.type === 'weekday')?.value
+  if (day === 'Sat' || day === 'Sun') return false
+
+  const hour = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10)
+  const minute = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10)
+  const mins = hour * 60 + minute
+
+  // Hide pre-market data starting one hour after regular open (10:30 ET).
+  return mins >= 10 * 60 + 30
+}
+
 /* ?? Floating tooltip div ???????????????????????????????????????? */
 function TooltipBox({ bar, x, y, chartWidth }) {
   if (!bar) return null
@@ -102,9 +123,11 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
   const plotW = width  - PAD_LEFT - PAD_RIGHT
   const plotH = height - PAD_TOP  - PAD_BOTTOM
 
-  /* filter: 07:30 ET+ and full OHLC */
+  const hidePremarket = shouldHidePremarket()
+  /* filter: hide pre-market after 10:30 ET and keep full OHLC */
+  const minTime = hidePremarket ? '09:30' : '07:30'
   const bars = data.filter(d =>
-    timeOf(d.date) >= '07:30' &&
+    timeOf(d.date) >= minTime &&
     d.open != null && d.high != null && d.low != null && d.close != null
   )
 
@@ -216,8 +239,8 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
           </g>
         )}
 
-        {/* Market-open vertical line */}
-        {mktOpenIdx >= 0 && (
+        {/* Market-open vertical line (hidden after 10:30 ET) */}
+        {!hidePremarket && mktOpenIdx >= 0 && (
           <g>
             <line
               x1={xOf(mktOpenIdx)} y1={PAD_TOP} x2={xOf(mktOpenIdx)} y2={PAD_TOP + plotH}

@@ -68,6 +68,8 @@ async def _migrate(conn):
             note TEXT,
             created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%f', 'now'))
         )""",
+        # sandbox_positions.total_invested (cumulative cost of all BUY fills for realized % calc)
+        "ALTER TABLE sandbox_positions ADD COLUMN total_invested REAL NOT NULL DEFAULT 0.0",
     ]
     for stmt in migrations:
         try:
