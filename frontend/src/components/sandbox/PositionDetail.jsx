@@ -172,7 +172,7 @@ export default function PositionDetail({
             </button>
           </div>
           {/* Summary cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mt-4">
             <div className="card">
           <div className="text-xs text-slate-500 mb-1">Allocated Funds</div>
           {editingAlloc ? (
@@ -200,7 +200,6 @@ export default function PositionDetail({
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Shares Held</div>
           <div className="text-xl font-bold text-slate-100">{selectedPos.shares > 0 ? selectedPos.shares.toFixed(4) : '—'}</div>
-          {selectedPos.shares > 0 && <div className="text-xs text-slate-500 mt-0.5">Avg ${selectedPos.avg_cost?.toFixed(2)}</div>}
           {selectedPos.pending_shares > 0 && (
             <div className="flex items-center gap-1.5 mt-1.5 px-2 py-1 rounded-md bg-amber-900/20 border border-amber-700/30">
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
@@ -211,14 +210,35 @@ export default function PositionDetail({
           )}
         </div>
         <div className="card">
+          <div className="text-xs text-slate-500 mb-1">Average Share Price</div>
+          <div className="text-xl font-bold text-slate-100">{selectedPos.shares > 0 ? `$${selectedPos.avg_cost?.toFixed(2)}` : '—'}</div>
+          {selectedPrice > 0 && selectedPos.shares > 0 && (
+            <div className={`text-xs mt-0.5 font-semibold ${selectedPrice >= selectedPos.avg_cost ? 'text-emerald-400' : 'text-red-400'}`}>
+              {selectedPrice >= selectedPos.avg_cost ? '+' : ''}{((selectedPrice - selectedPos.avg_cost) / selectedPos.avg_cost * 100).toFixed(2)}% vs market
+            </div>
+          )}
+        </div>
+        <div className="card">
           <div className="text-xs text-slate-500 mb-1">Market Value</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(selectedMarketValue)}</div>
-          <div className={`text-xs mt-0.5 font-semibold ${selectedUnrealised >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(selectedUnrealised)} unrealised</div>
+          <div className={`text-xs mt-0.5 font-semibold ${selectedUnrealised >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {fmt(selectedUnrealised)}
+            {selectedPos.shares > 0 && selectedPos.avg_cost > 0 && (
+              <span> ({((selectedUnrealised / (selectedPos.avg_cost * selectedPos.shares)) * 100).toFixed(2)}%)</span>
+            )}
+          </div>
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Total P&amp;L</div>
           <div className={`text-xl font-bold ${(selectedPos.realized_pnl + selectedUnrealised) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(selectedPos.realized_pnl + selectedUnrealised)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">Realised: {fmt(selectedPos.realized_pnl)}</div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            Realised: {fmt(selectedPos.realized_pnl)}
+            {selectedPos.allocated_funds > 0 && (
+              <span className={selectedPos.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                {' '}({((selectedPos.realized_pnl / selectedPos.allocated_funds) * 100).toFixed(2)}%)
+              </span>
+            )}
+          </div>
         </div>
       </div>
 

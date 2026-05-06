@@ -316,28 +316,70 @@ export default function PortfolioOverview({
             </div>
           )}
 
-          {analytics.daily_volume.length > 0 && (
-            <div className="card">
-              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Daily Trade Volume</div>
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={analytics.daily_volume} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                    <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
-                      tickFormatter={v => v.slice(5)} />
-                    <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
-                      tickFormatter={v => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} width={54} />
-                    <Tooltip
-                      contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
-                      labelStyle={{ color: '#94a3b8' }}
-                      formatter={(v, name) => [`$${v.toFixed(2)}`, name.charAt(0).toUpperCase() + name.slice(1)]}
-                    />
-                    <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} />
-                    <Bar dataKey="buy" name="Buy" fill="#3b82f6" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="sell" name="Sell" fill="#f59e0b" radius={[3, 3, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+          {(analytics.daily_volume.length > 0 || analytics.cumulative_pnl.length > 1) && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {analytics.daily_volume.length > 0 && (
+                <div className="card">
+                  <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Daily Trade Volume</div>
+                  <div className="h-48">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={analytics.daily_volume} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                        <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
+                          tickFormatter={v => v.slice(5)} />
+                        <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
+                          tickFormatter={v => `$${v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} width={54} />
+                        <Tooltip
+                          contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
+                          labelStyle={{ color: '#94a3b8' }}
+                          formatter={(v, name) => [`$${v.toFixed(2)}`, name.charAt(0).toUpperCase() + name.slice(1)]}
+                        />
+                        <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} />
+                        <Bar dataKey="buy" name="Buy" fill="#3b82f6" radius={[3, 3, 0, 0]} />
+                        <Bar dataKey="sell" name="Sell" fill="#f59e0b" radius={[3, 3, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
+              {analytics.cumulative_pnl.length > 1 && (() => {
+                const dailyPnl = []
+                for (let i = 1; i < analytics.cumulative_pnl.length; i++) {
+                  const current = analytics.cumulative_pnl[i]
+                  const previous = analytics.cumulative_pnl[i - 1]
+                  dailyPnl.push({
+                    date: current.date,
+                    value: current.value - previous.value,
+                  })
+                }
+                return (
+                  <div className="card">
+                    <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Daily Gain / Loss</div>
+                    <div className="h-48">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={dailyPnl} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                          <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
+                            tickFormatter={v => v.slice(5)} />
+                          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
+                            tickFormatter={v => `$${v >= 0 ? '+' : ''}${v >= 1000 || v <= -1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} width={54} />
+                          <Tooltip
+                            contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
+                            labelStyle={{ color: '#94a3b8' }}
+                            formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Daily P&L']}
+                          />
+                          <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+                            {dailyPnl.map((entry, idx) => (
+                              <Cell key={idx} fill={entry.value >= 0 ? '#10b981' : '#ef4444'} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                )
+              })()}
             </div>
           )}
 
