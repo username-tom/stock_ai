@@ -64,7 +64,7 @@ export default function PositionDetail({
     enabled: !!selectedSymbol,
   })
   const chartData = histData?.data ?? []
-  const prevClose = histData?.prev_close ?? null
+  const prevClose = quotes?.[selectedSymbol]?.previous_close ?? histData?.prev_close ?? null
 
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],

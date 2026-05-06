@@ -166,6 +166,11 @@ function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 })
 
   const maxVol = Math.max(...segmented.map(d => d.volume ?? 0))
 
+  const allPrices = segmented.flatMap(d => [d.preClose, d.regularClose, d.postClose].filter(v => v != null))
+  const yMin = allPrices.length ? Math.min(...allPrices) : null
+  const yMax = allPrices.length ? Math.max(...allPrices) : null
+  const prevCloseInRange = prevClose == null || yMin == null || (prevClose >= yMin && prevClose <= yMax)
+
   const hasRSI    = (indicators.rsi    !== false) && segmented.some(d => d.rsi     != null)
   const hasMACD   = (indicators.macd   !== false) && segmented.some(d => d.macd    != null)
   const hasBB     = (indicators.bb     !== false) && segmented.some(d => d.upper   != null)
@@ -224,7 +229,7 @@ function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 })
           ))}
 
           {/* Previous close reference */}
-          {prevClose != null && (
+          {prevClose != null && prevCloseInRange && (
             <ReferenceLine
               yAxisId="price"
               y={prevClose}
@@ -232,6 +237,28 @@ function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 })
               strokeDasharray="4 3"
               strokeWidth={1}
               label={{ value: `Prev ${prevClose.toFixed(2)}`, position: 'right', fill: '#64748b', fontSize: 9 }}
+            />
+          )}
+          {prevClose != null && !prevCloseInRange && yMin != null && (
+            <ReferenceLine
+              yAxisId="price"
+              y={yMin}
+              stroke="none"
+              label={(props) => {
+                const { viewBox } = props
+                if (!viewBox) return null
+                const { x, width, y } = viewBox
+                const isBelow = prevClose < yMin
+                return (
+                  <g>
+                    <rect x={x + width + 2} y={y - 8} width={62} height={15} rx={3}
+                      fill="#1e293b" stroke="#475569" strokeWidth={0.5} />
+                    <text x={x + width + 6} y={y + 4} fill="#64748b" fontSize={9} fontFamily="monospace">
+                      {isBelow ? '\u2193' : '\u2191'} ${prevClose.toFixed(2)}
+                    </text>
+                  </g>
+                )
+              }}
             />
           )}
 

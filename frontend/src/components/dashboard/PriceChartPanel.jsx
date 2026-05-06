@@ -96,6 +96,7 @@ export default function PriceChartPanel({
   chartSymbol, chartPeriod, setChartPeriod,
   indicators, toggleIndicator,
   histData, histLoading,
+  chartPrevClose,
 }) {
   return (
     <div className="card">
@@ -140,7 +141,7 @@ export default function PriceChartPanel({
           height={220}
           indicators={indicators}
           period={chartPeriod}
-          prevClose={histData?.prev_close}
+          prevClose={chartPrevClose}
         />
       )}
     </div>

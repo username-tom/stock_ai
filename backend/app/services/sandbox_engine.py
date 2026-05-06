@@ -75,6 +75,19 @@ def _market_is_active() -> bool:
     t = now_et.time()
     return _PRE_OPEN_OFFSET <= t < _MARKET_CLOSE
 
+
+def _regular_session_is_open() -> bool:
+    """Return True only during regular market hours (09:30–16:00 ET, Mon–Fri).
+
+    Used to gate trade execution — warm-up ticks (09:20–09:30) should process
+    data but must not trigger BUY/SELL orders.
+    """
+    now_et = datetime.now(tz=_ET)
+    if now_et.weekday() >= 5:
+        return False
+    t = now_et.time()
+    return _MARKET_OPEN <= t < _MARKET_CLOSE
+
 # ── shared state ──────────────────────────────────────────────────────────── #
 _running = False
 _last_tick: datetime | None = None
@@ -95,6 +108,7 @@ def get_engine_state() -> dict:
         "running": _running,
         "last_tick": _last_tick.isoformat() if _last_tick else None,
         "market_active": _market_is_active(),
+        "trading_open": _regular_session_is_open(),
         "symbols": dict(_symbol_status),
     }
 
@@ -235,7 +249,13 @@ async def _process_symbol(
             reason = signal_source if signal_source else f"{strat_label} sell @ ${current_price:.2f}"
 
         if action:
-            await _execute_trade(pos, action, current_price, reason)
+            if _regular_session_is_open():
+                await _execute_trade(pos, action, current_price, reason)
+            else:
+                logger.debug(
+                    "Engine skipping %s %s — pre-market warm-up (not yet 09:30 ET)",
+                    action, symbol,
+                )
 
         # Write engine status back to the position row (current bar signal for display)
         await _update_position_status(pos.id, current_signal, None, datetime.now(timezone.utc))

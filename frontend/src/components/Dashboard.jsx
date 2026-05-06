@@ -81,6 +81,11 @@ export default function Dashboard() {
     enabled: !!chartSymbol,
   })
 
+  const chartPrevClose =
+    quotesMap?.[chartSymbol]?.previous_close ??
+    histData?.prev_close ??
+    null
+
   return (
     <div className="p-6 pb-12 space-y-6">
       <div className="flex items-center justify-between">
@@ -162,6 +167,7 @@ export default function Dashboard() {
               toggleIndicator={toggleIndicator}
               histData={histData}
               histLoading={histLoading}
+              chartPrevClose={chartPrevClose}
             />
           </div>
         </div>

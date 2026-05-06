@@ -16,7 +16,7 @@ import json
 import logging
 import time
 import zoneinfo
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as dt_time
 from pathlib import Path
 from typing import Any
 
@@ -194,6 +194,124 @@ async def _yf_chart(symbol: str, range_: str = "5d", interval: str = "1d", inclu
     return result[0]
 
 
+def _market_state_now() -> str:
+    """Return the current US equity session in America/New_York."""
+    now_et = datetime.now(tz=_ET)
+    if now_et.weekday() >= 5:
+        return "CLOSED"
+
+    current_time = now_et.time()
+    if dt_time(4, 0) <= current_time < dt_time(9, 30):
+        return "PRE"
+    if dt_time(9, 30) <= current_time < dt_time(16, 0):
+        return "REGULAR"
+    if dt_time(16, 0) <= current_time < dt_time(20, 0):
+        return "POST"
+    return "CLOSED"
+
+
+def _session_for_dt(dt: datetime) -> str:
+    """Classify an intraday bar timestamp into a US equity session."""
+    current_time = dt.timetz().replace(tzinfo=None)
+    if dt_time(4, 0) <= current_time < dt_time(9, 30):
+        return "PRE"
+    if dt_time(9, 30) <= current_time < dt_time(16, 0):
+        return "REGULAR"
+    if dt_time(16, 0) <= current_time < dt_time(20, 0):
+        return "POST"
+    return "CLOSED"
+
+
+def _first_non_null(values: list[Any]) -> Any | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _build_quote_snapshot(chart: dict) -> dict[str, Any]:
+    """Derive a session-aware quote snapshot from Yahoo intraday bars."""
+    meta = chart.get("meta", {})
+    timestamps = chart.get("timestamp", [])
+    indicators = chart.get("indicators", {}).get("quote", [{}])[0]
+    opens = indicators.get("open", [])
+    highs = indicators.get("high", [])
+    lows = indicators.get("low", [])
+    closes = indicators.get("close", [])
+    volumes = indicators.get("volume", [])
+
+    rows: list[dict[str, Any]] = []
+    for i, ts in enumerate(timestamps):
+        close = closes[i] if i < len(closes) else None
+        if close is None:
+            continue
+
+        dt = datetime.fromtimestamp(ts, tz=_ET)
+        rows.append({
+            "dt": dt,
+            "session": _session_for_dt(dt),
+            "open": float(opens[i]) if i < len(opens) and opens[i] is not None else None,
+            "high": float(highs[i]) if i < len(highs) and highs[i] is not None else None,
+            "low": float(lows[i]) if i < len(lows) and lows[i] is not None else None,
+            "close": float(close),
+            "volume": int(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0,
+        })
+
+    if not rows:
+        last_price = meta.get("regularMarketPrice")
+        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+        change = (last_price - prev_close) if last_price is not None and prev_close is not None else None
+        change_pct = round(change / prev_close * 100, 2) if change is not None and prev_close else None
+        return {
+            "last_price": last_price,
+            "previous_close": prev_close,
+            "open": meta.get("regularMarketOpen"),
+            "day_high": meta.get("regularMarketDayHigh"),
+            "day_low": meta.get("regularMarketDayLow"),
+            "volume": meta.get("regularMarketVolume"),
+            "change": round(change, 4) if change is not None else None,
+            "change_pct": change_pct,
+            "market_state": _market_state_now(),
+        }
+
+    latest_day = rows[-1]["dt"].date()
+    latest_day_rows = [row for row in rows if row["dt"].date() == latest_day]
+    pre_rows = [row for row in latest_day_rows if row["session"] == "PRE"]
+    regular_rows = [row for row in latest_day_rows if row["session"] == "REGULAR"]
+    post_rows = [row for row in latest_day_rows if row["session"] == "POST"]
+
+    market_state = _market_state_now()
+    if market_state == "PRE" and pre_rows:
+        stats_rows = pre_rows
+    elif market_state == "POST" and post_rows:
+        stats_rows = post_rows
+    elif regular_rows:
+        stats_rows = regular_rows
+    else:
+        stats_rows = latest_day_rows
+
+    highs_in_scope = [row["high"] for row in stats_rows if row["high"] is not None]
+    lows_in_scope = [row["low"] for row in stats_rows if row["low"] is not None]
+    opens_in_scope = [row["open"] for row in stats_rows]
+    session_open = _first_non_null(opens_in_scope)
+    last_price = rows[-1]["close"]
+    prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+    change = (last_price - prev_close) if last_price is not None and prev_close is not None else None
+    change_pct = round(change / prev_close * 100, 2) if change is not None and prev_close else None
+
+    return {
+        "last_price": round(float(last_price), 4) if last_price is not None else None,
+        "previous_close": round(float(prev_close), 4) if prev_close is not None else None,
+        "open": round(float(session_open), 4) if session_open is not None else None,
+        "day_high": round(max(highs_in_scope), 4) if highs_in_scope else None,
+        "day_low": round(min(lows_in_scope), 4) if lows_in_scope else None,
+        "volume": sum(row["volume"] for row in stats_rows),
+        "change": round(change, 4) if change is not None else None,
+        "change_pct": change_pct,
+        "market_state": market_state,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -205,13 +323,9 @@ async def get_quote(symbol: str) -> dict:
     if cached is not None:
         return cached
 
-    chart = await _yf_chart(sym, range_="1d", interval="1m")
+    chart = await _yf_chart(sym, range_="1d", interval="1m", include_pre_post=True)
     meta = chart["meta"]
-
-    last_price   = meta.get("regularMarketPrice")
-    prev_close   = meta.get("chartPreviousClose") or meta.get("previousClose")
-    change_pct   = round((last_price - prev_close) / prev_close * 100, 2) if prev_close and last_price else None
-    market_state = meta.get("marketState", "CLOSED")   # REGULAR | PRE | POST | CLOSED
+    snapshot = _build_quote_snapshot(chart)
 
     reg_info     = symbol_registry.lookup(sym)
     company_name = (
@@ -222,15 +336,16 @@ async def get_quote(symbol: str) -> dict:
     result: dict = {
         "symbol":         sym,
         "company_name":   company_name,
-        "last_price":     last_price,
-        "previous_close": prev_close,
-        "open":           meta.get("regularMarketOpen"),
-        "day_high":       meta.get("regularMarketDayHigh"),
-        "day_low":        meta.get("regularMarketDayLow"),
-        "volume":         meta.get("regularMarketVolume"),
+        "last_price":     snapshot["last_price"],
+        "previous_close": snapshot["previous_close"],
+        "open":           snapshot["open"],
+        "day_high":       snapshot["day_high"],
+        "day_low":        snapshot["day_low"],
+        "volume":         snapshot["volume"],
         "market_cap":     None,
-        "change_pct":     change_pct,
-        "market_state":   market_state,
+        "change":         snapshot["change"],
+        "change_pct":     snapshot["change_pct"],
+        "market_state":   snapshot["market_state"],
     }
     await _cache.set(f"quote:{sym}", result)
     return result
@@ -315,12 +430,15 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
             if day not in days_seen:
                 days_seen.append(day)
         keep = set(days_seen[-n_days:])
-        # Derive prev_close from the actual last bar of the trading day just
-        # before the displayed window – far more accurate than the meta value
-        # which reflects the close before the entire 5d fetch range.
+        # Derive prev_close from the last regular-session bar of the trading day
+        # just before the displayed window.  Pre/post data is fetched for 1d/2d,
+        # so we must restrict to bars at or before 16:00 ET to avoid using an
+        # after-hours bar as the "previous close".
         prev_day_records = [r for r in records if r["date"][:5] not in keep]
-        if prev_day_records:
-            prev_close = prev_day_records[-1]["close"]
+        regular_prev = [r for r in prev_day_records if "09:30" <= r["date"][6:] <= "16:00"]
+        prev_day_close_records = regular_prev if regular_prev else prev_day_records
+        if prev_day_close_records:
+            prev_close = prev_day_close_records[-1]["close"]
         records = [r for r in records if r["date"][:5] in keep]
 
     # "2w" is fetched as 1mo – trim to the last 260 bars (10 trading days × 26 fifteen-minute bars)

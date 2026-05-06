@@ -56,6 +56,11 @@ export default function PriceChart({ data = [], height = 280, prevClose }) {
 
   const maxVol = Math.max(...sampled.map(d => d.volume ?? 0))
 
+  const prices = sampled.map(d => d.close).filter(v => v != null)
+  const yMin = prices.length ? Math.min(...prices) : null
+  const yMax = prices.length ? Math.max(...prices) : null
+  const prevCloseInRange = prevClose == null || yMin == null || (prevClose >= yMin && prevClose <= yMax)
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       <ComposedChart data={sampled} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
@@ -85,7 +90,7 @@ export default function PriceChart({ data = [], height = 280, prevClose }) {
         />
         <YAxis yAxisId="vol" orientation="left" domain={[0, maxVol * 5]} hide />
         <Tooltip content={<PriceTooltip />} />
-        {prevClose != null && (
+        {prevClose != null && prevCloseInRange && (
           <ReferenceLine
             yAxisId="price"
             y={prevClose}
@@ -93,6 +98,28 @@ export default function PriceChart({ data = [], height = 280, prevClose }) {
             strokeDasharray="4 3"
             strokeWidth={1}
             label={{ value: `Prev ${prevClose.toFixed(2)}`, position: 'right', fill: '#64748b', fontSize: 9 }}
+          />
+        )}
+        {prevClose != null && !prevCloseInRange && yMin != null && (
+          <ReferenceLine
+            yAxisId="price"
+            y={yMin}
+            stroke="none"
+            label={(props) => {
+              const { viewBox } = props
+              if (!viewBox) return null
+              const { x, width, y } = viewBox
+              const isBelow = prevClose < yMin
+              return (
+                <g>
+                  <rect x={x + width + 2} y={y - 8} width={62} height={15} rx={3}
+                    fill="#1e293b" stroke="#475569" strokeWidth={0.5} />
+                  <text x={x + width + 6} y={y + 4} fill="#64748b" fontSize={9} fontFamily="monospace">
+                    {isBelow ? '\u2193' : '\u2191'} ${prevClose.toFixed(2)}
+                  </text>
+                </g>
+              )
+            }}
           />
         )}
         <Bar yAxisId="vol" dataKey="volume" fill="#475569" opacity={0.25} isAnimationActive={false} />
