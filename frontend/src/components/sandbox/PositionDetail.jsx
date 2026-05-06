@@ -2,7 +2,7 @@ import {
   TrashIcon, PencilSquareIcon, CheckIcon, XMarkIcon,
   ArrowUpIcon, ArrowDownIcon, BoltIcon, PlayIcon, StopCircleIcon,
   ClockIcon, SignalIcon, ExclamationTriangleIcon, ArrowTopRightOnSquareIcon,
-  BanknotesIcon, ArrowsRightLeftIcon,
+  BanknotesIcon, ArrowsRightLeftIcon, ArrowPathIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect } from 'react'
@@ -72,6 +72,16 @@ export default function PositionDetail({
     refetchInterval: appSettings.portfolio_detail_ms,
   })
   const fundEvents = fundEventsData?.events ?? []
+  const dayLow = quotes?.[selectedSymbol]?.day_low ?? null
+  const dayHigh = quotes?.[selectedSymbol]?.day_high ?? null
+  const hasDayRange = dayLow != null && dayHigh != null && dayHigh > dayLow
+  const typedPrice = Number.parseFloat(tradeForm.price)
+  const fallbackPrice = Number.isFinite(selectedPrice) ? selectedPrice : dayLow
+  const resolvedTradePrice = Number.isFinite(typedPrice) ? typedPrice : fallbackPrice
+  const priceInputValue = tradeForm.price || (Number.isFinite(selectedPrice) && selectedPrice > 0 ? selectedPrice.toFixed(2) : '')
+  const sliderPrice = hasDayRange
+    ? Math.min(dayHigh, Math.max(dayLow, resolvedTradePrice ?? dayLow))
+    : null
 
   // Auto-update trade price when live quote changes
   useEffect(() => {
@@ -102,6 +112,12 @@ export default function PositionDetail({
   function fillMaxSellShares() {
     if (selectedPos?.shares > 0) {
       setTradeForm(f => ({ ...f, quantity: selectedPos.shares.toFixed(4) }))
+    }
+  }
+
+  function resetTradePrice() {
+    if (Number.isFinite(selectedPrice) && selectedPrice > 0) {
+      setTradeForm(f => ({ ...f, price: selectedPrice.toFixed(2) }))
     }
   }
 
@@ -216,6 +232,8 @@ export default function PositionDetail({
                 symbol={selectedSymbol}
                 quoteData={quotes[selectedSymbol] ?? null}
                 isLoading={false}
+                ownedShares={selectedPos?.shares ?? null}
+                averagePrice={selectedPos?.avg_cost ?? null}
               />
             </div>
           </div>
@@ -380,53 +398,88 @@ export default function PositionDetail({
         )}
       </div>
 
-            {/* Trade form */}
-            <div className="card">
+      {/* Trade form */}
+      <div className="card">
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">Place Trade</h3>
-        <form onSubmit={handleTrade} className="flex flex-wrap gap-3 items-end">
-          <div>
-            <label className="label">Side</label>
-            <div className="flex rounded-lg overflow-hidden border border-dark-500">
-              {['BUY', 'SELL'].map(s => (
-                <button key={s} type="button" onClick={() => setTradeForm(f => ({ ...f, side: s }))}
-                  className={`px-4 py-2 text-sm font-semibold transition-colors ${tradeForm.side === s ? (s === 'BUY' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white') : 'bg-dark-800 text-slate-400 hover:text-slate-200'}`}>
-                  {s}
+        <form onSubmit={handleTrade} className="space-y-3">
+          <div className="flex flex-wrap gap-3 items-end">
+            <div>
+              <label className="label">Side</label>
+              <div className="flex rounded-lg overflow-hidden border border-dark-500">
+                {['BUY', 'SELL'].map(s => (
+                  <button key={s} type="button" onClick={() => setTradeForm(f => ({ ...f, side: s }))}
+                    className={`px-4 py-2 text-sm font-semibold transition-colors ${tradeForm.side === s ? (s === 'BUY' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white') : 'bg-dark-800 text-slate-400 hover:text-slate-200'}`}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="label">Quantity</label>
+              <div className="flex items-center gap-1">
+                <input className="input w-28" type="number" min="0.0001" step="0.0001" placeholder="Shares"
+                  value={tradeForm.quantity} onChange={e => setTradeForm(f => ({ ...f, quantity: e.target.value }))} required />
+                {tradeForm.side === 'BUY' && totalBuyableCash > 0 && (
+                  <button type="button" title={`Max shares from ${fmtMoney(totalBuyableCash)} (position: ${fmtMoney(positionCashRemaining)} + available: ${fmtMoney(accountAvailable)})`}
+                    className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-800/40 rounded px-1.5 py-1 whitespace-nowrap"
+                    onClick={fillMaxShares}>Max</button>
+                )}
+                {tradeForm.side === 'SELL' && selectedPos?.shares > 0 && (
+                  <button type="button" title={`Sell all ${selectedPos.shares} shares`}
+                    className="text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded px-1.5 py-1 whitespace-nowrap"
+                    onClick={fillMaxSellShares}>Max</button>
+                )}
+              </div>
+            </div>
+            <div>
+              <label className="label">Price ($)</label>
+              <div className="flex items-center gap-2">
+                <input className="input w-28 shrink-0" type="number" step="0.01"
+                  value={priceInputValue} onChange={e => setTradeForm(f => ({ ...f, price: e.target.value }))} />
+                <button
+                  type="button"
+                  onClick={resetTradePrice}
+                  className="inline-flex items-center justify-center rounded-lg border border-dark-500 bg-dark-800 px-2 py-2 text-slate-400 transition-colors hover:text-slate-200 hover:border-dark-400"
+                  title="Reset to current price"
+                  aria-label="Reset price to current value"
+                >
+                  <ArrowPathIcon className="h-4 w-4" />
                 </button>
-              ))}
+              </div>
             </div>
-          </div>
-          <div>
-            <label className="label">Quantity</label>
-            <div className="flex items-center gap-1">
-              <input className="input w-28" type="number" min="0.0001" step="0.0001" placeholder="Shares"
-                value={tradeForm.quantity} onChange={e => setTradeForm(f => ({ ...f, quantity: e.target.value }))} required />
-              {tradeForm.side === 'BUY' && totalBuyableCash > 0 && (
-                <button type="button" title={`Max shares from ${fmtMoney(totalBuyableCash)} (position: ${fmtMoney(positionCashRemaining)} + available: ${fmtMoney(accountAvailable)})`}
-                  className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-800/40 rounded px-1.5 py-1 whitespace-nowrap"
-                  onClick={fillMaxShares}>Max</button>
-              )}
-              {tradeForm.side === 'SELL' && selectedPos?.shares > 0 && (
-                <button type="button" title={`Sell all ${selectedPos.shares} shares`}
-                  className="text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded px-1.5 py-1 whitespace-nowrap"
-                  onClick={fillMaxSellShares}>Max</button>
+            <div>
+              <div>
+                {hasDayRange && (
+                  <input
+                    className="h-2 w-40 cursor-pointer accent-sky-500"
+                    type="range"
+                    min={dayLow}
+                    max={dayHigh}
+                    step="0.01"
+                    value={sliderPrice ?? dayLow}
+                    onChange={e => setTradeForm(f => ({ ...f, price: Number.parseFloat(e.target.value).toFixed(2) }))}
+                    aria-label="Price within day range"
+                  />
+                )}
+              </div>
+              {hasDayRange && (
+                <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
+                  <span>${dayLow.toFixed(2)}</span>
+                  <span>${dayHigh.toFixed(2)}</span>
+                </div>
               )}
             </div>
+            <button type="submit" disabled={tradeMut.isPending || !tradeForm.quantity}
+              className={`flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm transition-colors disabled:opacity-50 ${tradeForm.side === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'}`}>
+              {tradeForm.side === 'BUY' ? <ArrowUpIcon className="h-4 w-4" /> : <ArrowDownIcon className="h-4 w-4" />}
+              {tradeMut.isPending ? 'Placing…' : `${tradeForm.side} ${tradeForm.quantity || ''} ${selectedSymbol}`}
+            </button>
           </div>
-          <div>
-            <label className="label">Price ($)</label>
-            <input className="input w-28" type="number" step="0.01" placeholder={selectedPrice?.toFixed(2)}
-              value={tradeForm.price} onChange={e => setTradeForm(f => ({ ...f, price: e.target.value }))} />
-          </div>
-          <div className="flex-1 min-w-48">
-            <label className="label">Reason (optional)</label>
-            <input className="input w-full" placeholder="e.g. RSI oversold, MACD cross…"
+          <div className="w-full">
+            <label className="label">Reason</label>
+            <input className="input w-full" placeholder="manual"
               value={tradeForm.reason} onChange={e => setTradeForm(f => ({ ...f, reason: e.target.value }))} />
           </div>
-          <button type="submit" disabled={tradeMut.isPending || !tradeForm.quantity}
-            className={`flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm transition-colors disabled:opacity-50 ${tradeForm.side === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'}`}>
-            {tradeForm.side === 'BUY' ? <ArrowUpIcon className="h-4 w-4" /> : <ArrowDownIcon className="h-4 w-4" />}
-            {tradeMut.isPending ? 'Placing…' : `${tradeForm.side} ${tradeForm.quantity || ''} ${selectedSymbol}`}
-          </button>
         </form>
         {tradeMsg && (
           <div className={`mt-3 flex items-start justify-between gap-2 p-3 rounded-lg text-sm border ${tradeMsg.type === 'success' ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400' : 'bg-red-900/20 border-red-700/30 text-red-400'}`}>
@@ -436,9 +489,9 @@ export default function PositionDetail({
         )}
       </div>
 
-          </div>
-        </div>
-      </div>
+    </div>
+  </div>
+  </div>
       {/* Bottom section: Activity Log */}
       <div className="card mt-6">
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">

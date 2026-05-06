@@ -38,12 +38,12 @@ export default function SandboxPanel() {
   const [editStratParams, setEditStratParams] = useState({})
   const [editingAlloc, setEditingAlloc] = useState(false)
   const [allocInput, setAllocInput] = useState('')
-  const [tradeForm, setTradeForm] = useState({ side: 'BUY', quantity: '', price: '', reason: '' })
+  const [tradeForm, setTradeForm] = useState({ side: 'BUY', quantity: '', price: '', reason: 'manual' })
   const [tradeMsg, setTradeMsg] = useState(null)
 
   // Reset per-trade fields when switching symbols so quantity doesn't bleed across positions
   useEffect(() => {
-    setTradeForm(f => ({ ...f, quantity: '', price: '', reason: '' }))
+    setTradeForm(f => ({ ...f, quantity: '', price: '', reason: 'manual' }))
     setTradeMsg(null)
   }, [selectedSymbol])
   const [exportLoading, setExportLoading] = useState(false)
@@ -166,7 +166,7 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       qc.invalidateQueries({ queryKey: ['sandbox-trades', selectedSymbol] })
-      setTradeForm(f => ({ ...f, quantity: '', reason: '' }))
+      setTradeForm(f => ({ ...f, quantity: '', reason: 'manual' }))
     },
     onError: e => setTradeMsg({ type: 'error', text: e.response?.data?.detail || e.message }),
   })
@@ -266,7 +266,7 @@ export default function SandboxPanel() {
   }
   function handleTrade(e) {
     e.preventDefault(); setTradeMsg(null)
-    tradeMut.mutate({ symbol: selectedSymbol, side: tradeForm.side, quantity: parseFloat(tradeForm.quantity), price: parseFloat(tradeForm.price) || selectedPrice, strategy_name: selectedPos?.strategy_name, reason: tradeForm.reason || undefined })
+    tradeMut.mutate({ symbol: selectedSymbol, side: tradeForm.side, quantity: parseFloat(tradeForm.quantity), price: parseFloat(tradeForm.price) || selectedPrice, strategy_name: selectedPos?.strategy_name, reason: tradeForm.reason?.trim() || 'manual' })
   }
   async function handleExport() {
     setExportLoading(true)

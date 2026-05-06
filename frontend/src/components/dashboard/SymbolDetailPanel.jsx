@@ -192,7 +192,7 @@ function Skeleton() {
 
 // ─── main component ───────────────────────────────────────────────────────────
 
-export default function SymbolDetailPanel({ symbol, quoteData, isLoading }) {
+export default function SymbolDetailPanel({ symbol, quoteData, isLoading, ownedShares = null, averagePrice = null }) {
   // Fallback: if the selected symbol isn't in the watchlist quotesMap
   // (e.g. a preset list symbol), fetch it individually
   const needsFetch = !isLoading && !quoteData && !!symbol
@@ -233,6 +233,7 @@ export default function SymbolDetailPanel({ symbol, quoteData, isLoading }) {
   const rangePct = (price != null && q.day_high != null && q.day_low != null && q.day_high !== q.day_low)
     ? ((price - q.day_low) / (q.day_high - q.day_low) * 100).toFixed(1)
     : null
+  const hasOwnershipData = ownedShares != null || averagePrice != null
 
   return (
     <div
@@ -335,6 +336,14 @@ export default function SymbolDetailPanel({ symbol, quoteData, isLoading }) {
           )
         })()}
       </div>
+
+      {hasOwnershipData && (
+        <div className="py-3 border-t border-dark-700">
+          <SectionLabel>Position</SectionLabel>
+          <StatRow label="Owned Shares" value={ownedShares != null ? fmt(ownedShares, 4) : '—'} />
+          <StatRow label="Average Price" value={averagePrice != null ? `$${fmt(averagePrice)}` : '—'} />
+        </div>
+      )}
     </div>
   )
 }
