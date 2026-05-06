@@ -9,6 +9,7 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import { getSandboxFundEvents } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
+import { usePriceChangeTracking } from '../../hooks/usePriceChangeTracking'
 import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import PortfolioManagerPanel from './PortfolioManagerPanel'
@@ -27,6 +28,7 @@ export default function PortfolioOverview({
   onSelectSymbol,
 }) {
   const appSettings = useAppSettings()
+  const priceColors = usePriceChangeTracking(quotes)
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
     queryFn: getSandboxFundEvents,
@@ -88,9 +90,6 @@ export default function PortfolioOverview({
         </div>
       </div>
 
-      {/* Portfolio Manager */}
-      <PortfolioManagerPanel />
-
       {/* Per-position breakdown table */}
       {pieData.length > 0 ? (
         <div className="card">
@@ -126,6 +125,7 @@ export default function PortfolioOverview({
                     const unrealPct = costBasis > 0 ? (unreal / costBasis) * 100 : null
                     const realizedPct = pos.total_invested > 0.01 ? ((pos.realized_pnl ?? 0) / pos.total_invested) * 100 : null
                     const pd = pieData.find(d => d.symbol === pos.symbol)
+                    const priceColor = priceColors[pos.symbol]
                     return (
                       <tr
                         key={pos.symbol}
@@ -141,7 +141,9 @@ export default function PortfolioOverview({
                         </td>
                         <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? pos.shares.toFixed(3) : '—'}</td>
                         <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? fmtMoney(pos.avg_cost) : '—'}</td>
-                        <td className="text-right text-slate-200 font-mono">{pos.shares > 0 ? fmtMoney(mp) : '—'}</td>
+                        <td className={`text-right py-2 px-3 font-mono rounded transition-colors ${priceColor?.bgColor || ''} ${priceColor?.textColor || 'text-slate-200'}`}>
+                          {fmtMoney(mp)}
+                        </td>
                         <td className="text-right text-slate-200 font-mono">{pos.shares > 0 ? fmtMoney(mv) : '—'}</td>
                         <td className="text-right text-blue-300 font-mono">{cashRemaining > 0 ? fmtMoney(cashRemaining) : '—'}</td>
                         <td className="text-right text-slate-400">{pd ? `${pd.pct}%` : '—'}</td>
@@ -280,6 +282,9 @@ export default function PortfolioOverview({
           })()}
         </div>
       )}
+
+      {/* Portfolio Manager */}
+      <PortfolioManagerPanel />
 
       {/* Analytics Charts */}
       {analytics && analytics.total_trades > 0 && (
@@ -531,6 +536,7 @@ export default function PortfolioOverview({
                 <tbody className="divide-y divide-dark-700">
                   {all.map(entry => {
                     const ts = entry.date ? new Date(entry.date) : null
+                    // Use system/browser timezone (no timeZone option specified)
                     const timeStr = ts ? ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
                     return (
                       <tr key={entry.id} className="hover:bg-dark-700/40 transition-colors">

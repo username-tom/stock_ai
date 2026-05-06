@@ -174,8 +174,8 @@ async def trade_history(
                 "ib_order_id": t.ib_order_id,
                 "strategy_name": t.strategy_name,
                 "pnl": t.pnl,
-                "created_at": t.created_at.isoformat() if t.created_at else None,
-                "filled_at": t.filled_at.isoformat() if t.filled_at else None,
+                "created_at": t.created_at.astimezone().isoformat() if t.created_at else None,
+                "filled_at": t.filled_at.astimezone().isoformat() if t.filled_at else None,
             }
             for t in trades
         ]
@@ -207,8 +207,8 @@ async def export_trade_history(
             "ib_order_id": t.ib_order_id,
             "strategy_name": t.strategy_name,
             "pnl": t.pnl,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-            "filled_at": t.filled_at.isoformat() if t.filled_at else None,
+            "created_at": t.created_at.astimezone().isoformat() if t.created_at else None,
+            "filled_at": t.filled_at.astimezone().isoformat() if t.filled_at else None,
         }
         for t in trades
     ]

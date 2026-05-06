@@ -130,7 +130,7 @@ async def get_trades(symbol: Optional[str] = None, limit: int = 200, db: AsyncSe
                 "strategy_name": t.strategy_name,
                 "reason": t.reason,
                 "pnl": t.pnl,
-                "created_at": t.created_at.isoformat() if t.created_at else None,
+                "created_at": t.created_at.astimezone().isoformat() if t.created_at else None,
             }
             for t in trades
         ]
@@ -149,13 +149,15 @@ async def get_analytics(db: AsyncSession = Depends(get_db)):
     for t in trades:
         if t.pnl is not None:
             running += t.pnl
-        date_str = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else "unknown"
+        local_time = t.created_at.astimezone() if t.created_at else None
+        date_str = local_time.strftime("%Y-%m-%d %H:%M") if local_time else "unknown"
         cumulative.append({"date": date_str, "value": round(running, 2)})
 
     # Daily buy/sell volume
     daily: dict[str, dict] = {}
     for t in trades:
-        day = t.created_at.strftime("%Y-%m-%d") if t.created_at else "unknown"
+        local_time = t.created_at.astimezone() if t.created_at else None
+        day = local_time.strftime("%Y-%m-%d") if local_time else "unknown"
         if day not in daily:
             daily[day] = {"date": day, "buy": 0.0, "sell": 0.0}
         if t.side == "BUY":

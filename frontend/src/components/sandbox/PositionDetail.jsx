@@ -601,7 +601,7 @@ export default function PositionDetail({
                     {entry.sub && <div className="text-xs text-slate-500 mt-0.5 truncate">{entry.sub}</div>}
                   </div>
                   <span className="text-xs text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">
-                    {entry.date ? new Date(entry.date).toLocaleString() : ''}
+                    {entry.date ? new Date(entry.date).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
                   </span>
                 </div>
               ))}

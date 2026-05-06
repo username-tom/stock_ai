@@ -109,7 +109,7 @@ async def get_fund_events(limit: int = 200, db: AsyncSession = Depends(get_db)):
             "note": e.note,
             "from_symbol": None,
             "to_symbol": None,
-            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "created_at": e.created_at.astimezone().isoformat() if e.created_at else None,
         }
         for e in fund_events
     ] + [
@@ -120,7 +120,7 @@ async def get_fund_events(limit: int = 200, db: AsyncSession = Depends(get_db)):
             "note": e.note,
             "from_symbol": e.from_symbol,
             "to_symbol": e.to_symbol,
-            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "created_at": e.created_at.astimezone().isoformat() if e.created_at else None,
         }
         for e in alloc_events
     ]
