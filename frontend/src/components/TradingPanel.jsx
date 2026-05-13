@@ -93,6 +93,10 @@ export default function TradingPanel() {
   const handleOrderSubmit = (e) => {
     e.preventDefault()
     setOrderMsg(null)
+    if (orderForm.order_type === 'LMT' && !orderForm.limit_price) {
+      setOrderMsg({ type: 'error', text: 'Limit price is required for limit orders.' })
+      return
+    }
     const payload = {
       symbol: orderForm.symbol,
       side: orderForm.side,
@@ -111,6 +115,8 @@ export default function TradingPanel() {
 
   const isConnected = ibStatus?.connected
   const currentMode = ibStatus?.mode ?? 'paper'
+  const connectState = connectMut.data?.status
+  const connectMessage = connectMut.data?.message
 
   return (
     <div className="p-6 space-y-6">
@@ -118,7 +124,7 @@ export default function TradingPanel() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-100">Trading</h1>
-          <p className="text-sm text-slate-400 mt-0.5">Simulated, paper &amp; live order management</p>
+          <p className="text-sm text-slate-400 mt-0.5">Simulated, paper &amp; live order management via IB API</p>
         </div>
       </div>
 
@@ -132,7 +138,7 @@ export default function TradingPanel() {
                 Interactive Brokers {isConnected ? 'Connected' : 'Disconnected'}
               </div>
               <div className="text-xs text-slate-500">
-                {ibStatus?.host}:{ibStatus?.port} · Mode: {currentMode?.toUpperCase()}
+                {ibStatus?.host}:{ibStatus?.port} · Mode: {currentMode?.toUpperCase()} · Transport: ibapi
               </div>
             </div>
           </div>
@@ -162,7 +168,7 @@ export default function TradingPanel() {
               disabled={isConnected || connectMut.isPending}
             >
               <SignalIcon className="h-4 w-4" />
-              Connect IB
+              Connect TWS/Gateway
             </button>
             <button
               className="btn-secondary"
@@ -174,9 +180,13 @@ export default function TradingPanel() {
             </button>
           </div>
         </div>
-        {connectMut.data?.message && (
-          <div className="mt-3 text-sm text-slate-400 bg-dark-900/50 rounded-lg p-2 px-3">
-            {connectMut.data.message}
+        {connectMessage && (
+          <div className={`mt-3 text-sm rounded-lg p-2 px-3 ${
+            connectState === 'ok'
+              ? 'text-emerald-300 bg-emerald-900/20 border border-emerald-700/30'
+              : 'text-red-300 bg-red-900/20 border border-red-700/30'
+          }`}>
+            {connectMessage}
           </div>
         )}
       </div>
@@ -211,8 +221,8 @@ export default function TradingPanel() {
               <select className="input" value={orderForm.mode}
                 onChange={e => setOrderForm(f => ({ ...f, mode: e.target.value }))}>
                 <option value="SIMULATED">Simulated</option>
-                <option value="PAPER">Paper (IB)</option>
-                <option value="LIVE">Live (IB)</option>
+                <option value="PAPER">Paper (IB API)</option>
+                <option value="LIVE">Live (IB API)</option>
               </select>
             </div>
           </div>
@@ -244,14 +254,14 @@ export default function TradingPanel() {
           {orderForm.order_type === 'LMT' && (
             <div>
               <label className="label">Limit Price ($)</label>
-              <input className="input" type="number" step="0.01" value={orderForm.limit_price}
+              <input className="input" type="number" step="0.01" min="0.01" required={orderForm.order_type === 'LMT'} value={orderForm.limit_price}
                 onChange={e => setOrderForm(f => ({ ...f, limit_price: e.target.value }))} />
             </div>
           )}
 
           {orderForm.mode !== 'SIMULATED' && !isConnected && (
             <div className="text-xs text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 rounded-lg p-2">
-              ⚠ Connect to IB to place paper/live orders.
+              ⚠ Connect to TWS or IB Gateway to place paper/live orders.
             </div>
           )}
 
@@ -341,7 +351,7 @@ export default function TradingPanel() {
                           <td className="font-mono font-bold">{o.symbol}</td>
                           <td className={o.side === 'BUY' ? 'pos' : 'neg'}>{o.side}</td>
                           <td>{o.quantity}</td>
-                          <td><span className="badge-yellow">{o.status}</span></td>
+                          <td><span className="badge-yellow">{o.status ?? 'Submitted'}</span></td>
                           <td>
                             <button
                               className="text-xs text-red-400 hover:text-red-300"

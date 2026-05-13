@@ -280,7 +280,7 @@ export default function SettingsPanel() {
       <SectionCard
         icon={ServerIcon}
         title="Interactive Brokers Connection"
-        description="TWS / IB Gateway host, port, and client ID used when connecting to IB."
+        description="TWS / IB Gateway host, port, and client ID used by the ibapi connector."
       >
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Field

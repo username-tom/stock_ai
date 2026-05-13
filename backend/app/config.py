@@ -8,7 +8,7 @@ _DEFAULT_CORS = "http://localhost:5173,http://localhost:3000"
 
 class Settings(BaseSettings):
     IB_HOST: str = "127.0.0.1"
-    IB_PORT: int = 7497
+    IB_PORT: int = 4002
     IB_CLIENT_ID: int = 1
     DATABASE_URL: str = "sqlite+aiosqlite:///./stock_ai.db"
     CORS_ORIGINS: str = _DEFAULT_CORS

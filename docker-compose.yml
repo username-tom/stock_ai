@@ -9,7 +9,7 @@ services:
       - "8000:8000"
     environment:
       - IB_HOST=${IB_HOST:-host.docker.internal}
-      - IB_PORT=${IB_PORT:-7497}
+      - IB_PORT=${IB_PORT:-4002}
       - IB_CLIENT_ID=${IB_CLIENT_ID:-1}
       - TRADING_MODE=${TRADING_MODE:-paper}
       - DATABASE_URL=sqlite+aiosqlite:////app/data/stock_ai.db

@@ -126,7 +126,7 @@ def _fetch_ib(symbol: str, start: str, end: str) -> pd.DataFrame:
     Raises ``ValueError`` when IB is not connected so callers can fall back.
     """
     if not IB_AVAILABLE:
-        raise ValueError("ib_insync is not installed – IB data source unavailable.")
+        raise ValueError("ibapi is not installed - IB data source unavailable.")
     if not ib_service.is_connected:
         raise ValueError("IB is not connected – cannot fetch data from Interactive Brokers.")
 
@@ -155,34 +155,23 @@ def _fetch_ib(symbol: str, start: str, end: str) -> pd.DataFrame:
 
 async def _ib_to_dataframe(symbol: str, start: str, end: str) -> pd.DataFrame:
     """Async helper: convert IB bar list to a DataFrame."""
-    import ib_insync as ibi
-    from datetime import date
-
-    start_dt = date.fromisoformat(start)
-    end_dt = date.fromisoformat(end)
-    delta_days = (end_dt - start_dt).days
-    duration = f"{max(delta_days, 1)} D"
-
-    contract = ibi.Stock(symbol, "SMART", "USD")
-    bars = await ib_service._ib.reqHistoricalDataAsync(
-        contract,
-        endDateTime=end_dt.strftime("%Y%m%d %H:%M:%S"),
-        durationStr=duration,
-        barSizeSetting="1 day",
-        whatToShow="ADJUSTED_LAST",
-        useRTH=True,
+    bars = await ib_service.get_historical_bars_range(
+        symbol=symbol,
+        start=start,
+        end=end,
+        bar_size="1 day",
     )
     if not bars:
         return pd.DataFrame()
 
     records = [
         {
-            "Date": pd.to_datetime(str(b.date)),
-            "Open": b.open,
-            "High": b.high,
-            "Low": b.low,
-            "Close": b.close,
-            "Volume": b.volume,
+            "Date": pd.to_datetime(str(b["date"])),
+            "Open": b["open"],
+            "High": b["high"],
+            "Low": b["low"],
+            "Close": b["close"],
+            "Volume": b["volume"],
         }
         for b in bars
     ]
