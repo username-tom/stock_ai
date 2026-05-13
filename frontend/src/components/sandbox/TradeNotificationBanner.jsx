@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { XMarkIcon, ArrowTrendingUpIcon, ArrowTrendingDownIcon } from '@heroicons/react/24/outline'
 
+const NOTIFICATION_TTL_MS = 5 * 60 * 1000
+const MAX_BANNER_VISIBLE_MS = 8_000
+
 /**
  * Shows a dismissible top banner whenever a new engine-triggered trade appears.
  * `latestEngineTrade` is the most recent trade object with strategy_name set.
@@ -14,11 +17,25 @@ export default function TradeNotificationBanner({ latestEngineTrade }) {
   useEffect(() => {
     if (!latestEngineTrade) return
     if (latestEngineTrade.id === prevIdRef.current) return
+
+    const createdMs = latestEngineTrade.created_at ? Date.parse(latestEngineTrade.created_at) : NaN
+    const hasCreatedMs = Number.isFinite(createdMs)
+    const ageMs = hasCreatedMs ? (Date.now() - createdMs) : 0
+    if (hasCreatedMs && ageMs >= NOTIFICATION_TTL_MS) {
+      // Mark as seen so old events from a rebuild do not keep re-triggering.
+      prevIdRef.current = latestEngineTrade.id
+      setVisible(false)
+      return
+    }
+
     prevIdRef.current = latestEngineTrade.id
     setTrade(latestEngineTrade)
     setVisible(true)
+
+    const remainingTtlMs = hasCreatedMs ? (NOTIFICATION_TTL_MS - ageMs) : MAX_BANNER_VISIBLE_MS
+    const dismissAfterMs = Math.max(250, Math.min(MAX_BANNER_VISIBLE_MS, remainingTtlMs))
     clearTimeout(timerRef.current)
-    timerRef.current = setTimeout(() => setVisible(false), 8000)
+    timerRef.current = setTimeout(() => setVisible(false), dismissAfterMs)
     return () => clearTimeout(timerRef.current)
   }, [latestEngineTrade])
 

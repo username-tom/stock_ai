@@ -124,6 +124,12 @@ export default function TradingPanel() {
   const currentMode = ibStatus?.mode ?? 'paper'
   const connectState = connectMut.data?.status
   const connectMessage = connectMut.data?.message
+  const portfolioRefreshSec = Math.max(1, Math.round((appSettings.trading_positions_ms ?? 5_000) / 1_000))
+
+  const refreshPortfolioDetails = () => {
+    qc.invalidateQueries({ queryKey: ['ib-account'] })
+    qc.invalidateQueries({ queryKey: ['ib-positions'] })
+  }
 
   const asMoney = (v, ccy = 'USD') => {
     const n = Number(v)
@@ -335,7 +341,7 @@ export default function TradingPanel() {
                 Refresh
               </button>
             </div>
-            <div className="text-[11px] text-slate-500 mb-2">Auto-refreshes every 1 minute</div>
+            <div className="text-[11px] text-slate-500 mb-2">Auto-refreshes every {portfolioRefreshSec}s</div>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between"><span className="text-slate-500">Connection</span><span className="text-slate-200">{isConnected ? 'Connected' : 'Disconnected'}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">Mode</span><span className="text-slate-200">{currentMode?.toUpperCase?.() ?? '—'}</span></div>
