@@ -5,6 +5,7 @@ import QuoteCard from './QuoteCard'
 import { getBulkQuotes } from '../../api/client'
 import { useMarketOpen } from '../../hooks/useMarketOpen'
 import { useAppSettings } from '../../hooks/useAppSettings'
+import { WATCHLIST_SYMBOL_LIMIT } from '../../hooks/useWatchlist'
 
 const PRESET_LISTS = {
   watchlist: { label: 'My Watchlist', symbols: null /* dynamic */ },
@@ -36,6 +37,7 @@ const PRESET_LISTS = {
 
 export default function WatchlistPanel({
   watchlist, quotesMap, quotesLoading, chartSymbol, setChartSymbol,
+  addNotice, setAddNotice,
   editing, toggleEditing,
   addInput, addError, addLoading, addSuggestions, showSuggestions,
   handleAdd, handleAddInputChange, handleAddKey, setShowSuggestions,
@@ -152,6 +154,25 @@ export default function WatchlistPanel({
               <PlusIcon className="h-3.5 w-3.5" />
             )}
             Add
+          </button>
+        </div>
+      )}
+
+      {isWatchlist && (
+        <div className="mb-2 text-[11px] text-slate-500">
+          {watchlist.length}/{WATCHLIST_SYMBOL_LIMIT} symbols
+        </div>
+      )}
+
+      {isWatchlist && addNotice && (
+        <div className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-300 flex items-start gap-2">
+          <span className="flex-1">{addNotice}</span>
+          <button
+            onClick={() => setAddNotice('')}
+            className="text-amber-300/80 hover:text-amber-200"
+            aria-label="Dismiss notice"
+          >
+            <XMarkIcon className="h-3.5 w-3.5" />
           </button>
         </div>
       )}

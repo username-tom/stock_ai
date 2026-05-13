@@ -170,8 +170,13 @@ export default function PositionDetail({
               </div>
             </div>
             <button className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded-lg px-2.5 py-1.5 hover:bg-red-900/20 transition-colors"
-              onClick={() => { if (window.confirm(`Remove ${selectedSymbol} from sandbox?`)) removeSymbolMut.mutate(selectedSymbol) }}>
-              <TrashIcon className="h-3.5 w-3.5" />Remove
+              onClick={() => {
+                const msg = ibMode
+                  ? `Remove ${selectedSymbol} from watchlist?`
+                  : `Remove ${selectedSymbol} from sandbox?`
+                if (window.confirm(msg)) removeSymbolMut.mutate(selectedSymbol)
+              }}>
+              <TrashIcon className="h-3.5 w-3.5" />{ibMode ? 'Remove Watchlist' : 'Remove'}
             </button>
           </div>
           {/* Summary cards */}

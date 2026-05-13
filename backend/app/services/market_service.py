@@ -23,6 +23,7 @@ from typing import Any
 import httpx
 
 from app.services import symbol_registry
+from app.services.ib_service import IB_AVAILABLE, ib_service
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,18 @@ class _TTLCache:
 _cache = _TTLCache()
 
 QUOTE_TTL = 60  # seconds
+IB_QUOTE_TTL = 5  # seconds
+
+# IB historical-request hardening: smooth bursts and avoid pacing pressure.
+_IB_HIST_MIN_GAP_S = 0.35
+_IB_HIST_MAX_CONCURRENCY = 3
+_ib_hist_lock = asyncio.Lock()
+_ib_hist_last_ts = 0.0
+_ib_hist_semaphore = asyncio.Semaphore(_IB_HIST_MAX_CONCURRENCY)
+
+# In-flight quote dedupe so concurrent callers for one symbol share one IB fetch.
+_ib_quote_inflight: dict[str, asyncio.Task] = {}
+_ib_quote_inflight_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # Persistent HTTP client – reuses connections for lower latency
@@ -312,6 +325,215 @@ def _build_quote_snapshot(chart: dict) -> dict[str, Any]:
     }
 
 
+def _ib_connected() -> bool:
+    return bool(IB_AVAILABLE and ib_service.is_connected)
+
+
+def _parse_ib_bar_datetime(raw: Any) -> datetime | None:
+    text = str(raw).strip()
+    for fmt in ("%Y%m%d  %H:%M:%S", "%Y%m%d %H:%M:%S", "%Y%m%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=_ET)
+        except ValueError:
+            continue
+    return None
+
+
+async def _get_ib_quote(symbol: str) -> dict[str, Any]:
+    quote = await ib_service.get_market_data(symbol)
+    quote_error = quote.get("error") if isinstance(quote, dict) else None
+    if quote_error:
+        logger.warning("IB snapshot quote unavailable for %s: %s", symbol, quote_error)
+
+    last_price = quote.get("last") if isinstance(quote, dict) else None
+    prev_close = quote.get("close") if isinstance(quote, dict) else None
+    open_price = None
+    day_high = None
+    day_low = None
+    day_volume = quote.get("volume") if isinstance(quote, dict) else None
+
+    # Only fetch historical fallback when snapshot fields are missing.
+    if last_price is None or prev_close is None:
+        try:
+            intraday = await _ib_historical_request(
+                symbol=symbol,
+                end_datetime="",
+                duration="2 D",
+                bar_size="1 min",
+                what_to_show="TRADES",
+                use_rth=False,
+            )
+            if intraday:
+                parsed = []
+                for bar in intraday:
+                    dt = _parse_ib_bar_datetime(bar.get("date"))
+                    if dt is None:
+                        continue
+                    parsed.append((dt, bar))
+                if parsed:
+                    parsed.sort(key=lambda x: x[0])
+                    last_bar = parsed[-1][1]
+                    if last_price is None:
+                        last_price = last_bar.get("close")
+
+                    all_days = sorted({dt.astimezone(_ET).date() for dt, _ in parsed})
+                    today_et = datetime.now(tz=_ET).date()
+                    today_bars = [b for dt, b in parsed if dt.astimezone(_ET).date() == today_et]
+                    scope = today_bars or [b for _, b in parsed]
+                    if scope:
+                        open_price = scope[0].get("open")
+                        highs = [float(b["high"]) for b in scope if b.get("high") is not None]
+                        lows = [float(b["low"]) for b in scope if b.get("low") is not None]
+                        vols = [int(b["volume"]) for b in scope if b.get("volume") is not None]
+                        if highs:
+                            day_high = max(highs)
+                        if lows:
+                            day_low = min(lows)
+                        if vols:
+                            day_volume = sum(vols)
+
+                    if prev_close is None and len(all_days) >= 2:
+                        prev_day = all_days[-2]
+                        prev_day_bars = [b for dt, b in parsed if dt.astimezone(_ET).date() == prev_day]
+                        if prev_day_bars:
+                            prev_close = prev_day_bars[-1].get("close")
+        except Exception as exc:
+            logger.debug("IB intraday quote fallback failed for %s: %s", symbol, exc)
+
+    # Lightweight final fallback for previous close only.
+    if prev_close is None:
+        try:
+            bars = await _ib_historical_request(
+                symbol=symbol,
+                end_datetime="",
+                duration="3 D",
+                bar_size="1 day",
+                what_to_show="TRADES",
+                use_rth=True,
+            )
+            if bars and len(bars) >= 2:
+                prev_close = bars[-2].get("close")
+        except Exception as exc:
+            logger.debug("IB daily previous-close fallback failed for %s: %s", symbol, exc)
+
+    if last_price is None:
+        raise ValueError(
+            f"Failed to retrieve IB quote for {symbol}: no last/close price available"
+        )
+
+    change = (
+        (float(last_price) - float(prev_close))
+        if last_price is not None and prev_close is not None
+        else None
+    )
+    change_pct = (
+        round(change / float(prev_close) * 100, 2)
+        if change is not None and prev_close not in (None, 0)
+        else None
+    )
+
+    reg_info = symbol_registry.lookup(symbol)
+    company_name = reg_info["name"] if reg_info else symbol
+    return {
+        "symbol": symbol,
+        "company_name": company_name,
+        "last_price": round(float(last_price), 4) if last_price is not None else None,
+        "previous_close": round(float(prev_close), 4) if prev_close is not None else None,
+        "open": round(float(open_price), 4) if open_price is not None else None,
+        "day_high": round(float(day_high), 4) if day_high is not None else None,
+        "day_low": round(float(day_low), 4) if day_low is not None else None,
+        "volume": int(day_volume) if day_volume is not None else None,
+        "market_cap": None,
+        "change": round(change, 4) if change is not None else None,
+        "change_pct": change_pct,
+        "market_state": _market_state_now(),
+    }
+
+
+def _ib_period_request(period: str) -> tuple[str, str, bool]:
+    mapping: dict[str, tuple[str, str, bool]] = {
+        "1d": ("3 D", "1 min", False),
+        "2d": ("4 D", "1 min", False),
+        "5d": ("10 D", "15 mins", True),
+        "2w": ("20 D", "15 mins", True),
+        "1mo": ("2 M", "1 day", True),
+        "3mo": ("4 M", "1 day", True),
+        "6mo": ("7 M", "1 day", True),
+        "1y": ("1 Y", "1 day", True),
+        "2y": ("2 Y", "1 day", True),
+        "5y": ("5 Y", "1 week", True),
+        "max": ("10 Y", "1 month", True),
+    }
+    return mapping.get(period, ("1 Y", "1 day", True))
+
+
+def _format_dt_for_period(dt: datetime, intraday: bool, period: str) -> str:
+    dt_et = dt.astimezone(_ET)
+    if not intraday:
+        return dt_et.strftime("%Y-%m-%d")
+    return dt_et.strftime("%m/%d %H:%M")
+
+
+async def _get_ib_history(symbol: str, period: str) -> dict[str, Any]:
+    duration, bar_size, use_rth = _ib_period_request(period)
+    bars = await _ib_historical_request(
+        symbol=symbol,
+        end_datetime="",
+        duration=duration,
+        bar_size=bar_size,
+        what_to_show="TRADES",
+        use_rth=use_rth,
+    )
+    if not bars:
+        raise ValueError(f"No IB OHLCV data returned for {symbol}")
+
+    intraday = "min" in bar_size or "hour" in bar_size
+    records: list[dict[str, Any]] = []
+    for bar in bars:
+        dt = _parse_ib_bar_datetime(bar.get("date"))
+        if dt is None:
+            continue
+        records.append(
+            {
+                "date": _format_dt_for_period(dt, intraday, period),
+                "open": round(float(bar["open"]), 4),
+                "high": round(float(bar["high"]), 4),
+                "low": round(float(bar["low"]), 4),
+                "close": round(float(bar["close"]), 4),
+                "volume": int(bar["volume"]) if bar.get("volume") is not None else None,
+                "_dt": dt,
+            }
+        )
+
+    if not records:
+        raise ValueError(f"No parseable IB OHLCV data returned for {symbol}")
+
+    result: dict[str, Any] = {"data": records}
+    if period in ("1d", "2d"):
+        n_days = 1 if period == "1d" else 2
+        all_days = sorted({r["_dt"].astimezone(_ET).date() for r in records})
+        keep_days = set(all_days[-n_days:])
+        prev_days = [d for d in all_days if d not in keep_days]
+        prev_close = None
+        if prev_days:
+            prev_day = prev_days[-1]
+            prev_records = [r for r in records if r["_dt"].astimezone(_ET).date() == prev_day]
+            if prev_records:
+                prev_close = prev_records[-1]["close"]
+        records = [r for r in records if r["_dt"].astimezone(_ET).date() in keep_days]
+        result["data"] = records
+        if prev_close is not None:
+            result["prev_close"] = round(float(prev_close), 4)
+
+    if period == "2w":
+        result["data"] = result["data"][-260:]
+
+    for row in result["data"]:
+        row.pop("_dt", None)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -319,9 +541,17 @@ def _build_quote_snapshot(chart: dict) -> dict[str, Any]:
 async def get_quote(symbol: str) -> dict:
     """Return a quote dict for *symbol*, served from cache when fresh."""
     sym = symbol.upper()
-    cached = await _cache.get(f"quote:{sym}", QUOTE_TTL)
+    source = "ib" if _ib_connected() else "yf"
+    ttl = IB_QUOTE_TTL if source == "ib" else QUOTE_TTL
+    cache_key = f"quote:{source}:{sym}"
+    cached = await _cache.get(cache_key, ttl)
     if cached is not None:
         return cached
+
+    if source == "ib":
+        result = await _get_ib_quote_deduped(sym)
+        await _cache.set(cache_key, result)
+        return result
 
     chart = await _yf_chart(sym, range_="1d", interval="1m", include_pre_post=True)
     meta = chart["meta"]
@@ -347,7 +577,7 @@ async def get_quote(symbol: str) -> dict:
         "change_pct":     snapshot["change_pct"],
         "market_state":   snapshot["market_state"],
     }
-    await _cache.set(f"quote:{sym}", result)
+    await _cache.set(cache_key, result)
     return result
 
 
@@ -379,11 +609,20 @@ def _fmt_ts(ts: int, intraday: bool, period: str) -> str:
 async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     """Return OHLCV records list for *symbol*, served from cache when fresh."""
     sym = symbol.upper()
-    cache_key = f"history:{sym}:{period}"
-    ttl = _HISTORY_TTL_MAP.get(period, 900)
+    source = "ib" if _ib_connected() else "yf"
+    cache_key = f"history:{source}:{sym}:{period}"
+    if source == "ib":
+        ttl = 1 if period in ("1d", "2d", "5d", "2w") else 10
+    else:
+        ttl = _HISTORY_TTL_MAP.get(period, 900)
     cached = await _cache.get(cache_key, ttl)
     if cached is not None:
         return cached
+
+    if source == "ib":
+        result = await _get_ib_history(sym, period)
+        await _cache.set(cache_key, result)
+        return result
 
     yf_range    = _PERIOD_RANGE_MAP.get(period, "1y")
     yf_interval = _PERIOD_INTERVAL_MAP.get(period, "1d")
@@ -697,9 +936,10 @@ async def get_news(watchlist: list[str], extra_topics: list[str] | None = None, 
 
 
 INTRADAY_DF_TTL = 55   # seconds – just under the 60 s engine tick so each tick gets a fresh bar
+IB_INTRADAY_DF_TTL = 5
 
 async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
-                          include_pre_post: bool = False) -> "pd.DataFrame":
+                          include_pre_post: bool = False) -> Any:
     """Return a pandas DataFrame of recent OHLCV bars for *symbol*.
 
     This is a shared helper used by the sandbox engine and portfolio manager
@@ -711,10 +951,56 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
     import pandas as pd  # optional heavy import – kept local
 
     sym = symbol.upper()
-    cache_key = f"intraday_df:{sym}:{range_}:{interval}:{'pre' if include_pre_post else 'reg'}"
-    cached = await _cache.get(cache_key, INTRADAY_DF_TTL)
+    source = "ib" if _ib_connected() else "yf"
+    cache_key = f"intraday_df:{source}:{sym}:{range_}:{interval}:{'pre' if include_pre_post else 'reg'}"
+    ttl = IB_INTRADAY_DF_TTL if source == "ib" else INTRADAY_DF_TTL
+    cached = await _cache.get(cache_key, ttl)
     if cached is not None:
         df = pd.DataFrame(cached)
+        df.index = pd.RangeIndex(len(df))
+        return df
+
+    if source == "ib":
+        duration_map = {
+            "1d": "2 D",
+            "2d": "3 D",
+            "5d": "7 D",
+            "2w": "20 D",
+            "1mo": "2 M",
+            "3mo": "4 M",
+        }
+        bar_size_map = {
+            "1m": "1 min",
+            "2m": "2 mins",
+            "5m": "5 mins",
+            "15m": "15 mins",
+            "1h": "1 hour",
+            "1d": "1 day",
+        }
+        bars = await _ib_historical_request(
+            symbol=sym,
+            end_datetime="",
+            duration=duration_map.get(range_, "7 D"),
+            bar_size=bar_size_map.get(interval, "1 min"),
+            what_to_show="TRADES",
+            use_rth=not include_pre_post,
+        )
+        rows: list[dict[str, Any]] = []
+        for bar in bars:
+            rows.append(
+                {
+                    "Open": float(bar["open"]),
+                    "High": float(bar["high"]),
+                    "Low": float(bar["low"]),
+                    "Close": float(bar["close"]),
+                    "Volume": int(bar["volume"]) if bar.get("volume") is not None else 0,
+                }
+            )
+        if not rows:
+            raise ValueError(f"No intraday data returned for {symbol}")
+
+        await _cache.set(cache_key, rows)
+        df = pd.DataFrame(rows)
         df.index = pd.RangeIndex(len(df))
         return df
 
@@ -769,4 +1055,50 @@ async def pre_warm(symbols: list[str], periods: list[str] | None = None) -> None
 
     await asyncio.gather(*[_warm_one(s) for s in symbols])
     logger.info("Market cache pre-warm complete.")
+
+
+async def _ib_historical_request(
+    symbol: str,
+    end_datetime: str,
+    duration: str,
+    bar_size: str,
+    what_to_show: str,
+    use_rth: bool,
+) -> list[dict]:
+    """Rate-limited wrapper around IB historical requests."""
+    global _ib_hist_last_ts
+    async with _ib_hist_semaphore:
+        async with _ib_hist_lock:
+            now = time.monotonic()
+            wait_for = _IB_HIST_MIN_GAP_S - (now - _ib_hist_last_ts)
+            if wait_for > 0:
+                await asyncio.sleep(wait_for)
+            _ib_hist_last_ts = time.monotonic()
+        return await ib_service.get_historical_bars_request(
+            symbol=symbol,
+            end_datetime=end_datetime,
+            duration=duration,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+        )
+
+
+async def _get_ib_quote_deduped(symbol: str) -> dict[str, Any]:
+    """Return one shared in-flight IB quote task per symbol."""
+    owner = False
+    async with _ib_quote_inflight_lock:
+        task = _ib_quote_inflight.get(symbol)
+        if task is None:
+            task = asyncio.create_task(_get_ib_quote(symbol))
+            _ib_quote_inflight[symbol] = task
+            owner = True
+    try:
+        return await task
+    finally:
+        if owner:
+            async with _ib_quote_inflight_lock:
+                existing = _ib_quote_inflight.get(symbol)
+                if existing is task:
+                    _ib_quote_inflight.pop(symbol, None)
 

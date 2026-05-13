@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import logging
+from datetime import date, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -62,9 +63,26 @@ def _tag_market_session(df: pd.DataFrame) -> pd.DataFrame:
     df["session"] = session
     return df
 
-DataSource = Literal["yfinance", "stooq", "ib"]
+DataSource = Literal["auto", "yfinance", "stooq", "ib"]
 
 _FREE_SOURCES: tuple[str, ...] = ("yfinance", "stooq")
+
+
+def _ib_is_connected() -> bool:
+    return bool(IB_AVAILABLE and ib_service.is_connected)
+
+
+def _resolve_source(source: DataSource) -> DataSource:
+    """Resolve requested source to the effective source.
+
+    When IB is connected, Yahoo requests are upgraded to IB so the app uses
+    the broker feed consistently.
+    """
+    if source == "auto":
+        return "ib" if _ib_is_connected() else "yfinance"
+    if source == "yfinance" and _ib_is_connected():
+        return "ib"
+    return source
 
 
 # --------------------------------------------------------------------------- #
@@ -153,6 +171,129 @@ def _fetch_ib(symbol: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
+def _parse_ib_bar_datetime(raw: str) -> pd.Timestamp:
+    """Parse IB historical bar date strings into timezone-aware ET timestamps."""
+    text = str(raw).strip()
+    for fmt in ("%Y%m%d  %H:%M:%S", "%Y%m%d %H:%M:%S", "%Y%m%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            ts = pd.Timestamp(dt)
+            break
+        except ValueError:
+            continue
+    else:
+        ts = pd.to_datetime(text, errors="coerce")
+        if pd.isna(ts):
+            raise ValueError(f"Unparseable IB bar timestamp: {raw!r}")
+
+    if ts.tzinfo is None:
+        return ts.tz_localize(_ET)
+    return ts.tz_convert(_ET)
+
+
+async def _ib_intraday_to_dataframe(symbol: str, start: str, end: str, bar_size: str) -> pd.DataFrame:
+    """Async helper: fetch IB intraday bars and convert to DataFrame."""
+    start_dt = date.fromisoformat(start)
+    end_dt = date.fromisoformat(end)
+    delta_days = max((end_dt - start_dt).days, 1)
+    duration = f"{delta_days} D"
+    end_datetime = f"{end_dt.strftime('%Y%m%d')} 23:59:59"
+
+    bars = await ib_service.get_historical_bars_request(
+        symbol=symbol,
+        end_datetime=end_datetime,
+        duration=duration,
+        bar_size=bar_size,
+        what_to_show="TRADES",
+        use_rth=False,
+    )
+    if not bars:
+        return pd.DataFrame()
+
+    records = []
+    for b in bars:
+        try:
+            ts = _parse_ib_bar_datetime(str(b["date"]))
+        except Exception:
+            continue
+        records.append(
+            {
+                "Date": ts,
+                "Open": b["open"],
+                "High": b["high"],
+                "Low": b["low"],
+                "Close": b["close"],
+                "Volume": b["volume"],
+            }
+        )
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records).set_index("Date")
+    df.sort_index(inplace=True)
+    return df
+
+
+def _fetch_ib_intraday(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Fetch intraday OHLCV data from IB using the finest available interval."""
+    if not IB_AVAILABLE:
+        raise ValueError("ibapi is not installed - IB data source unavailable.")
+    if not ib_service.is_connected:
+        raise ValueError("IB is not connected – cannot fetch intraday data from Interactive Brokers.")
+
+    interval_map = (
+        ("1m", "1 min"),
+        ("2m", "2 mins"),
+        ("5m", "5 mins"),
+    )
+
+    import asyncio
+
+    for interval, ib_bar_size in interval_map:
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(
+                            asyncio.run,
+                            _ib_intraday_to_dataframe(symbol, start, end, ib_bar_size),
+                        )
+                        df = future.result(timeout=60)
+                else:
+                    df = asyncio.run(_ib_intraday_to_dataframe(symbol, start, end, ib_bar_size))
+            except RuntimeError:
+                df = asyncio.run(_ib_intraday_to_dataframe(symbol, start, end, ib_bar_size))
+
+            if df.empty:
+                continue
+
+            df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+            df = _tag_market_session(df)
+            df.attrs["interval"] = interval
+            n_regular = int((df["session"] == "regular").sum())
+            logger.info(
+                "IB intraday fetch: using interval=%s for %s (%s → %s), %d total bars (%d regular-session)",
+                interval,
+                symbol,
+                start,
+                end,
+                len(df),
+                n_regular,
+            )
+            return df
+        except Exception as exc:
+            logger.debug("IB intraday interval %s failed for %s: %s", interval, symbol, exc)
+            continue
+
+    raise ValueError(
+        f"No IB intraday data available for {symbol!r} between {start} and {end}."
+    )
+
+
 async def _ib_to_dataframe(symbol: str, start: str, end: str) -> pd.DataFrame:
     """Async helper: convert IB bar list to a DataFrame."""
     bars = await ib_service.get_historical_bars_range(
@@ -188,7 +329,7 @@ def fetch_ohlcv_intraday(
     symbol: str,
     start: str,
     end: str,
-    source: DataSource = "yfinance",
+    source: DataSource = "auto",
 ) -> pd.DataFrame:
     """Fetch intraday OHLCV data using the finest available interval.
 
@@ -214,11 +355,15 @@ def fetch_ohlcv_intraday(
     ValueError
         When no intraday data could be fetched for any supported interval.
     """
-    if source not in ("yfinance",):
-        # Only yfinance supports sub-daily intervals in this implementation;
-        # other sources fall back to daily data via the regular fetch_ohlcv.
+    source = _resolve_source(source)
+
+    if source == "ib":
+        return _fetch_ib_intraday(symbol, start, end)
+
+    if source != "yfinance":
         logger.warning(
-            "Intraday data is only supported for 'yfinance'; falling back to daily bars for %s.",
+            "Intraday data is not supported for source '%s'; falling back to daily bars for %s.",
+            source,
             symbol,
         )
         df = fetch_ohlcv(symbol, start, end, source=source)
@@ -261,7 +406,7 @@ def fetch_ohlcv(
     symbol: str,
     start: str,
     end: str,
-    source: DataSource = "yfinance",
+    source: DataSource = "auto",
 ) -> pd.DataFrame:
     """Fetch OHLCV data for *symbol* between *start* and *end*.
 
@@ -295,6 +440,8 @@ def fetch_ohlcv(
         "ib": _fetch_ib,
     }
 
+    source = _resolve_source(source)
+
     if source not in fetchers:
         raise ValueError(
             f"Unknown data source {source!r}. Valid options: {list(fetchers)}"
@@ -327,6 +474,13 @@ __all__ = ["fetch_ohlcv", "fetch_ohlcv_intraday", "list_data_sources", "DataSour
 def list_data_sources() -> list[dict]:
     """Return metadata about every supported data source."""
     return [
+        {
+            "id": "auto",
+            "name": "Auto (IB first)",
+            "description": "Uses Interactive Brokers when connected, otherwise Yahoo Finance.",
+            "requires_auth": False,
+            "available": True,
+        },
         {
             "id": "yfinance",
             "name": "Yahoo Finance (yfinance)",

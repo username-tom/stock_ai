@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getIBStatus, connectIB, disconnectIB, setIBMode,
@@ -124,19 +124,6 @@ export default function TradingPanel() {
   const currentMode = ibStatus?.mode ?? 'paper'
   const connectState = connectMut.data?.status
   const connectMessage = connectMut.data?.message
-
-  const refreshPortfolioDetails = () => {
-    qc.invalidateQueries({ queryKey: ['ib-account'] })
-    qc.invalidateQueries({ queryKey: ['ib-positions'] })
-  }
-
-  useEffect(() => {
-    if (!isConnected) return undefined
-    const id = setInterval(() => {
-      refreshPortfolioDetails()
-    }, 60_000)
-    return () => clearInterval(id)
-  }, [isConnected])
 
   const asMoney = (v, ccy = 'USD') => {
     const n = Number(v)

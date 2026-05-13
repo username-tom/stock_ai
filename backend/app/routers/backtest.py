@@ -45,13 +45,13 @@ class BacktestRequest(BaseModel):
     commission: float = Field(default=0.001, ge=0, le=0.05)
     strategy_params: dict = Field(default_factory=dict)
     data_source: DataSource = Field(
-        default="yfinance",
+        default="auto",
         description=(
             "Historical data source for the backtest. "
-            "Options: 'yfinance' (Yahoo Finance, default), 'stooq' (Stooq.com), "
-            "'ib' (Interactive Brokers – falls back to yfinance when not connected)."
+            "Options: 'auto' (IB when connected, otherwise Yahoo Finance), "
+            "'yfinance' (forced Yahoo), 'stooq' (Stooq.com), 'ib' (forced IB)."
         ),
-        example="yfinance",
+        example="auto",
     )
     day_trade: bool = Field(
         default=False,

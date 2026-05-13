@@ -11,19 +11,19 @@ const STORAGE_KEY = 'app_ui_settings'
 
 export const SETTINGS_DEFAULTS = {
   // Refresh rates (ms)
-  quotes_refresh_ms:         30_000,   // Dashboard watchlist quotes
+  quotes_refresh_ms:          5_000,   // Dashboard watchlist quotes
   chart_refresh_ms:          60_000,   // Dashboard price chart (intraday)
   movers_refresh_ms:         60_000,   // Movers tab (market open)
   news_refresh_ms:          1_800_000, // News tab (30 min)
   earnings_refresh_ms:       900_000,  // Earnings tab (15 min)
   sandbox_account_ms:        10_000,   // Sandbox account / positions
-  sandbox_quotes_ms:         30_000,   // Sandbox position quotes
+  sandbox_quotes_ms:          5_000,   // Sandbox position quotes
   sandbox_trades_ms:          8_000,   // Sandbox recent trades / activity
   sandbox_engine_ms:         10_000,   // Sandbox engine state
   portfolio_positions_ms:    10_000,   // Portfolio manager positions
-  portfolio_detail_ms:       15_000,   // Position detail panel
+  portfolio_detail_ms:        5_000,   // Position detail panel
   trading_status_ms:          5_000,   // IB connection status
-  trading_positions_ms:      10_000,   // IB open positions
+  trading_positions_ms:       5_000,   // IB open positions
   trading_orders_ms:          5_000,   // IB open orders
 
   // Ticker bar

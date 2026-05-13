@@ -94,7 +94,7 @@ def run_backtest(
     initial_capital: float = 10_000.0,
     commission: float = 0.005,  # flat per-share fee (e.g. IB fixed $0.005/share)
     script_code: str | None = None,
-    data_source: DataSource = "yfinance",
+    data_source: DataSource = "auto",
     day_trade: bool = False,
     **strategy_params,
 ) -> dict[str, Any]:
@@ -106,9 +106,8 @@ def run_backtest(
     still stored for labelling purposes (use ``"custom_script"``).
 
     The *data_source* parameter selects where OHLCV data is fetched from.
-    Supported values: ``"yfinance"`` (default), ``"stooq"``, ``"ib"``.
-    When ``"ib"`` is requested but IB is not connected, the engine falls back
-    to ``"yfinance"`` automatically.
+    Supported values: ``"auto"`` (default), ``"yfinance"``, ``"stooq"``, ``"ib"``.
+    ``"auto"`` uses IB when connected and otherwise falls back to Yahoo Finance.
 
     When *day_trade* is ``True`` the engine fetches intraday data using the
     finest available interval (1m → 2m → 5m) and scales all annualisation

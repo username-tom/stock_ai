@@ -23,6 +23,7 @@ export default function SandboxSidebar({
   selectedSymbol,
   onSelectSymbol,
   onShowOverview,
+  onAddIbWatchlistSymbol,
 }) {
   const qc = useQueryClient()
 
@@ -80,6 +81,22 @@ export default function SandboxSidebar({
 
   function handleAddSymbol() {
     if (!newSymbol.trim()) return
+    if (ibMode) {
+      const result = onAddIbWatchlistSymbol?.(newSymbol)
+      if (result?.added) {
+        setShowAddSymbol(false)
+        setNewSymbol('')
+        setNewAlloc('')
+        setAddSymbolErr(result?.downgraded
+          ? `Added and reduced refresh to 15s due to watchlist limit.`
+          : '')
+        onSelectSymbol(newSymbol.trim().toUpperCase())
+      } else if (!result?.cancelled) {
+        setAddSymbolErr(result?.error || 'Unable to add symbol.')
+      }
+      return
+    }
+
     addSymbolMut.mutate({
       symbol: newSymbol.trim().toUpperCase(),
       strategy_name: encodeStrategy(newStratType, newStratParams, newScriptId),
@@ -89,6 +106,11 @@ export default function SandboxSidebar({
 
   const [addingWatchlist, setAddingWatchlist] = useState(false)
   async function handleAddFromWatchlist() {
+    if (ibMode) {
+      setAddSymbolErr('Paper/Live symbols are managed directly via watchlist add/remove.')
+      return
+    }
+
     const stored = localStorage.getItem('dashboard_watchlist')
     const watchlist = stored ? JSON.parse(stored) : ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
     const existingSymbols = new Set(positions.map(p => p.symbol))
@@ -226,13 +248,15 @@ export default function SandboxSidebar({
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Stocks</span>
           <div className="flex items-center gap-2">
-            <button
-              onClick={handleAddFromWatchlist}
-              disabled={addingWatchlist}
-              className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
-              title="Add all watchlist symbols not already in portfolio">
-              <QueueListIcon className="h-3.5 w-3.5" />{addingWatchlist ? 'Adding…' : 'Watchlist'}
-            </button>
+            {!ibMode && (
+              <button
+                onClick={handleAddFromWatchlist}
+                disabled={addingWatchlist}
+                className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+                title="Add all watchlist symbols not already in portfolio">
+                <QueueListIcon className="h-3.5 w-3.5" />{addingWatchlist ? 'Adding…' : 'Watchlist'}
+              </button>
+            )}
             <button onClick={() => setShowAddSymbol(v => !v)} className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300">
               <PlusIcon className="h-3.5 w-3.5" />Add
             </button>
@@ -250,8 +274,10 @@ export default function SandboxSidebar({
             <StrategySelector value={newStratType} scriptId={newScriptId} onStrategyChange={handleNewStratChange}
               onScriptChange={setNewScriptId} stratParams={newStratParams}
               onParamChange={(k, v) => setNewStratParams(p => ({ ...p, [k]: v }))} />
-            <input className="input text-sm py-1.5 w-full" type="number" placeholder="Allocate funds $"
-              value={newAlloc} onChange={e => setNewAlloc(e.target.value)} />
+            {!ibMode && (
+              <input className="input text-sm py-1.5 w-full" type="number" placeholder="Allocate funds $"
+                value={newAlloc} onChange={e => setNewAlloc(e.target.value)} />
+            )}
             {addSymbolErr && <div className="text-xs text-red-400">{addSymbolErr}</div>}
             <div className="flex gap-2">
               <button className="btn-primary flex-1 text-xs py-1.5" disabled={!newSymbol || addSymbolMut.isPending} onClick={handleAddSymbol}>Add Symbol</button>

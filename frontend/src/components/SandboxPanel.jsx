@@ -20,12 +20,34 @@ import {
 import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy } from './sandbox/sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandbox/sandboxConstants'
 import { useAppSettings } from '../hooks/useAppSettings'
+import { WATCHLIST_SYMBOL_LIMIT } from '../hooks/useWatchlist'
+import { setSetting } from '../hooks/useAppSettings'
 import SandboxSidebar from './sandbox/SandboxSidebar'
 import PortfolioOverview from './sandbox/PortfolioOverview'
 import PositionDetail from './sandbox/PositionDetail'
 import TradeNotificationBanner from './sandbox/TradeNotificationBanner'
 import ActivityLog from './sandbox/ActivityLog'
 import StrategySelector from './sandbox/StrategySelector'
+
+const WATCHLIST_STORAGE_KEY = 'dashboard_watchlist'
+const WATCHLIST_DEFAULT = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
+
+function readDashboardWatchlist() {
+  try {
+    const raw = localStorage.getItem(WATCHLIST_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) return parsed.slice(0, WATCHLIST_SYMBOL_LIMIT)
+    }
+  } catch {}
+  return WATCHLIST_DEFAULT
+}
+
+function writeDashboardWatchlist(symbols) {
+  const next = symbols.slice(0, WATCHLIST_SYMBOL_LIMIT)
+  try { localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next)) } catch {}
+  window.dispatchEvent(new Event('watchlist-updated'))
+}
 
 export default function SandboxPanel() {
   const qc = useQueryClient()
@@ -55,6 +77,7 @@ export default function SandboxPanel() {
   const [paperResetConfirm, setPaperResetConfirm] = useState(false)
   const [showResetMenu, setShowResetMenu] = useState(false)
   const [activities, setActivities] = useState([])
+  const [ibWatchlistSymbols, setIbWatchlistSymbols] = useState(() => readDashboardWatchlist())
   const prevTradeIdRef = useRef(null)
   const prevIbSessionRef = useRef({ connected: false, mode: null })
   const prevProfileRef = useRef('simulated')
@@ -90,7 +113,52 @@ export default function SandboxPanel() {
   // queries
   const { data: accountData } = useQuery({ queryKey: ['sandbox-account'], queryFn: getSandboxAccount, refetchInterval: appSettings.sandbox_account_ms })
   const { data: posData } = useQuery({ queryKey: ['sandbox-positions'], queryFn: getSandboxPositions, refetchInterval: appSettings.sandbox_account_ms })
-  const positions = posData?.positions ?? []
+  const rawPositions = posData?.positions ?? []
+
+  useEffect(() => {
+    if (!ibConnected) return undefined
+    const sync = () => setIbWatchlistSymbols(readDashboardWatchlist())
+    sync()
+    window.addEventListener('watchlist-updated', sync)
+    window.addEventListener('focus', sync)
+    return () => {
+      window.removeEventListener('watchlist-updated', sync)
+      window.removeEventListener('focus', sync)
+    }
+  }, [ibConnected])
+
+  const positions = useMemo(() => {
+    if (!ibConnected) return rawPositions
+
+    const bySymbol = new Map(rawPositions.map(p => [p.symbol, p]))
+    const merged = [...rawPositions]
+    for (const sym of ibWatchlistSymbols) {
+      if (bySymbol.has(sym)) continue
+      merged.push({
+        id: null,
+        symbol: sym,
+        allocated_funds: 0,
+        shares: 0,
+        avg_cost: 0,
+        strategy_name: null,
+        strategy_enabled: false,
+        last_signal: null,
+        last_run_at: null,
+        engine_error: null,
+        realized_pnl: 0,
+        total_invested: 0,
+        unrealized_pnl: 0,
+        market_value: 0,
+        is_on_watchlist: true,
+        created_at: null,
+        pending_shares: 0,
+        pending_avg_cost: 0,
+        pending_since: null,
+      })
+    }
+    return merged
+  }, [ibConnected, rawPositions, ibWatchlistSymbols])
+
   const symbols = positions.map(p => p.symbol)
   const { data: quotesData } = useQuery({
     queryKey: ['sandbox-quotes', symbols.join(',')],
@@ -110,11 +178,11 @@ export default function SandboxPanel() {
   const selectedPrice = quotes[selectedSymbol]?.last_price ?? selectedPos?.avg_cost ?? 0
 
   // portfolio calcs
-  const totalEquity = useMemo(() => positions.reduce((s, p) => s + (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares, 0), [positions, quotes])
-  const totalRealizedPnl = positions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
-  const totalUnrealizedPnl = positions.reduce((s, p) => s + ((quotes[p.symbol]?.last_price ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
+  const totalEquity = useMemo(() => rawPositions.reduce((s, p) => s + (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares, 0), [rawPositions, quotes])
+  const totalRealizedPnl = rawPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
+  const totalUnrealizedPnl = rawPositions.reduce((s, p) => s + ((quotes[p.symbol]?.last_price ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
   const pieData = useMemo(() => {
-    const active = positions.filter(p => p.shares > 0 || p.allocated_funds > 0)
+    const active = rawPositions.filter(p => p.shares > 0 || p.allocated_funds > 0)
     const total = active.reduce((s, p) => {
       const mv = (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares
       const cashRemaining = Math.max(0, p.allocated_funds - p.avg_cost * p.shares)
@@ -127,7 +195,7 @@ export default function SandboxPanel() {
       const sliceValue = mv + cashRemaining
       return { symbol: p.symbol, shares: p.shares, market_value: sliceValue, mv, cash: cashRemaining, pct: pct(sliceValue, total) }
     })
-  }, [positions, quotes])
+  }, [rawPositions, quotes])
   const selectedMarketValue = selectedPos ? selectedPrice * selectedPos.shares : 0
   const selectedUnrealised = selectedPos ? selectedMarketValue - selectedPos.avg_cost * selectedPos.shares : 0
 
@@ -230,8 +298,21 @@ export default function SandboxPanel() {
 
   // mutations
   const removeSymbolMut = useMutation({
-    mutationFn: s => removeSandboxSymbol(s),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sandbox-positions'] }); setSelectedSymbol(null) },
+    mutationFn: async (s) => {
+      if (!ibConnected) {
+        return removeSandboxSymbol(s)
+      }
+
+      const current = readDashboardWatchlist()
+      const next = current.filter(sym => sym !== s)
+      writeDashboardWatchlist(next)
+      setIbWatchlistSymbols(next)
+      return { symbol: s, local_watchlist_removed: true }
+    },
+    onSuccess: (_, symbol) => {
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      setSelectedSymbol(prev => (prev === symbol ? null : prev))
+    },
   })
   const updatePosMut = useMutation({
     mutationFn: ({ symbol, payload }) => updateSandboxPosition(symbol, payload),
@@ -410,6 +491,33 @@ export default function SandboxPanel() {
     e.preventDefault(); setTradeMsg(null)
     tradeMut.mutate({ symbol: selectedSymbol, side: tradeForm.side, quantity: parseFloat(tradeForm.quantity), price: parseFloat(tradeForm.price) || selectedPrice, strategy_name: selectedPos?.strategy_name, reason: tradeForm.reason?.trim() || 'manual' })
   }
+  function handleIbWatchlistAdd(symbol) {
+    const sym = (symbol || '').trim().toUpperCase()
+    if (!sym) return { added: false, error: 'Symbol is required.' }
+
+    const current = readDashboardWatchlist()
+    if (current.includes(sym)) return { added: false, error: 'Already in watchlist.' }
+
+    if (current.length < WATCHLIST_SYMBOL_LIMIT) {
+      const next = [...current, sym]
+      writeDashboardWatchlist(next)
+      setIbWatchlistSymbols(next)
+      return { added: true, downgraded: false }
+    }
+
+    const oldest = current[0]
+    const confirmed = window.confirm(
+      `Watchlist limit is ${WATCHLIST_SYMBOL_LIMIT} symbols. Add ${sym} by replacing ${oldest} and reduce refresh to 15s?`
+    )
+    if (!confirmed) return { added: false, cancelled: true }
+
+    setSetting('quotes_refresh_ms', 15_000)
+    setSetting('sandbox_quotes_ms', 15_000)
+    const next = [...current.slice(1), sym]
+    writeDashboardWatchlist(next)
+    setIbWatchlistSymbols(next)
+    return { added: true, downgraded: true, replaced: oldest }
+  }
   async function handleExport() {
     setExportLoading(true)
     try {
@@ -464,6 +572,7 @@ export default function SandboxPanel() {
         selectedSymbol={selectedSymbol}
         onSelectSymbol={handleSelectSymbol}
         onShowOverview={() => handleSelectSymbol(null)}
+        onAddIbWatchlistSymbol={handleIbWatchlistAdd}
       />
 
       {/* Right panel */}

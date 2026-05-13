@@ -47,7 +47,8 @@ export default function LivePriceTicker() {
     ws.onopen = () => {
       if (cancelled) { ws.close(); return }
       setWsOk(true)
-      ws.send(JSON.stringify({ symbols, interval: 15 }))
+      const wsIntervalSec = Math.max(1, Math.round((appSettings.quotes_refresh_ms || 5000) / 1000))
+      ws.send(JSON.stringify({ symbols, interval: wsIntervalSec }))
     }
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
@@ -67,7 +68,7 @@ export default function LivePriceTicker() {
     ws.onclose = () => { if (!cancelled) setWsOk(false) }
 
     return () => { cancelled = true; ws.close() }
-  }, [symbols.join(',')])
+  }, [symbols.join(','), appSettings.quotes_refresh_ms])
 
   // Prune removed symbols from prices map
   useEffect(() => {

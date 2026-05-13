@@ -1,13 +1,21 @@
 import { useState, useRef } from 'react'
 import { getQuote, searchSymbols } from '../api/client'
+import { setSetting } from './useAppSettings'
 
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
 const STORAGE_KEY = 'dashboard_watchlist'
+export const WATCHLIST_SYMBOL_LIMIT = 20
+const OVER_LIMIT_QUOTES_REFRESH_MS = 15_000
 
 function loadWatchlist() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) return JSON.parse(saved)
+    if (saved) {
+      const parsed = JSON.parse(saved)
+      if (Array.isArray(parsed)) {
+        return parsed.slice(0, WATCHLIST_SYMBOL_LIMIT)
+      }
+    }
   } catch {}
   return DEFAULT_WATCHLIST
 }
@@ -18,6 +26,7 @@ function saveWatchlist(list) {
 
 export function useWatchlist() {
   const [watchlist, setWatchlist] = useState(loadWatchlist)
+  const [addNotice, setAddNotice] = useState('')
   const [editing, setEditing] = useState(false)
   const [addInput, setAddInput] = useState('')
   const [addError, setAddError] = useState('')
@@ -29,16 +38,41 @@ export function useWatchlist() {
   const dragOver = useRef(null)
 
   const updateWatchlist = (next) => {
-    setWatchlist(next)
-    saveWatchlist(next)
+    const trimmed = next.slice(0, WATCHLIST_SYMBOL_LIMIT)
+    setWatchlist(trimmed)
+    saveWatchlist(trimmed)
     window.dispatchEvent(new Event('watchlist-updated'))
+  }
+
+  const addWithLimitPolicy = (sym) => {
+    if (watchlist.includes(sym)) return { added: false, reason: 'duplicate' }
+
+    if (watchlist.length < WATCHLIST_SYMBOL_LIMIT) {
+      updateWatchlist([...watchlist, sym])
+      return { added: true, downgraded: false }
+    }
+
+    const oldest = watchlist[0]
+    const confirmed = window.confirm(
+      `Watchlist limit is ${WATCHLIST_SYMBOL_LIMIT} symbols. Add ${sym} by replacing ${oldest} and reduce quotes refresh to 15s?`
+    )
+    if (!confirmed) {
+      return { added: false, reason: 'cancelled' }
+    }
+
+    setSetting('quotes_refresh_ms', OVER_LIMIT_QUOTES_REFRESH_MS)
+    setAddNotice(
+      `Watchlist limit reached: replaced ${oldest} with ${sym}. Quotes refresh set to 15s.`
+    )
+    updateWatchlist([...watchlist.slice(1), sym])
+    return { added: true, downgraded: true }
   }
 
   const removeSymbol = (sym) => updateWatchlist(watchlist.filter(s => s !== sym))
 
   // Direct add without async validation — for known-valid symbols (e.g. from movers list)
   const addSymbol = (sym) => {
-    if (!watchlist.includes(sym)) updateWatchlist([...watchlist, sym])
+    addWithLimitPolicy(sym)
   }
 
   const toggleSymbol = (sym) => {
@@ -53,9 +87,13 @@ export function useWatchlist() {
     setAddError('')
     try {
       await getQuote(sym)
-      updateWatchlist([...watchlist, sym])
-      setAddInput('')
-      setAddSuggestions([])
+      const result = addWithLimitPolicy(sym)
+      if (result.added) {
+        setAddInput('')
+        setAddSuggestions([])
+      } else if (result.reason === 'cancelled') {
+        setAddError(`Limit is ${WATCHLIST_SYMBOL_LIMIT}. Add cancelled.`)
+      }
     } catch {
       setAddError('Symbol not found')
     } finally {
@@ -99,6 +137,7 @@ export function useWatchlist() {
 
   return {
     watchlist, updateWatchlist,
+    addNotice, setAddNotice,
     editing, toggleEditing,
     addInput, addError, addLoading, addSuggestions, showSuggestions,
     handleAdd, handleAddInputChange, handleAddKey,

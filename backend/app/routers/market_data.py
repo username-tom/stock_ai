@@ -1,4 +1,4 @@
-"""Market data endpoints backed by Stooq via market_service (TTL-cached)."""
+"""Market data endpoints (IB-first when connected, Yahoo fallback)."""
 from __future__ import annotations
 
 import logging
@@ -40,7 +40,7 @@ async def get_bulk_quotes(
 async def get_history(
     symbol: str,
     period: str = Query(default="1y", description="e.g. 1d 5d 1mo 3mo 6mo 1y 2y"),
-    interval: str = Query(default="1d", description="Only 1d supported (Stooq daily data)"),
+    interval: str = Query(default="1d", description="Client display hint; server chooses best interval by period/source"),
 ):
     """Return OHLCV history for *symbol* (cached up to 15 min)."""
     try:
