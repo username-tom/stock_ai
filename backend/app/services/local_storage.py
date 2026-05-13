@@ -21,6 +21,7 @@ _BACKTEST_DIR = Path(settings.LOCAL_STORAGE_DIR) / "backtest_reports"
 _TRADE_DIR = Path(settings.LOCAL_STORAGE_DIR) / "trade_logs"
 _PORTFOLIO_DIR = Path(settings.LOCAL_STORAGE_DIR) / "portfolio_activities"
 _SCRIPTS_DIR = Path(settings.LOCAL_STORAGE_DIR) / "custom_scripts"
+_PORTFOLIO_STATES_DIR = Path(settings.LOCAL_STORAGE_DIR) / "portfolio_states"
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +159,51 @@ def list_portfolio_activity_files() -> list[dict[str, Any]]:
                 "size_bytes": stat.st_size,
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
             })
+    return files
+
+
+# ---------------------------------------------------------------------------
+# Portfolio state save-state helpers
+# ---------------------------------------------------------------------------
+
+def save_portfolio_state(profile: str, state: dict[str, Any]) -> str:
+    """Persist a named portfolio state snapshot (simulated/paper/live)."""
+    _PORTFOLIO_STATES_DIR.mkdir(parents=True, exist_ok=True)
+    safe_profile = _safe_filename(profile.lower() or "simulated")
+    path = _PORTFOLIO_STATES_DIR / f"{safe_profile}.json"
+    payload = {
+        "profile": safe_profile,
+        "saved_at": datetime.utcnow().isoformat(),
+        "state": state,
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, default=str)
+    return str(path)
+
+
+def load_portfolio_state(profile: str) -> dict[str, Any] | None:
+    """Load a named portfolio state snapshot, if present."""
+    safe_profile = _safe_filename(profile.lower() or "simulated")
+    path = _PORTFOLIO_STATES_DIR / f"{safe_profile}.json"
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def list_portfolio_state_files() -> list[dict[str, Any]]:
+    """List saved portfolio state snapshot files."""
+    if not _PORTFOLIO_STATES_DIR.exists():
+        return []
+    files = []
+    for p in sorted(_PORTFOLIO_STATES_DIR.glob("*.json")):
+        stat = p.stat()
+        files.append({
+            "filename": p.name,
+            "path": str(p),
+            "size_bytes": stat.st_size,
+            "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+        })
     return files
 
 

@@ -1,10 +1,13 @@
 """Shared helpers used across sandbox sub-routers."""
 from __future__ import annotations
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.models.sandbox import SandboxAccount, SandboxPosition
+from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade
+from app.services.ib_service import ib_service
+from app.services.local_storage import save_portfolio_state
 
 
 async def get_account(db: AsyncSession) -> SandboxAccount:
@@ -71,3 +74,52 @@ def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict
         "pending_avg_cost": p.pending_avg_cost,
         "pending_since": p.pending_since.isoformat() if p.pending_since else None,
     }
+
+
+def ensure_sandbox_write_allowed() -> None:
+    """Reject sandbox mutations while IB is connected and active."""
+    if ib_service.is_connected:
+        raise HTTPException(
+            status_code=409,
+            detail="Sandbox writes are disabled while IB is connected. Disconnect IB to edit simulated portfolio.",
+        )
+
+
+async def build_simulated_state_snapshot(db: AsyncSession) -> dict:
+    """Build a full snapshot of the current simulated portfolio state."""
+    account = await get_account(db)
+    pos_res = await db.execute(select(SandboxPosition).order_by(SandboxPosition.symbol))
+    positions = pos_res.scalars().all()
+    tr_res = await db.execute(select(SandboxTrade).order_by(SandboxTrade.created_at))
+    trades = tr_res.scalars().all()
+
+    return {
+        "profile": "simulated",
+        "account": {
+            "total_funds": account.total_funds,
+            "total_deposited": account.total_deposited,
+            "updated_at": account.updated_at.isoformat() if account.updated_at else None,
+        },
+        "positions": [position_dict(p) for p in positions],
+        "trades": [
+            {
+                "id": t.id,
+                "symbol": t.symbol,
+                "side": t.side,
+                "quantity": t.quantity,
+                "price": t.price,
+                "total": t.total,
+                "strategy_name": t.strategy_name,
+                "reason": t.reason,
+                "pnl": t.pnl,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in trades
+        ],
+    }
+
+
+async def offload_simulated_state(db: AsyncSession) -> str:
+    """Persist the simulated portfolio snapshot to local storage."""
+    snapshot = await build_simulated_state_snapshot(db)
+    return save_portfolio_state("simulated", snapshot)

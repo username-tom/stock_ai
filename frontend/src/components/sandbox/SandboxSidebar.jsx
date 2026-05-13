@@ -132,20 +132,24 @@ export default function SandboxSidebar({
             )}
           </div>
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-            <button
-              onClick={e => { e.stopPropagation(); setShowAddFunds(v => !v); setShowWithdraw(false) }}
-              title="Add Funds"
-              className={`flex items-center justify-center rounded-md p-1.5 transition-colors ${showAddFunds ? 'bg-emerald-700/30 text-emerald-300' : 'text-emerald-400 hover:bg-emerald-900/30'}`}
-            >
-              <CurrencyDollarIcon className="h-4 w-4" />
-            </button>
-            <button
-              onClick={e => { e.stopPropagation(); setShowWithdraw(v => !v); setShowAddFunds(false) }}
-              title="Withdraw Funds"
-              className={`flex items-center justify-center rounded-md p-1.5 transition-colors ${showWithdraw ? 'bg-amber-700/30 text-amber-300' : 'text-slate-400 hover:bg-dark-600'}`}
-            >
-              <MinusCircleIcon className="h-4 w-4" />
-            </button>
+            {!ibMode && (
+              <>
+                <button
+                  onClick={e => { e.stopPropagation(); setShowAddFunds(v => !v); setShowWithdraw(false) }}
+                  title="Add Funds"
+                  className={`flex items-center justify-center rounded-md p-1.5 transition-colors ${showAddFunds ? 'bg-emerald-700/30 text-emerald-300' : 'text-emerald-400 hover:bg-emerald-900/30'}`}
+                >
+                  <CurrencyDollarIcon className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={e => { e.stopPropagation(); setShowWithdraw(v => !v); setShowAddFunds(false) }}
+                  title="Withdraw Funds"
+                  className={`flex items-center justify-center rounded-md p-1.5 transition-colors ${showWithdraw ? 'bg-amber-700/30 text-amber-300' : 'text-slate-400 hover:bg-dark-600'}`}
+                >
+                  <MinusCircleIcon className="h-4 w-4" />
+                </button>
+              </>
+            )}
             {!ibMode && (
               <button
                 onClick={e => { e.stopPropagation(); repairFundsMut.mutate() }}
@@ -159,7 +163,7 @@ export default function SandboxSidebar({
           </div>
         </div>
 
-        {showAddFunds && (
+        {!ibMode && showAddFunds && (
           <div className="flex gap-2 mb-3" onClick={e => e.stopPropagation()}>
             <input className="input flex-1 py-1.5 text-sm" type="number" min="1" placeholder="Amount $"
               value={fundsInput} onChange={e => setFundsInput(e.target.value)}
@@ -168,7 +172,7 @@ export default function SandboxSidebar({
               onClick={() => addFundsMut.mutate(parseFloat(fundsInput))}>Add</button>
           </div>
         )}
-        {showWithdraw && (
+        {!ibMode && showWithdraw && (
           <div className="mb-3 space-y-1.5" onClick={e => e.stopPropagation()}>
             <div className="flex gap-2">
               <input className="input flex-1 py-1.5 text-sm" type="number" min="1" placeholder="Amount $"

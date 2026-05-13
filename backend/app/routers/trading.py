@@ -1,6 +1,8 @@
 """Trading endpoints: simulated, paper (IB), and live (IB)."""
 from __future__ import annotations
 
+import logging
+import math
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -8,15 +10,89 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.database import get_db
+from app.config import settings
+from app.database import get_db, AsyncSessionLocal
 from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
+from app.models.sandbox import SandboxPosition
+from app.routers.sandbox_router._helpers import offload_simulated_state
 from app.services.ib_service import ib_service
 from app.services.local_storage import (
     save_trade_logs_csv, save_trade_logs_json, list_trade_log_files,
-    records_to_csv_bytes, records_to_json_bytes,
+    records_to_csv_bytes, records_to_json_bytes, save_portfolio_state, load_portfolio_state,
 )
 
 router = APIRouter(prefix="/api/trading", tags=["trading"])
+logger = logging.getLogger(__name__)
+
+_SIM_AUTOMATION_PROFILE = "simulated_automation"
+
+
+async def _snapshot_ib_state(mode: str) -> None:
+    if not ib_service.is_connected:
+        return
+    account_summary = await ib_service.get_account_summary()
+    positions = await ib_service.get_positions()
+    save_portfolio_state(mode, {
+        "source": "ib",
+        "mode": mode,
+        "captured_at": datetime.utcnow().isoformat(),
+        "account_summary": account_summary,
+        "positions": positions,
+    })
+
+
+async def _snapshot_simulated_automation_state() -> None:
+    """Save simulated engine + manager enabled states before IB handoff."""
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(SandboxPosition))
+        positions = res.scalars().all()
+        engine_enabled_by_symbol = {
+            p.symbol: bool(p.strategy_enabled)
+            for p in positions
+            if p.symbol
+        }
+
+    from app.services.portfolio_manager import get_manager_settings
+    manager_settings = get_manager_settings()
+    manager_enabled = bool(manager_settings.get("enabled", False))
+
+    save_portfolio_state(_SIM_AUTOMATION_PROFILE, {
+        "source": "simulated",
+        "captured_at": datetime.utcnow().isoformat(),
+        "engine_enabled_by_symbol": engine_enabled_by_symbol,
+        "manager_enabled": manager_enabled,
+    })
+
+
+async def _restore_simulated_automation_state() -> dict:
+    """Restore simulated engine + manager enabled states after IB disconnect."""
+    payload = load_portfolio_state(_SIM_AUTOMATION_PROFILE)
+    state = (payload or {}).get("state") or {}
+
+    engine_enabled_by_symbol = state.get("engine_enabled_by_symbol") or {}
+    manager_enabled = state.get("manager_enabled")
+
+    restored_engines = 0
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(SandboxPosition))
+        positions = res.scalars().all()
+        for p in positions:
+            if p.symbol in engine_enabled_by_symbol:
+                p.strategy_enabled = bool(engine_enabled_by_symbol[p.symbol])
+                restored_engines += 1
+        await db.commit()
+
+    restored_manager = False
+    if manager_enabled is not None:
+        from app.services.portfolio_manager import update_manager_settings
+        update_manager_settings({"enabled": bool(manager_enabled)})
+        restored_manager = True
+
+    return {
+        "restored": bool(payload),
+        "restored_engines": restored_engines,
+        "restored_manager": restored_manager,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -25,12 +101,58 @@ router = APIRouter(prefix="/api/trading", tags=["trading"])
 
 @router.post("/ib/connect")
 async def connect_ib():
-    return await ib_service.connect()
+    result = await ib_service.connect()
+    if result.get("status") == "ok" and ib_service.is_connected:
+        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        try:
+            async with AsyncSessionLocal() as db:
+                await offload_simulated_state(db)
+                await _snapshot_simulated_automation_state()
+
+                res = await db.execute(select(SandboxPosition))
+                positions = res.scalars().all()
+                for pos in positions:
+                    pos.strategy_enabled = False
+                await db.commit()
+
+            from app.services.portfolio_manager import update_manager_settings
+            update_manager_settings({"enabled": False})
+            await _snapshot_ib_state(mode)
+            result["handoff"] = {
+                "simulated_saved": True,
+                "engines_stopped": True,
+                "portfolio_manager_stopped": True,
+                "active_profile": mode,
+            }
+        except Exception as exc:
+            logger.warning("IB handoff setup failed: %s", exc)
+            result["handoff"] = {
+                "simulated_saved": False,
+                "engines_stopped": False,
+                "portfolio_manager_stopped": False,
+                "error": str(exc),
+            }
+    return result
 
 
 @router.post("/ib/disconnect")
 async def disconnect_ib():
-    return await ib_service.disconnect()
+    if ib_service.is_connected:
+        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        await _snapshot_ib_state(mode)
+    result = await ib_service.disconnect()
+
+    try:
+        restored = await _restore_simulated_automation_state()
+        result["simulated_restore"] = restored
+    except Exception as exc:
+        logger.warning("Simulated automation state restore failed: %s", exc)
+        result["simulated_restore"] = {
+            "restored": False,
+            "error": str(exc),
+        }
+
+    return result
 
 
 @router.get("/ib/status")
@@ -45,13 +167,14 @@ class IBModeToggleRequest(BaseModel):
 @router.post("/ib/mode")
 async def set_ib_mode(req: IBModeToggleRequest):
     """Toggle IB connector between paper (port 4002) and live (port 4001)."""
-    from app.config import settings
     settings.TRADING_MODE = req.mode
     # Update the default port to match the selected mode
     if req.mode == "live":
         settings.IB_PORT = 4001
     else:
         settings.IB_PORT = 4002
+    if ib_service.is_connected:
+        await _snapshot_ib_state(req.mode)
     return {"mode": settings.TRADING_MODE, "port": settings.IB_PORT}
 
 
@@ -68,6 +191,80 @@ async def ib_positions():
 @router.get("/ib/orders")
 async def ib_open_orders():
     return {"orders": await ib_service.get_open_orders()}
+
+
+@router.post("/ib/paper/reset")
+async def reset_ib_paper_portfolio():
+    """Reset IB paper portfolio by cancelling open orders and flattening positions.
+
+    This endpoint is intentionally disabled for live mode.
+    """
+    if settings.TRADING_MODE != "paper":
+        raise HTTPException(status_code=403, detail="Paper reset is only available in paper mode.")
+    if not ib_service.is_connected:
+        raise HTTPException(status_code=503, detail="Not connected to Interactive Brokers.")
+
+    cancelled_order_ids: list[int] = []
+    cancel_errors: list[dict] = []
+    flattened: list[dict] = []
+    flatten_errors: list[dict] = []
+
+    open_orders = await ib_service.get_open_orders()
+    for order in open_orders:
+        oid = order.get("ib_order_id")
+        if oid is None:
+            continue
+        result = await ib_service.cancel_order(int(oid))
+        if result.get("status") == "ok":
+            cancelled_order_ids.append(int(oid))
+        else:
+            cancel_errors.append({
+                "ib_order_id": int(oid),
+                "error": result.get("error", "unknown error"),
+            })
+
+    positions = await ib_service.get_positions()
+    for p in positions:
+        symbol = str(p.get("symbol") or "").upper()
+        qty = float(p.get("quantity") or 0.0)
+        if not symbol or math.isclose(qty, 0.0, abs_tol=1e-9):
+            continue
+
+        side = "SELL" if qty > 0 else "BUY"
+        quantity = abs(qty)
+        result = await ib_service.place_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type="MKT",
+        )
+        if "error" in result:
+            flatten_errors.append({
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "error": result.get("error"),
+            })
+        else:
+            flattened.append({
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "ib_order_id": result.get("ib_order_id"),
+                "status": result.get("status"),
+            })
+
+    return {
+        "status": "ok",
+        "cancelled_orders": len(cancelled_order_ids),
+        "flatten_orders": len(flattened),
+        "cancel_errors": cancel_errors,
+        "flatten_errors": flatten_errors,
+        "details": {
+            "cancelled_order_ids": cancelled_order_ids,
+            "flattened": flattened,
+        },
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -215,19 +412,19 @@ async def export_trade_history(
 
     if save:
         if fmt == "json":
-            local_storage.save_trade_logs_json(records, filename_prefix="trade_logs")
+            save_trade_logs_json(records, filename_prefix="trade_logs")
         else:
-            local_storage.save_trade_logs_csv(records, filename_prefix="trade_logs")
+            save_trade_logs_csv(records, filename_prefix="trade_logs")
 
     if fmt == "json":
-        content = local_storage.records_to_json_bytes(records)
+        content = records_to_json_bytes(records)
         return Response(
             content=content,
             media_type="application/json",
             headers={"Content-Disposition": 'attachment; filename="trade_logs.json"'},
         )
 
-    content = local_storage.records_to_csv_bytes(records)
+    content = records_to_csv_bytes(records)
     return Response(
         content=content,
         media_type="text/csv",
@@ -238,4 +435,4 @@ async def export_trade_history(
 @router.get("/history/local-storage/files")
 async def list_trade_log_files():
     """List all trade log files saved to local PC storage."""
-    return {"files": local_storage.list_trade_log_files()}
+    return {"files": list_trade_log_files()}

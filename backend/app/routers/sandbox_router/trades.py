@@ -11,7 +11,14 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade, SandboxAllocationEvent
-from app.routers.sandbox_router._helpers import get_account, position_dict, compute_available_cash
+from app.routers.sandbox_router._helpers import (
+    get_account,
+    position_dict,
+    compute_available_cash,
+    ensure_sandbox_write_allowed,
+    offload_simulated_state,
+)
+from app.services.ib_service import ib_service
 from app.services.local_storage import (
     save_trade_logs_csv, save_trade_logs_json, list_trade_log_files,
     records_to_csv_bytes, records_to_json_bytes,
@@ -31,6 +38,7 @@ class TradeRequest(BaseModel):
 
 @router.post("/trade")
 async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
+    ensure_sandbox_write_allowed()
     symbol = req.symbol.upper()
     side   = req.side.upper()
     total  = req.quantity * req.price
@@ -98,6 +106,7 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(trade)
     await db.refresh(pos)
+    await offload_simulated_state(db)
 
     return {
         "trade_id": trade.id,
@@ -113,6 +122,9 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
 
 @router.get("/trades")
 async def get_trades(symbol: Optional[str] = None, limit: int = 200, db: AsyncSession = Depends(get_db)):
+    if ib_service.is_connected:
+        return {"trades": [], "source": "ib"}
+
     q = select(SandboxTrade).order_by(SandboxTrade.created_at.desc()).limit(limit)
     if symbol:
         q = q.where(SandboxTrade.symbol == symbol.upper())
@@ -140,6 +152,16 @@ async def get_trades(symbol: Optional[str] = None, limit: int = 200, db: AsyncSe
 @router.get("/analytics")
 async def get_analytics(db: AsyncSession = Depends(get_db)):
     """Time-series analytics derived from trade history."""
+    if ib_service.is_connected:
+        return {
+            "cumulative_pnl": [],
+            "daily_volume": [],
+            "symbol_pnl": [],
+            "win_loss": {"wins": 0, "losses": 0, "breakeven": 0},
+            "total_trades": 0,
+            "source": "ib",
+        }
+
     trades_res = await db.execute(select(SandboxTrade).order_by(SandboxTrade.created_at))
     trades = trades_res.scalars().all()
 
@@ -231,19 +253,19 @@ async def export_trades(
     if save:
         prefix = f"sandbox_trades_{symbol.upper()}" if symbol else "sandbox_trades"
         if fmt == "json":
-            local_storage.save_trade_logs_json(records, filename_prefix=prefix)
+            save_trade_logs_json(records, filename_prefix=prefix)
         else:
-            local_storage.save_trade_logs_csv(records, filename_prefix=prefix)
+            save_trade_logs_csv(records, filename_prefix=prefix)
 
     if fmt == "json":
-        content = local_storage.records_to_json_bytes(records)
+        content = records_to_json_bytes(records)
         return Response(
             content=content,
             media_type="application/json",
             headers={"Content-Disposition": 'attachment; filename="sandbox_trades.json"'},
         )
 
-    content = local_storage.records_to_csv_bytes(records)
+    content = records_to_csv_bytes(records)
     return Response(
         content=content,
         media_type="text/csv",
@@ -254,4 +276,4 @@ async def export_trades(
 @router.get("/trades/local-storage/files")
 async def list_trade_log_files():
     """List all trade log files saved to local PC storage."""
-    return {"files": local_storage.list_trade_log_files()}
+    return {"files": list_trade_log_files()}

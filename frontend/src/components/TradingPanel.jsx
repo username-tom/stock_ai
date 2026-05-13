@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getIBStatus, connectIB, disconnectIB, setIBMode,
-  getIBPositions, getIBOrders, getTradeHistory,
+  getIBAccount, getIBPositions, getIBOrders, getTradeHistory,
   placeOrder, cancelOrder,
 } from '../api/client'
 import { useAppSettings } from '../hooks/useAppSettings'
@@ -42,6 +42,13 @@ export default function TradingPanel() {
   const { data: positions, isLoading: positionsLoading } = useQuery({
     queryKey: ['ib-positions'],
     queryFn: getIBPositions,
+    enabled: ibStatus?.connected,
+    refetchInterval: appSettings.trading_positions_ms,
+  })
+
+  const { data: ibAccount } = useQuery({
+    queryKey: ['ib-account'],
+    queryFn: getIBAccount,
     enabled: ibStatus?.connected,
     refetchInterval: appSettings.trading_positions_ms,
   })
@@ -118,6 +125,41 @@ export default function TradingPanel() {
   const connectState = connectMut.data?.status
   const connectMessage = connectMut.data?.message
 
+  const refreshPortfolioDetails = () => {
+    qc.invalidateQueries({ queryKey: ['ib-account'] })
+    qc.invalidateQueries({ queryKey: ['ib-positions'] })
+  }
+
+  useEffect(() => {
+    if (!isConnected) return undefined
+    const id = setInterval(() => {
+      refreshPortfolioDetails()
+    }, 60_000)
+    return () => clearInterval(id)
+  }, [isConnected])
+
+  const asMoney = (v, ccy = 'USD') => {
+    const n = Number(v)
+    if (!Number.isFinite(n)) return '—'
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: ccy, maximumFractionDigits: 2 }).format(n)
+  }
+  const acctField = (key) => {
+    if (!isConnected || !ibAccount || ibAccount.error) return '—'
+    const node = ibAccount?.[key]
+    if (!node || node.value == null) return '—'
+    return asMoney(node.value, node.currency || 'USD')
+  }
+  const portfolioStats = (() => {
+    const rows = positions?.positions ?? []
+    const grossMarketValue = rows.reduce((s, p) => s + (Number(p.market_value) || 0), 0)
+    const grossQty = rows.reduce((s, p) => s + Math.abs(Number(p.quantity) || 0), 0)
+    return {
+      symbols: rows.length,
+      grossQty,
+      grossMarketValue,
+    }
+  })()
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -192,104 +234,136 @@ export default function TradingPanel() {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        {/* Order form */}
-        <form onSubmit={handleOrderSubmit} className="card space-y-4">
-          <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">
-            Place Order
-          </h2>
+        {/* Left column */}
+        <div className="space-y-5">
+          {/* Order form */}
+          <form onSubmit={handleOrderSubmit} className="card space-y-4">
+            <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">
+              Place Order
+            </h2>
 
-          <div>
-            <label className="label">Symbol</label>
-            <SymbolAutocomplete
-              value={orderForm.symbol}
-              onChange={v => setOrderForm(f => ({ ...f, symbol: v }))}
-              placeholder="Symbol…"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">Side</label>
-              <select className="input" value={orderForm.side}
-                onChange={e => setOrderForm(f => ({ ...f, side: e.target.value }))}>
-                <option>BUY</option>
-                <option>SELL</option>
-              </select>
+              <label className="label">Symbol</label>
+              <SymbolAutocomplete
+                value={orderForm.symbol}
+                onChange={v => setOrderForm(f => ({ ...f, symbol: v }))}
+                placeholder="Symbol…"
+              />
             </div>
-            <div>
-              <label className="label">Mode</label>
-              <select className="input" value={orderForm.mode}
-                onChange={e => setOrderForm(f => ({ ...f, mode: e.target.value }))}>
-                <option value="SIMULATED">Simulated</option>
-                <option value="PAPER">Paper (IB API)</option>
-                <option value="LIVE">Live (IB API)</option>
-              </select>
-            </div>
-          </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label">Quantity</label>
-              <input className="input" type="number" min="1" value={orderForm.quantity}
-                onChange={e => setOrderForm(f => ({ ...f, quantity: e.target.value }))} />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">Side</label>
+                <select className="input" value={orderForm.side}
+                  onChange={e => setOrderForm(f => ({ ...f, side: e.target.value }))}>
+                  <option>BUY</option>
+                  <option>SELL</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">Mode</label>
+                <select className="input" value={orderForm.mode}
+                  onChange={e => setOrderForm(f => ({ ...f, mode: e.target.value }))}>
+                  <option value="SIMULATED">Simulated</option>
+                  <option value="PAPER">Paper (IB API)</option>
+                  <option value="LIVE">Live (IB API)</option>
+                </select>
+              </div>
             </div>
-            <div>
-              <label className="label">Order Type</label>
-              <select className="input" value={orderForm.order_type}
-                onChange={e => setOrderForm(f => ({ ...f, order_type: e.target.value }))}>
-                <option value="MKT">Market</option>
-                <option value="LMT">Limit</option>
-              </select>
-            </div>
-          </div>
 
-          {orderForm.mode === 'SIMULATED' && (
-            <div>
-              <label className="label">Fill Price ($)</label>
-              <input className="input" type="number" step="0.01" value={orderForm.price}
-                onChange={e => setOrderForm(f => ({ ...f, price: e.target.value }))} />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">Quantity</label>
+                <input className="input" type="number" min="1" value={orderForm.quantity}
+                  onChange={e => setOrderForm(f => ({ ...f, quantity: e.target.value }))} />
+              </div>
+              <div>
+                <label className="label">Order Type</label>
+                <select className="input" value={orderForm.order_type}
+                  onChange={e => setOrderForm(f => ({ ...f, order_type: e.target.value }))}>
+                  <option value="MKT">Market</option>
+                  <option value="LMT">Limit</option>
+                </select>
+              </div>
             </div>
-          )}
 
-          {orderForm.order_type === 'LMT' && (
-            <div>
-              <label className="label">Limit Price ($)</label>
-              <input className="input" type="number" step="0.01" min="0.01" required={orderForm.order_type === 'LMT'} value={orderForm.limit_price}
-                onChange={e => setOrderForm(f => ({ ...f, limit_price: e.target.value }))} />
-            </div>
-          )}
-
-          {orderForm.mode !== 'SIMULATED' && !isConnected && (
-            <div className="text-xs text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 rounded-lg p-2">
-              ⚠ Connect to TWS or IB Gateway to place paper/live orders.
-            </div>
-          )}
-
-          <button type="submit" className={`w-full justify-center ${orderForm.side === 'BUY' ? 'btn-primary' : 'btn-danger'}`}
-            disabled={orderMut.isPending}>
-            {orderMut.isPending ? 'Placing…' : (
-              <>
-                {orderForm.side === 'BUY'
-                  ? <ArrowUpIcon className="h-4 w-4" />
-                  : <ArrowDownIcon className="h-4 w-4" />}
-                {orderForm.side} {orderForm.quantity} {orderForm.symbol}
-              </>
+            {orderForm.mode === 'SIMULATED' && (
+              <div>
+                <label className="label">Fill Price ($)</label>
+                <input className="input" type="number" step="0.01" value={orderForm.price}
+                  onChange={e => setOrderForm(f => ({ ...f, price: e.target.value }))} />
+              </div>
             )}
-          </button>
 
-          {orderMsg && (
-            <div className={`flex items-center gap-2 p-3 rounded-lg text-sm border ${
-              orderMsg.type === 'success'
-                ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400'
-                : 'bg-red-900/20 border-red-700/30 text-red-400'
-            }`}>
-              {orderMsg.type === 'success'
-                ? <CheckCircleIcon className="h-4 w-4 flex-shrink-0" />
-                : <XCircleIcon className="h-4 w-4 flex-shrink-0" />}
-              {orderMsg.text}
+            {orderForm.order_type === 'LMT' && (
+              <div>
+                <label className="label">Limit Price ($)</label>
+                <input className="input" type="number" step="0.01" min="0.01" required={orderForm.order_type === 'LMT'} value={orderForm.limit_price}
+                  onChange={e => setOrderForm(f => ({ ...f, limit_price: e.target.value }))} />
+              </div>
+            )}
+
+            {orderForm.mode !== 'SIMULATED' && !isConnected && (
+              <div className="text-xs text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 rounded-lg p-2">
+                ⚠ Connect to TWS or IB Gateway to place paper/live orders.
+              </div>
+            )}
+
+            <button type="submit" className={`w-full justify-center ${orderForm.side === 'BUY' ? 'btn-primary' : 'btn-danger'}`}
+              disabled={orderMut.isPending}>
+              {orderMut.isPending ? 'Placing…' : (
+                <>
+                  {orderForm.side === 'BUY'
+                    ? <ArrowUpIcon className="h-4 w-4" />
+                    : <ArrowDownIcon className="h-4 w-4" />}
+                  {orderForm.side} {orderForm.quantity} {orderForm.symbol}
+                </>
+              )}
+            </button>
+
+            {orderMsg && (
+              <div className={`flex items-center gap-2 p-3 rounded-lg text-sm border ${
+                orderMsg.type === 'success'
+                  ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400'
+                  : 'bg-red-900/20 border-red-700/30 text-red-400'
+              }`}>
+                {orderMsg.type === 'success'
+                  ? <CheckCircleIcon className="h-4 w-4 flex-shrink-0" />
+                  : <XCircleIcon className="h-4 w-4 flex-shrink-0" />}
+                {orderMsg.text}
+              </div>
+            )}
+          </form>
+
+          <div className="card">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">
+                Portfolio Details
+              </h3>
+              <button
+                className="text-xs text-slate-400 hover:text-slate-200"
+                onClick={refreshPortfolioDetails}
+                title="Refresh portfolio details now"
+              >
+                Refresh
+              </button>
             </div>
-          )}
-        </form>
+            <div className="text-[11px] text-slate-500 mb-2">Auto-refreshes every 1 minute</div>
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span className="text-slate-500">Connection</span><span className="text-slate-200">{isConnected ? 'Connected' : 'Disconnected'}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Mode</span><span className="text-slate-200">{currentMode?.toUpperCase?.() ?? '—'}</span></div>
+              <div className="h-px bg-dark-700 my-1" />
+              <div className="flex justify-between"><span className="text-slate-500">Net Liquidation</span><span className="text-slate-200 font-mono">{acctField('NetLiquidation')}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Available Funds</span><span className="text-slate-200 font-mono">{acctField('AvailableFunds')}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Buying Power</span><span className="text-slate-200 font-mono">{acctField('BuyingPower')}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Total Cash Value</span><span className="text-slate-200 font-mono">{acctField('TotalCashValue')}</span></div>
+              <div className="h-px bg-dark-700 my-1" />
+              <div className="flex justify-between"><span className="text-slate-500">Symbols Held</span><span className="text-slate-200 font-mono">{isConnected ? portfolioStats.symbols : '—'}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Gross Quantity</span><span className="text-slate-200 font-mono">{isConnected ? portfolioStats.grossQty.toFixed(2) : '—'}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Gross Market Value</span><span className="text-slate-200 font-mono">{isConnected ? asMoney(portfolioStats.grossMarketValue) : '—'}</span></div>
+            </div>
+          </div>
+        </div>
 
         {/* Positions & orders */}
         <div className="xl:col-span-2 space-y-5">

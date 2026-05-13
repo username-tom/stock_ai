@@ -11,7 +11,14 @@ from sqlalchemy import select, delete
 
 from app.database import get_db
 from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade, SandboxAllocationEvent
-from app.routers.sandbox_router._helpers import get_account
+from app.routers.sandbox_router._helpers import (
+    get_account,
+    ensure_sandbox_write_allowed,
+    offload_simulated_state,
+)
+from app.services.ib_service import ib_service
+from app.services.local_storage import save_portfolio_state
+from app.config import settings
 
 router = APIRouter()
 
@@ -19,6 +26,25 @@ router = APIRouter()
 @router.get("/export")
 async def export_sandbox(db: AsyncSession = Depends(get_db)):
     """Download the full sandbox state as a JSON snapshot."""
+    if ib_service.is_connected:
+        summary = await ib_service.get_account_summary()
+        positions = await ib_service.get_positions()
+        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        snapshot = {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "version": 2,
+            "source": "ib",
+            "mode": mode,
+            "account_summary": summary,
+            "positions": positions,
+        }
+        save_portfolio_state(mode, snapshot)
+        filename = f"ib_{mode}_export_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+        return JSONResponse(
+            content=snapshot,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     account = await get_account(db)
     pos_res = await db.execute(select(SandboxPosition).order_by(SandboxPosition.symbol))
     positions = pos_res.scalars().all()
@@ -66,6 +92,7 @@ async def export_sandbox(db: AsyncSession = Depends(get_db)):
 @router.post("/import")
 async def import_sandbox(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     """Replace sandbox state from a previously exported JSON snapshot."""
+    ensure_sandbox_write_allowed()
     try:
         raw = await file.read()
         snapshot = json.loads(raw)
@@ -118,6 +145,7 @@ async def import_sandbox(file: UploadFile = File(...), db: AsyncSession = Depend
         db.add(trade)
 
     await db.commit()
+    await offload_simulated_state(db)
     return {
         "status": "ok",
         "imported_positions": len(snapshot.get("positions", [])),
@@ -129,6 +157,7 @@ async def import_sandbox(file: UploadFile = File(...), db: AsyncSession = Depend
 @router.post("/reset")
 async def reset_sandbox(db: AsyncSession = Depends(get_db)):
     """Wipe all sandbox data and start fresh."""
+    ensure_sandbox_write_allowed()
     from app.models.sandbox import SandboxFundEvent
     await db.execute(delete(SandboxTrade))
     await db.execute(delete(SandboxPosition))
@@ -138,6 +167,7 @@ async def reset_sandbox(db: AsyncSession = Depends(get_db)):
     await db.flush()
     db.add(SandboxAccount(total_funds=0.0))
     await db.commit()
+    await offload_simulated_state(db)
     return {"status": "ok", "message": "Sandbox reset to factory defaults."}
 
 
@@ -150,6 +180,7 @@ async def reset_sandbox_soft(db: AsyncSession = Depends(get_db)):
     all allocated funds (available cash becomes zero, ready to trade fresh).
     Strategy assignments and watchlist membership are also preserved.
     """
+    ensure_sandbox_write_allowed()
     # Delete all trade history and allocation movements (position state is reset)
     await db.execute(delete(SandboxTrade))
     await db.execute(delete(SandboxAllocationEvent))
@@ -182,6 +213,7 @@ async def reset_sandbox_soft(db: AsyncSession = Depends(get_db)):
     )
 
     await db.commit()
+    await offload_simulated_state(db)
     return {
         "status": "ok",
         "message": "Portfolio counters reset. Symbols, strategies, and deposit history preserved.",

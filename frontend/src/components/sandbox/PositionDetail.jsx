@@ -16,6 +16,7 @@ import CandlestickChart from '../charts/CandlestickChart'
 import SymbolDetailPanel from '../dashboard/SymbolDetailPanel'
 
 export default function PositionDetail({
+  ibMode,
   selectedSymbol,
   selectedPos,
   selectedPrice,
@@ -53,6 +54,7 @@ export default function PositionDetail({
 }) {
   const navigate = useNavigate()
   const appSettings = useAppSettings()
+  const isSimulated = !ibMode
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
 
@@ -70,8 +72,9 @@ export default function PositionDetail({
     queryKey: ['sandbox-fund-events'],
     queryFn: getSandboxFundEvents,
     refetchInterval: appSettings.portfolio_detail_ms,
+    enabled: isSimulated,
   })
-  const fundEvents = fundEventsData?.events ?? []
+  const fundEvents = isSimulated ? (fundEventsData?.events ?? []) : []
   const dayLow = quotes?.[selectedSymbol]?.day_low ?? null
   const dayHigh = quotes?.[selectedSymbol]?.day_high ?? null
   const hasDayRange = dayLow != null && dayHigh != null && dayHigh > dayLow

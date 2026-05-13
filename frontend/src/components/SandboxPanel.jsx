@@ -9,7 +9,9 @@ import {
   updateSandboxPosition, removeSandboxSymbol,
   getSandboxTrades, placeSandboxTrade,
   exportSandbox, importSandbox, resetSandbox, resetSandboxSoft,
-  getBulkQuotes, getIBStatus,
+  getBulkQuotes, getIBStatus, connectIB, disconnectIB, setIBMode,
+  resetIBPaperPortfolio,
+  getIBPositions, getIBOrders,
   getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
   getSandboxAnalytics,
   getPortfolioManagerState, togglePortfolioManager,
@@ -50,9 +52,13 @@ export default function SandboxPanel() {
   const [importMsg, setImportMsg] = useState(null)
   const [resetConfirm, setResetConfirm] = useState(false)
   const [resetSoftConfirm, setResetSoftConfirm] = useState(false)
+  const [paperResetConfirm, setPaperResetConfirm] = useState(false)
   const [showResetMenu, setShowResetMenu] = useState(false)
   const [activities, setActivities] = useState([])
   const prevTradeIdRef = useRef(null)
+  const prevIbSessionRef = useRef({ connected: false, mode: null })
+  const prevProfileRef = useRef('simulated')
+  const activeProfileRef = useRef('simulated')
 
   // bulk-strategy modal state
   const [bulkStratOpen, setBulkStratOpen] = useState(false)
@@ -64,7 +70,22 @@ export default function SandboxPanel() {
   // IB status
   const { data: ibStatus } = useQuery({ queryKey: ['ib-status'], queryFn: getIBStatus, refetchInterval: appSettings.trading_status_ms })
   const ibConnected = ibStatus?.connected === true
+  const ibSelectedMode = ibStatus?.mode ?? 'paper'
   const ibMode = ibConnected ? (ibStatus?.mode ?? 'paper') : null
+  const activeProfile = ibConnected ? (ibMode ?? 'paper') : 'simulated'
+  useEffect(() => { activeProfileRef.current = activeProfile }, [activeProfile])
+  const { data: ibPositionsData } = useQuery({
+    queryKey: ['ib-positions'],
+    queryFn: getIBPositions,
+    enabled: ibConnected,
+    refetchInterval: appSettings.trading_positions_ms,
+  })
+  const { data: ibOrdersData } = useQuery({
+    queryKey: ['ib-orders'],
+    queryFn: getIBOrders,
+    enabled: ibConnected,
+    refetchInterval: appSettings.trading_orders_ms,
+  })
 
   // queries
   const { data: accountData } = useQuery({ queryKey: ['sandbox-account'], queryFn: getSandboxAccount, refetchInterval: appSettings.sandbox_account_ms })
@@ -125,8 +146,64 @@ export default function SandboxPanel() {
   const engineTrades = allTrades.filter(t => t.strategy_name)
   const latestEngineTrade = engineTrades[0] ?? null
 
+  // On first IB connect (or paper/live mode switch), clear sandbox activity state.
+  useEffect(() => {
+    const prev = prevIbSessionRef.current
+    const switchedIntoIb = ibConnected && !prev.connected
+    const switchedIbMode = ibConnected && prev.connected && ibMode !== prev.mode
+    if (switchedIntoIb || switchedIbMode) {
+      setActivities([])
+      prevTradeIdRef.current = null
+      setTradeMsg(null)
+    }
+    prevIbSessionRef.current = { connected: ibConnected, mode: ibMode }
+  }, [ibConnected, ibMode])
+
+  // Hard reset activity state whenever profile changes: simulated <-> paper/live or paper <-> live.
+  useEffect(() => {
+    if (prevProfileRef.current !== activeProfile) {
+      setActivities([])
+      prevTradeIdRef.current = null
+      setTradeMsg(null)
+      prevProfileRef.current = activeProfile
+    }
+  }, [activeProfile])
+
+  // In IB profiles, repopulate activity log from IB open orders and positions.
+  useEffect(() => {
+    if (!ibConnected) return
+
+    const ibOrders = ibOrdersData?.orders ?? []
+    const ibPositions = ibPositionsData?.positions ?? []
+    const now = new Date().toLocaleTimeString()
+
+    const orderEntries = ibOrders.map(o => ({
+      type: 'trade',
+      profile: activeProfile,
+      side: o.side,
+      label: `Open ${o.side} ${o.quantity} ${o.symbol}`,
+      sub: `Order #${o.ib_order_id} · ${o.status ?? 'Submitted'}`,
+      time: now,
+    }))
+
+    const positionEntries = ibPositions
+      .filter(p => Math.abs(Number(p.quantity) || 0) > 0)
+      .map(p => ({
+        type: 'trade',
+        profile: activeProfile,
+        side: (Number(p.quantity) || 0) >= 0 ? 'BUY' : 'SELL',
+        label: `Position ${p.symbol} ${Number(p.quantity).toFixed(2)} @ $${Number(p.avg_cost || 0).toFixed(2)}`,
+        sub: `Market Value: $${Number(p.market_value || 0).toFixed(2)}`,
+        time: now,
+      }))
+
+    const entries = [...orderEntries, ...positionEntries]
+    setActivities(entries.slice(0, 100))
+  }, [ibConnected, ibMode, ibOrdersData, ibPositionsData])
+
   // build activity log entries from trades + mutations
   useEffect(() => {
+    if (ibConnected) return
     if (!allTrades.length) return
     const newest = allTrades[0]
     if (newest.id === prevTradeIdRef.current) return
@@ -138,6 +215,7 @@ export default function SandboxPanel() {
         .filter(t => !existingIds.has(t.id))
         .map(t => ({
           type: 'trade',
+          profile: 'simulated',
           tradeId: t.id,
           side: t.side,
           label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}${
@@ -148,7 +226,7 @@ export default function SandboxPanel() {
         }))
       return [...newEntries, ...prev].slice(0, 100)
     })
-  }, [allTrades])
+  }, [allTrades, ibConnected])
 
   // mutations
   const removeSymbolMut = useMutation({
@@ -192,10 +270,12 @@ export default function SandboxPanel() {
     mutationFn: s => toggleSandboxEngine(s),
     onSuccess: (data, symbol) => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      if (activeProfileRef.current !== 'simulated') return
       const pos = positions.find(p => p.symbol === symbol)
       const nowEnabled = !pos?.strategy_enabled
       setActivities(prev => [{
         type: 'engine',
+        profile: 'simulated',
         label: `${symbol} engine ${nowEnabled ? 'started' : 'stopped'}`,
         sub: pos?.strategy_name?.split(':')[0],
         time: new Date().toLocaleTimeString(),
@@ -207,8 +287,10 @@ export default function SandboxPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-engine-state'] })
+      if (activeProfileRef.current !== 'simulated') return
       setActivities(prev => [{
         type: 'engine',
+        profile: 'simulated',
         label: 'All sandbox engines toggled',
         time: new Date().toLocaleTimeString(),
       }, ...prev].slice(0, 100))
@@ -218,12 +300,70 @@ export default function SandboxPanel() {
     mutationFn: togglePortfolioManager,
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+      if (activeProfileRef.current !== 'simulated') return
       const enabled = data?.settings?.enabled ?? data?.enabled
       setActivities(prev => [{
         type: 'manager',
+        profile: 'simulated',
         label: `Portfolio Manager ${enabled ? 'enabled' : 'disabled'}`,
         time: new Date().toLocaleTimeString(),
       }, ...prev].slice(0, 100))
+    },
+  })
+  const setIbModeMut = useMutation({
+    mutationFn: mode => setIBMode(mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ib-status'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
+    },
+  })
+  const ibConnectMut = useMutation({
+    mutationFn: () => connectIB(),
+    onMutate: () => {
+      setActivities([])
+      prevTradeIdRef.current = null
+    },
+    onSuccess: () => {
+      setActivities([])
+      prevTradeIdRef.current = null
+      qc.invalidateQueries({ queryKey: ['ib-status'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-trades-all'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
+    },
+  })
+  const ibDisconnectMut = useMutation({
+    mutationFn: () => disconnectIB(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ib-status'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-trades-all'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
+    },
+  })
+  const paperResetMut = useMutation({
+    mutationFn: () => resetIBPaperPortfolio(),
+    onSuccess: (data) => {
+      setPaperResetConfirm(false)
+      setActivities([])
+      prevTradeIdRef.current = null
+      setImportMsg({
+        type: 'success',
+        text: `Paper reset submitted: ${data.cancelled_orders ?? 0} order(s) cancelled, ${data.flatten_orders ?? 0} flatten order(s) placed.`,
+      })
+      qc.invalidateQueries({ queryKey: ['ib-status'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-trades-all'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
+    },
+    onError: (err) => {
+      setImportMsg({ type: 'error', text: err.response?.data?.detail || err.message })
+      setPaperResetConfirm(false)
     },
   })
   const bulkStrategyMut = useMutation({
@@ -231,8 +371,10 @@ export default function SandboxPanel() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       setBulkStratOpen(false)
+      if (activeProfileRef.current !== 'simulated') return
       setActivities(prev => [{
         type: 'engine',
+        profile: 'simulated',
         label: `Strategy updated for all ${data.updated} position${data.updated !== 1 ? 's' : ''}`,
         sub: data.strategy_name ?? 'none',
         time: new Date().toLocaleTimeString(),
@@ -301,10 +443,15 @@ export default function SandboxPanel() {
     setEditingStrategy(false)
   }
 
+  const visibleActivities = useMemo(
+    () => activities.filter(a => (a.profile ?? 'simulated') === activeProfile),
+    [activities, activeProfile],
+  )
+
   return (
     <div className="flex h-screen max-h-screen overflow-hidden">
       <TradeNotificationBanner latestEngineTrade={latestEngineTrade} />
-      <ActivityLog activities={activities} />
+      <ActivityLog activities={visibleActivities} />
 
       <SandboxSidebar
         ibMode={ibMode}
@@ -339,6 +486,50 @@ export default function SandboxPanel() {
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 mr-1">
+              <div className="inline-flex items-center rounded-md border border-dark-500 overflow-hidden">
+                <button
+                  className={`text-[10px] px-2 py-1 font-semibold transition-colors ${
+                    ibSelectedMode === 'paper'
+                      ? 'bg-blue-900/35 text-blue-300'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
+                  }`}
+                  onClick={() => setIbModeMut.mutate('paper')}
+                  disabled={setIbModeMut.isPending || ibSelectedMode === 'paper'}
+                  title="Switch IB mode to paper"
+                >
+                  Paper
+                </button>
+                <button
+                  className={`text-[10px] px-2 py-1 font-semibold transition-colors border-l border-dark-500 ${
+                    ibSelectedMode === 'live'
+                      ? 'bg-emerald-900/35 text-emerald-300'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
+                  }`}
+                  onClick={() => setIbModeMut.mutate('live')}
+                  disabled={setIbModeMut.isPending || ibSelectedMode === 'live'}
+                  title="Switch IB mode to live"
+                >
+                  Live
+                </button>
+              </div>
+              <button
+                className={`text-[10px] border rounded-md px-2.5 py-1 font-semibold transition-colors disabled:opacity-50 ${
+                  ibConnected
+                    ? 'border-red-700/50 text-red-300 hover:bg-red-900/20'
+                    : 'border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/20'
+                }`}
+                onClick={() => (ibConnected ? ibDisconnectMut.mutate() : ibConnectMut.mutate())}
+                disabled={ibConnectMut.isPending || ibDisconnectMut.isPending || setIbModeMut.isPending}
+                title={ibConnected ? 'Disconnect Interactive Brokers' : `Connect Interactive Brokers (${ibSelectedMode})`}
+              >
+                {ibConnectMut.isPending || ibDisconnectMut.isPending
+                  ? '…'
+                  : ibConnected
+                    ? 'Disconnect'
+                    : 'Connect'}
+              </button>
+            </div>
             {(() => {
               const withStrat = positions.filter(p => p.strategy_name)
               const allRunning = withStrat.length > 0 && withStrat.every(p => p.strategy_enabled)
@@ -396,7 +587,35 @@ export default function SandboxPanel() {
               <ArrowUpTrayIcon className="h-3.5 w-3.5" />Import
             </button>
             <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImport} />
-            {resetConfirm ? (
+            {ibMode === 'live' ? null : ibMode === 'paper' ? (
+              paperResetConfirm ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-amber-400">Reset paper portfolio on IB?</span>
+                  <button
+                    className="text-xs bg-amber-700 hover:bg-amber-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
+                    onClick={() => paperResetMut.mutate()}
+                    disabled={paperResetMut.isPending}
+                  >
+                    {paperResetMut.isPending ? 'Resetting…' : 'Yes, Reset Paper'}
+                  </button>
+                  <button
+                    className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-2.5 py-1.5 transition-colors"
+                    onClick={() => setPaperResetConfirm(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className="flex items-center gap-1.5 text-xs border border-amber-900/40 text-amber-400/80 hover:text-amber-300 rounded-lg px-3 py-1.5 transition-colors hover:bg-amber-900/10 disabled:opacity-50"
+                  onClick={() => setPaperResetConfirm(true)}
+                  disabled={paperResetMut.isPending}
+                  title="Cancel open orders and flatten all paper positions"
+                >
+                  <ArrowPathIcon className="h-3.5 w-3.5" />Reset Paper Portfolio
+                </button>
+              )
+            ) : resetConfirm ? (
               <div className="flex items-center gap-1.5">
                 <span className="text-xs text-red-400">Full reset — are you sure?</span>
                 <button className="text-xs bg-red-700 hover:bg-red-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
@@ -488,6 +707,7 @@ export default function SandboxPanel() {
             <div className="text-slate-500 text-sm">Loading…</div>
           ) : (
             <PositionDetail
+              ibMode={ibMode}
               selectedSymbol={selectedSymbol}
               selectedPos={selectedPos}
               selectedPrice={selectedPrice}

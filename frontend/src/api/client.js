@@ -32,6 +32,7 @@ export const setIBMode = (mode) => api.post('/trading/ib/mode', { mode }).then(r
 export const getIBAccount = () => api.get('/trading/ib/account').then(r => r.data)
 export const getIBPositions = () => api.get('/trading/ib/positions').then(r => r.data)
 export const getIBOrders = () => api.get('/trading/ib/orders').then(r => r.data)
+export const resetIBPaperPortfolio = () => api.post('/trading/ib/paper/reset').then(r => r.data)
 export const placeOrder = (payload) => api.post('/trading/order', payload).then(r => r.data)
 export const cancelOrder = (id) => api.delete(`/trading/order/${id}`).then(r => r.data)
 export const getTradeHistory = (limit = 100) =>

@@ -13,6 +13,7 @@ import { usePriceChangeTracking } from '../../hooks/usePriceChangeTracking'
 import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import PortfolioManagerPanel from './PortfolioManagerPanel'
+import MiniSparkline from '../dashboard/MiniSparkline'
 
 export default function PortfolioOverview({
   ibMode,
@@ -28,20 +29,24 @@ export default function PortfolioOverview({
   onSelectSymbol,
 }) {
   const appSettings = useAppSettings()
+  const isSimulated = !ibMode
   const priceColors = usePriceChangeTracking(quotes)
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
     queryFn: getSandboxFundEvents,
     refetchInterval: appSettings.portfolio_detail_ms,
+    enabled: isSimulated,
   })
-  const fundEvents = fundEventsData?.events ?? []
+  const fundEvents = isSimulated ? (fundEventsData?.events ?? []) : []
   const netDepositedFromEvents = fundEvents.reduce((sum, event) => {
     if (event.event_type === 'deposit') return sum + (event.amount ?? 0)
     if (event.event_type === 'withdrawal') return sum - (event.amount ?? 0)
     return sum
   }, 0)
-  const totalDeposited = accountData?.total_deposited ?? netDepositedFromEvents
-  const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : 0
+  const totalDeposited = isSimulated
+    ? (accountData?.total_deposited ?? netDepositedFromEvents)
+    : null
+  const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : null
   const marketShareData = pieData.map((entry, i) => ({
     ...entry,
     fill: PIE_COLORS[i % PIE_COLORS.length],
@@ -69,7 +74,7 @@ export default function PortfolioOverview({
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Total Deposited</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(totalDeposited)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">Net deposits less withdrawals</div>
+          <div className="text-xs text-slate-500 mt-0.5">{isSimulated ? 'Net deposits less withdrawals' : 'Simulated only'}</div>
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Portfolio Equity</div>
@@ -86,7 +91,7 @@ export default function PortfolioOverview({
         <div className={`card ${totalRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
           <div className="text-xs text-slate-500 mb-1">Realised P&amp;L</div>
           <div className={`text-xl font-bold ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{realizedPnlPct.toFixed(2)}% of deposited funds</div>
+          <div className="text-xs text-slate-500 mt-0.5">{realizedPnlPct == null ? '—' : `${realizedPnlPct.toFixed(2)}% of deposited funds`}</div>
         </div>
       </div>
 
@@ -136,6 +141,7 @@ export default function PortfolioOverview({
                           <div className="flex items-center gap-2">
                             <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
                             <span className="font-bold text-slate-200 font-mono">{pos.symbol}</span>
+                            <MiniSparkline symbol={pos.symbol} positive={(q?.change_pct ?? 0) >= 0 || unreal >= 0} />
                           </div>
                           {q?.company_name && <div className="text-slate-600 truncate max-w-[100px] pl-4">{q.company_name}</div>}
                         </td>
@@ -178,7 +184,7 @@ export default function PortfolioOverview({
                     </td>
                     <td className={`text-right pt-2 font-mono ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</td>
                     <td className={`text-right pt-2 font-mono ${realizedPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {totalDeposited > 0 ? `${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%` : '—'}
+                      {totalDeposited > 0 && realizedPnlPct != null ? `${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%` : '—'}
                     </td>
                   </tr>
                 </tfoot>

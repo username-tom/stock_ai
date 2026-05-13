@@ -9,7 +9,7 @@ from typing import Optional
 
 from app.database import get_db
 from app.models.sandbox import SandboxPosition
-from app.routers.sandbox_router._helpers import position_dict
+from app.routers.sandbox_router._helpers import position_dict, ensure_sandbox_write_allowed, offload_simulated_state
 
 router = APIRouter()
 
@@ -22,6 +22,7 @@ async def engine_state():
 
 @router.post("/engine/toggle-all")
 async def engine_toggle_all(db: AsyncSession = Depends(get_db)):
+    ensure_sandbox_write_allowed()
     result = await db.execute(select(SandboxPosition).where(SandboxPosition.strategy_name.isnot(None)))
     positions = result.scalars().all()
     if not positions:
@@ -30,11 +31,13 @@ async def engine_toggle_all(db: AsyncSession = Depends(get_db)):
     for pos in positions:
         pos.strategy_enabled = any_stopped
     await db.commit()
+    await offload_simulated_state(db)
     return {"enabled": any_stopped, "count": len(positions)}
 
 
 @router.post("/engine/toggle/{symbol}")
 async def engine_toggle(symbol: str, db: AsyncSession = Depends(get_db)):
+    ensure_sandbox_write_allowed()
     symbol = symbol.upper()
     result = await db.execute(select(SandboxPosition).where(SandboxPosition.symbol == symbol))
     pos = result.scalar_one_or_none()
@@ -45,6 +48,7 @@ async def engine_toggle(symbol: str, db: AsyncSession = Depends(get_db)):
     pos.strategy_enabled = not pos.strategy_enabled
     await db.commit()
     await db.refresh(pos)
+    await offload_simulated_state(db)
     return position_dict(pos)
 
 
@@ -86,6 +90,7 @@ async def get_manager_state():
 
 @router.patch("/manager/settings")
 async def update_manager_settings(req: PortfolioManagerSettingsRequest):
+    ensure_sandbox_write_allowed()
     from app.services.portfolio_manager import update_manager_settings
     payload = {k: v for k, v in req.model_dump().items() if v is not None}
     return update_manager_settings(payload)
@@ -93,6 +98,7 @@ async def update_manager_settings(req: PortfolioManagerSettingsRequest):
 
 @router.post("/manager/toggle")
 async def toggle_manager():
+    ensure_sandbox_write_allowed()
     from app.services.portfolio_manager import get_manager_settings, update_manager_settings
     current = get_manager_settings()
     return update_manager_settings({"enabled": not current["enabled"]})

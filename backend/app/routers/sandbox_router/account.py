@@ -7,12 +7,19 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.config import settings
 from app.database import get_db
 from app.models.sandbox import SandboxPosition, SandboxFundEvent, SandboxAllocationEvent
-from app.routers.sandbox_router._helpers import get_account, compute_available_cash
+from app.routers.sandbox_router._helpers import (
+    get_account,
+    compute_available_cash,
+    ensure_sandbox_write_allowed,
+    offload_simulated_state,
+)
+from app.services.ib_service import ib_service
 from app.services.local_storage import (
     save_portfolio_activities_csv, save_portfolio_activities_json,
-    list_portfolio_activity_files, records_to_csv_bytes, records_to_json_bytes,
+    list_portfolio_activity_files, records_to_csv_bytes, records_to_json_bytes, save_portfolio_state,
 )
 
 router = APIRouter()
@@ -20,6 +27,51 @@ router = APIRouter()
 
 @router.get("/account")
 async def get_account_info(db: AsyncSession = Depends(get_db)):
+    if ib_service.is_connected:
+        summary = await ib_service.get_account_summary()
+        ib_positions = await ib_service.get_positions()
+
+        def _to_float(*tags: str) -> float | None:
+            if not isinstance(summary, dict):
+                return None
+            for tag in tags:
+                node = summary.get(tag)
+                if isinstance(node, dict):
+                    value = node.get("value")
+                else:
+                    value = node
+                try:
+                    if value is not None:
+                        return float(str(value).replace(",", "").strip())
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        # Strict IB-backed values only; do not substitute with buying power or local estimates.
+        total_funds = _to_float("NetLiquidation")
+        available_funds = _to_float("AvailableFunds")
+        equity = None
+        if total_funds is not None and available_funds is not None:
+            equity = max(0.0, total_funds - available_funds)
+
+        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        save_portfolio_state(mode, {
+            "source": "ib",
+            "mode": mode,
+            "account_summary": summary,
+            "positions": ib_positions,
+        })
+
+        return {
+            "total_funds": round(total_funds, 4) if total_funds is not None else None,
+            "allocated_funds": round(equity, 4) if equity is not None else None,
+            "equity": round(equity, 4) if equity is not None else None,
+            "available_funds": round(available_funds, 4) if available_funds is not None else None,
+            "updated_at": None,
+            "source": "ib",
+            "profile": mode,
+        }
+
     account = await get_account(db)
     positions_res = await db.execute(select(SandboxPosition))
     positions = positions_res.scalars().all()
@@ -41,6 +93,7 @@ class AddFundsRequest(BaseModel):
 
 @router.post("/account/add-funds")
 async def add_funds(req: AddFundsRequest, db: AsyncSession = Depends(get_db)):
+    ensure_sandbox_write_allowed()
     account = await get_account(db)
     account.total_funds += req.amount
     account.total_deposited = (account.total_deposited or 0.0) + req.amount
@@ -51,6 +104,7 @@ async def add_funds(req: AddFundsRequest, db: AsyncSession = Depends(get_db)):
     positions_res = await db.execute(select(SandboxPosition))
     positions = positions_res.scalars().all()
     available = await compute_available_cash(db, account, positions)
+    await offload_simulated_state(db)
     return {
         "total_funds": account.total_funds,
         "available_funds": available,
@@ -64,6 +118,7 @@ class WithdrawFundsRequest(BaseModel):
 
 @router.post("/account/withdraw-funds")
 async def withdraw_funds(req: WithdrawFundsRequest, db: AsyncSession = Depends(get_db)):
+    ensure_sandbox_write_allowed()
     from fastapi import HTTPException
     account = await get_account(db)
     positions_res = await db.execute(select(SandboxPosition))
@@ -83,6 +138,7 @@ async def withdraw_funds(req: WithdrawFundsRequest, db: AsyncSession = Depends(g
     await db.commit()
     await db.refresh(account)
     new_available = await compute_available_cash(db, account, positions)
+    await offload_simulated_state(db)
     return {
         "total_funds": account.total_funds,
         "available_funds": round(new_available, 4),
@@ -144,6 +200,7 @@ async def repair_funds(db: AsyncSession = Depends(get_db)):
 
     After replay the live DB values are updated to match.
     """
+    ensure_sandbox_write_allowed()
     from app.models.sandbox import SandboxTrade
 
     account = await get_account(db)
@@ -263,6 +320,7 @@ async def repair_funds(db: AsyncSession = Depends(get_db)):
     positions_res2 = await db.execute(select(SandboxPosition))
     positions_after = positions_res2.scalars().all()
     available = await compute_available_cash(db, account, positions_after)
+    await offload_simulated_state(db)
 
     return {
         "repaired": True,
@@ -339,19 +397,19 @@ async def export_portfolio_activities(
 
     if save:
         if fmt == "json":
-            local_storage.save_portfolio_activities_json(activities)
+            save_portfolio_activities_json(activities)
         else:
-            local_storage.save_portfolio_activities_csv(activities)
+            save_portfolio_activities_csv(activities)
 
     if fmt == "json":
-        content = local_storage.records_to_json_bytes(activities)
+        content = records_to_json_bytes(activities)
         return Response(
             content=content,
             media_type="application/json",
             headers={"Content-Disposition": 'attachment; filename="portfolio_activities.json"'},
         )
 
-    content = local_storage.records_to_csv_bytes(activities)
+    content = records_to_csv_bytes(activities)
     return Response(
         content=content,
         media_type="text/csv",
@@ -362,4 +420,4 @@ async def export_portfolio_activities(
 @router.get("/activities/local-storage/files")
 async def list_portfolio_activity_files():
     """List all portfolio activity files saved to local PC storage."""
-    return {"files": local_storage.list_portfolio_activity_files()}
+    return {"files": list_portfolio_activity_files()}
