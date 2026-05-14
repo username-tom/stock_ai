@@ -12,7 +12,6 @@ import { useAppSettings } from '../../hooks/useAppSettings'
 import { usePriceChangeTracking } from '../../hooks/usePriceChangeTracking'
 import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
-import PortfolioManagerPanel from './PortfolioManagerPanel'
 import MiniSparkline from '../dashboard/MiniSparkline'
 
 export default function PortfolioOverview({
@@ -288,9 +287,6 @@ export default function PortfolioOverview({
           })()}
         </div>
       )}
-
-      {/* Portfolio Manager */}
-      <PortfolioManagerPanel />
 
       {/* Analytics Charts */}
       {analytics && analytics.total_trades > 0 && (

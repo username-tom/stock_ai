@@ -132,6 +132,9 @@ class UpdatePositionRequest(BaseModel):
     strategy_name: Optional[str] = None
     allocated_funds: Optional[float] = Field(default=None, ge=0)
     strategy_enabled: Optional[bool] = None
+    max_allocation_mode: Optional[str] = Field(default=None, pattern=r'^(dollar|percent)$')
+    max_allocation_value: Optional[float] = Field(default=None, ge=0)
+    sentiment_mode: Optional[str] = Field(default=None, pattern=r'^(market|symbol|none)$')
 
 
 @router.patch("/positions/{symbol}")
@@ -147,6 +150,12 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
         pos.strategy_name = req.strategy_name
     if req.strategy_enabled is not None:
         pos.strategy_enabled = req.strategy_enabled
+    if req.max_allocation_mode is not None:
+        pos.max_allocation_mode = req.max_allocation_mode
+    if req.max_allocation_value is not None:
+        pos.max_allocation_value = req.max_allocation_value
+    if req.sentiment_mode is not None:
+        pos.sentiment_mode = None if req.sentiment_mode == 'none' else req.sentiment_mode
 
     if req.allocated_funds is not None:
         account = await get_account(db)

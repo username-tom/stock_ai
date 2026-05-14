@@ -5,7 +5,7 @@ import {
   BanknotesIcon, ArrowsRightLeftIcon, ArrowPathIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getScripts, getHistory, getSandboxFundEvents } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
@@ -86,12 +86,26 @@ export default function PositionDetail({
     ? Math.min(dayHigh, Math.max(dayLow, resolvedTradePrice ?? dayLow))
     : null
 
+  const [maxAllocMode, setMaxAllocMode] = useState(selectedPos?.max_allocation_mode ?? 'dollar')
+  const [maxAllocValue, setMaxAllocValue] = useState(
+    selectedPos?.max_allocation_value != null
+      ? String(selectedPos.max_allocation_value)
+      : '',
+  )
+  const [sentimentMode, setSentimentMode] = useState(selectedPos?.sentiment_mode ?? 'none')
+
   // Auto-update trade price when live quote changes
   useEffect(() => {
     if (selectedPrice > 0) {
       setTradeForm(f => ({ ...f, price: selectedPrice.toFixed(2) }))
     }
   }, [selectedPrice])
+
+  useEffect(() => {
+    setMaxAllocMode(selectedPos?.max_allocation_mode ?? 'dollar')
+    setMaxAllocValue(selectedPos?.max_allocation_value != null ? String(selectedPos.max_allocation_value) : '')
+    setSentimentMode(selectedPos?.sentiment_mode ?? 'none')
+  }, [selectedPos?.symbol, selectedPos?.max_allocation_mode, selectedPos?.max_allocation_value, selectedPos?.sentiment_mode])
 
   // Cash available within this position's own allocation (idle, not tied up in shares)
   const positionCashRemaining = selectedPos
@@ -251,6 +265,118 @@ export default function PositionDetail({
       </div>
 
         </div>
+
+        {/* Allocation guardrails */}
+        <div className="card mt-4">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+            <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Allocation Guardrails</h3>
+            <span className="text-xs text-slate-500">Maximum Allocation</span>
+          </div>
+          <p className="text-xs text-slate-500 mb-3">
+            Cap how much this symbol can hold when the portfolio manager deploys or reallocates funds.
+          </p>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-slate-400">Mode</span>
+              <select
+                className="input text-sm py-1.5 w-44"
+                value={maxAllocMode}
+                onChange={e => setMaxAllocMode(e.target.value)}
+              >
+                <option value="dollar">Dollar amount</option>
+                <option value="percent">Percent of total funds</option>
+              </select>
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-slate-400">Maximum</span>
+              <div className="flex items-center gap-1">
+                {maxAllocMode === 'dollar'
+                  ? <span className="text-slate-400 text-sm">$</span>
+                  : null}
+                <input
+                  type="number"
+                  min={0}
+                  max={maxAllocMode === 'percent' ? 100 : undefined}
+                  step={maxAllocMode === 'percent' ? 0.1 : 10}
+                  className="input text-sm py-1.5 w-32"
+                  value={maxAllocValue}
+                  onChange={e => setMaxAllocValue(e.target.value)}
+                  placeholder={maxAllocMode === 'percent' ? 'e.g. 12.5' : 'e.g. 5000'}
+                />
+                {maxAllocMode === 'percent'
+                  ? <span className="text-slate-400 text-sm">%</span>
+                  : null}
+              </div>
+            </label>
+            <button
+              className="text-xs bg-sky-700 hover:bg-sky-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
+              onClick={() => updatePosMut.mutate({
+                symbol: selectedSymbol,
+                payload: {
+                  max_allocation_mode: maxAllocMode,
+                  max_allocation_value: maxAllocValue === '' ? 0 : parseFloat(maxAllocValue),
+                },
+              })}
+              disabled={updatePosMut.isPending || Number.isNaN(parseFloat(maxAllocValue || '0'))}
+            >
+              {updatePosMut.isPending ? 'Saving…' : 'Save Cap'}
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-600 mt-2">
+            Set to 0 for no cap.
+          </p>
+        </div>
+
+        {/* Sentiment Strategy Mode */}
+        {isSimulated && (
+          <div className="card mt-4">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Sentiment Strategy Mode</h3>
+              {selectedPos?.sentiment_mode && selectedPos.sentiment_mode !== 'none' && (
+                <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold bg-violet-900/30 text-violet-300 border border-violet-700/40 uppercase tracking-wide">
+                  {selectedPos.sentiment_mode === 'market' ? 'Market Sentiment' : 'Symbol Sentiment'}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-500 mb-3">
+              Let the portfolio manager automatically switch strategy based on sentiment signals.
+              Requires the manager to be running with sentiment strategy switching enabled.
+            </p>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {[
+                { value: 'none', label: 'Manual', desc: 'Strategy is set manually, no auto-switching' },
+                { value: 'market', label: 'Market Sentiment', desc: 'Strategy follows overall market sentiment (avg of all symbols)' },
+                { value: 'symbol', label: 'Symbol Sentiment', desc: `Strategy follows ${selectedSymbol}'s own sentiment score` },
+              ].map(opt => (
+                <label key={opt.value} className={`flex items-start gap-2 cursor-pointer rounded-lg border px-3 py-2 transition-colors ${sentimentMode === opt.value ? 'border-violet-600 bg-violet-900/20' : 'border-dark-600 bg-dark-800 hover:border-dark-500'}`}>
+                  <input
+                    type="radio"
+                    name={`sentiment_mode_${selectedSymbol}`}
+                    value={opt.value}
+                    checked={sentimentMode === opt.value}
+                    onChange={() => setSentimentMode(opt.value)}
+                    className="mt-0.5 accent-violet-500"
+                  />
+                  <span>
+                    <span className="text-xs font-medium text-slate-200">{opt.label}</span>
+                    <span className="block text-[11px] text-slate-500 mt-0.5">{opt.desc}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <button
+              className="text-xs bg-violet-700 hover:bg-violet-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
+              onClick={() => updatePosMut.mutate({
+                symbol: selectedSymbol,
+                payload: { sentiment_mode: sentimentMode },
+              })}
+              disabled={updatePosMut.isPending || sentimentMode === (selectedPos?.sentiment_mode ?? 'none')}
+            >
+              {updatePosMut.isPending ? 'Saving…' : 'Save Mode'}
+            </button>
+          </div>
+        )}
+
         {/* Main content row: SymbolDetailPanel left, rest right */}
         <div className="flex flex-row gap-6 mt-6 min-h-0">
           {/* Symbol detail left - fill vertical space */}

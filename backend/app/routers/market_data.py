@@ -36,6 +36,21 @@ async def get_bulk_quotes(
     return result
 
 
+@router.get("/sectors")
+async def get_sectors(
+    symbols: str = Query(..., description="Comma-separated list, e.g. AAPL,MSFT,GOOGL"),
+):
+    """Return sector labels for multiple symbols (Yahoo profile, cached daily)."""
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not sym_list:
+        raise HTTPException(status_code=422, detail="No symbols provided.")
+    try:
+        return await market_service.get_symbol_sectors(sym_list)
+    except Exception as exc:
+        logger.error("sectors failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/history/{symbol}")
 async def get_history(
     symbol: str,

@@ -42,23 +42,43 @@ export default function TradeNotificationBanner({ latestEngineTrade }) {
   if (!visible || !trade) return null
 
   const isBuy = trade.side === 'BUY'
+  const isGain = !isBuy && trade.pnl != null && trade.pnl >= 0
+  const isLoss = !isBuy && trade.pnl != null && trade.pnl < 0
   const stratLabel = trade.strategy_name?.split(':')[0] ?? 'Engine'
 
+  const bannerCls = isBuy
+    ? 'bg-sky-900/95 border-b border-sky-700/60 text-sky-200'
+    : isGain
+    ? 'bg-emerald-900/95 border-b border-emerald-700/60 text-emerald-200'
+    : isLoss
+    ? 'bg-red-900/95 border-b border-red-700/60 text-red-200'
+    : 'bg-slate-800/95 border-b border-slate-600/60 text-slate-200'
+
+  const iconCls = isBuy
+    ? 'text-sky-400'
+    : isGain
+    ? 'text-emerald-400'
+    : isLoss
+    ? 'text-red-400'
+    : 'text-slate-400'
+
+  const sideCls = isBuy
+    ? 'text-sky-300'
+    : isGain
+    ? 'text-emerald-400'
+    : isLoss
+    ? 'text-red-400'
+    : 'text-slate-300'
+
   return (
-    <div
-      className={`fixed top-0 left-0 right-0 z-50 flex items-center justify-between gap-4 px-6 py-2.5 text-sm font-medium shadow-lg
-        ${isBuy
-          ? 'bg-emerald-900/95 border-b border-emerald-700/60 text-emerald-200'
-          : 'bg-red-900/95 border-b border-red-700/60 text-red-200'
-        }`}
-    >
+    <div className={`fixed top-0 left-0 right-0 z-50 flex items-center justify-between gap-4 px-6 py-2.5 text-sm font-medium shadow-lg ${bannerCls}`}>
       <div className="flex items-center gap-2.5">
         {isBuy
-          ? <ArrowTrendingUpIcon className="h-4 w-4 flex-shrink-0 text-emerald-400" />
-          : <ArrowTrendingDownIcon className="h-4 w-4 flex-shrink-0 text-red-400" />
+          ? <ArrowTrendingUpIcon className={`h-4 w-4 flex-shrink-0 ${iconCls}`} />
+          : <ArrowTrendingDownIcon className={`h-4 w-4 flex-shrink-0 ${iconCls}`} />
         }
         <span>
-          <span className={`font-bold ${isBuy ? 'text-emerald-400' : 'text-red-400'}`}>{trade.side}</span>
+          <span className={`font-bold ${sideCls}`}>{trade.side}</span>
           {' '}{trade.quantity} <span className="font-bold text-white">{trade.symbol}</span>
           {' '}@ <span className="font-mono">${trade.price?.toFixed(2)}</span>
           {trade.pnl != null && (

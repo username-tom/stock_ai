@@ -14,7 +14,12 @@ def _fmt_ts(ts) -> str:
     """Format a timestamp as ISO string, including time component when intraday."""
     if hasattr(ts, 'time') and ts.time().hour == 0 and ts.time().minute == 0 and ts.time().second == 0:
         return str(ts.date())
-    return str(ts)
+    # Use a stable intraday display format without timezone suffix.
+    # This keeps UI output readable and avoids downstream parser issues.
+    try:
+        return pd.Timestamp(ts).tz_localize(None).strftime("%Y-%m-%d_%H:%M:%S")
+    except Exception:
+        return str(ts)
 
 
 def _derive_position(df: pd.DataFrame) -> pd.DataFrame:
@@ -94,7 +99,7 @@ def run_backtest(
     initial_capital: float = 10_000.0,
     commission: float = 0.005,  # flat per-share fee (e.g. IB fixed $0.005/share)
     script_code: str | None = None,
-    data_source: DataSource = "auto",
+    data_source: DataSource = "yfinance",
     day_trade: bool = False,
     **strategy_params,
 ) -> dict[str, Any]:
@@ -176,6 +181,12 @@ def run_backtest(
         # immediate phantom sell).  Use the signal column directly as position.
         if "position" not in df.columns:
             df = df.copy()
+            df["position"] = df["signal"].fillna(0)
+    elif "signal" in df.columns:
+        # If upstream already provided event signals (tests/custom feeds),
+        # preserve them instead of regenerating strategy signals.
+        df = df.copy()
+        if "position" not in df.columns:
             df["position"] = df["signal"].fillna(0)
     else:
         strategy = get_strategy(strategy_type, **strategy_params)
@@ -379,3 +390,265 @@ def run_backtest(
         "final_entry_price": round(final_entry_price, 4) if final_entry_price else None,
         "max_shares_held": round(max_shares_held, 6),
     }
+
+
+    # ── Sentiment-switching backtest ──────────────────────────────────────────── #
+
+    _STRATEGY_ALIASES: dict[str, str] = {
+        "bollinger": "bollinger_bands",
+        "moving_avg": "sma_crossover",
+        "sma": "sma_crossover",
+        "bb": "bollinger_bands",
+    }
+
+
+    def _compute_sentiment_buckets(closes: pd.Series) -> pd.Series:
+        """Vectorized per-bar sentiment bucket Series (crash/bearish/neutral/bullish/euphoric).
+
+        Composite of three sub-signals, each contributing ±1/3 (RSI contributes ±2/3
+        at extreme readings):
+          1. RSI-14  – <30 crash, <40 bearish, >70 euphoric, >60 bullish
+          2. MACD histogram (12/26/9)
+          3. Close vs SMA-20
+        """
+        score = pd.Series(0.0, index=closes.index)
+
+        # RSI (14-bar)
+        delta = closes.diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss.where(loss != 0, np.nan)
+        rsi = (100 - 100 / (1 + rs)).fillna(50)
+        score += (rsi < 30).astype(float) * (-2 / 3)
+        score += ((rsi >= 30) & (rsi < 40)).astype(float) * (-1 / 3)
+        score += (rsi > 70).astype(float) * (2 / 3)
+        score += ((rsi > 60) & (rsi <= 70)).astype(float) * (1 / 3)
+
+        # MACD histogram (12/26/9)
+        ema12 = closes.ewm(span=12, adjust=False).mean()
+        ema26 = closes.ewm(span=26, adjust=False).mean()
+        hist = ((ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()).fillna(0)
+        score += (hist > 0).astype(float) * (1 / 3)
+        score += (hist < 0).astype(float) * (-1 / 3)
+
+        # SMA-20 trend
+        sma20 = closes.rolling(20).mean().fillna(closes)
+        score += (closes > sma20).astype(float) * (1 / 3)
+        score += (closes < sma20).astype(float) * (-1 / 3)
+
+        score = score.clip(-1.0, 1.0)
+
+        def _to_bucket(s: float) -> str:
+            if s >= 0.5:
+                return "euphoric"
+            if s >= 0.1:
+                return "bullish"
+            if s > -0.1:
+                return "neutral"
+            if s > -0.5:
+                return "bearish"
+            return "crash"
+
+        return score.apply(_to_bucket)
+
+
+    def run_sentiment_backtest(
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        initial_capital: float = 10_000.0,
+        commission: float = 0.005,
+        data_source: DataSource = "yfinance",
+        day_trade: bool = False,
+        sentiment_strategies: "dict[str, str] | None" = None,
+        sentiment_warmup: int = 35,
+    ) -> "dict[str, Any]":
+        """Backtest where the active strategy auto-switches based on rolling sentiment.
+
+        Sentiment is derived from RSI + MACD + SMA computed on the OHLCV data.
+        Open positions are force-closed whenever the active strategy changes.
+        The first ``sentiment_warmup`` bars use the *neutral* bucket's strategy.
+
+        ``sentiment_strategies`` maps bucket labels to strategy type strings::
+
+            {"crash": "rsi", "bearish": "macd", "neutral": "bollinger_bands",
+             "bullish": "sma_crossover", "euphoric": "rsi"}
+        """
+        _DEFAULTS: dict[str, str] = {
+            "crash": "rsi",
+            "bearish": "macd",
+            "neutral": "bollinger_bands",
+            "bullish": "sma_crossover",
+            "euphoric": "rsi",
+        }
+        if sentiment_strategies is None:
+            strat_map: dict[str, str] = dict(_DEFAULTS)
+        else:
+            strat_map = {k: _STRATEGY_ALIASES.get(v, v) for k, v in sentiment_strategies.items()}
+            for bucket, default_strat in _DEFAULTS.items():
+                strat_map.setdefault(bucket, default_strat)
+
+        if day_trade:
+            df = fetch_ohlcv_intraday(symbol, start_date, end_date, source=data_source)
+        else:
+            df = fetch_ohlcv(symbol, start_date, end_date, source=data_source)
+
+        interval = df.attrs.get("interval", "1d")
+        _interval_bars: dict[str, float] = {
+            "1m": 252 * 390, "2m": 252 * 195, "5m": 252 * 78,
+            "15m": 252 * 26, "30m": 252 * 13, "60m": 252 * 6.5,
+            "1h": 252 * 6.5, "1d": 252,
+        }
+        bars_per_year = _interval_bars.get(interval, 252)
+
+        # Sentiment buckets; force neutral during warmup to avoid indicator noise
+        buckets = _compute_sentiment_buckets(df["Close"])
+        buckets.iloc[:sentiment_warmup] = "neutral"
+
+        # Pre-generate signals for all unique strategies used in the map
+        needed = set(strat_map.values())
+        signals_by_strat: dict[str, pd.Series] = {}
+        for stype in needed:
+            try:
+                strat_df = get_strategy(stype).generate_signals(df.copy())
+                pos_col = (
+                    strat_df["position"]
+                    if "position" in strat_df.columns
+                    else strat_df["signal"].diff().fillna(0)
+                )
+                signals_by_strat[stype] = pos_col
+            except Exception:
+                signals_by_strat[stype] = pd.Series(0.0, index=df.index)
+
+        # Execution loop
+        cash = initial_capital
+        shares = 0.0
+        entry_price: float | None = None
+        entry_date: str | None = None
+        entry_strategy: str | None = None
+        entry_bucket_str: str | None = None
+        prev_strat: str | None = None
+        trades: list[dict] = []
+        equity_values: list[float] = []
+        strategy_switches: list[dict] = []
+
+        for i, (date, row) in enumerate(df.iterrows()):
+            price = float(row["Close"])
+            bucket = str(buckets.iloc[i])
+            active_strat = strat_map[bucket]
+
+            # Force-close open position on strategy change
+            if active_strat != prev_strat:
+                if prev_strat is not None:
+                    strategy_switches.append(
+                        {"date": _fmt_ts(date), "from": prev_strat, "to": active_strat, "bucket": bucket}
+                    )
+                if shares > 0 and entry_price is not None:
+                    proceeds = shares * price - shares * commission
+                    pnl = proceeds - (shares * entry_price + shares * commission)
+                    trades.append({
+                        "entry_date": entry_date,
+                        "exit_date": _fmt_ts(date),
+                        "side": "BUY",
+                        "entry_price": round(entry_price, 4),
+                        "exit_price": round(price, 4),
+                        "quantity": shares,
+                        "pnl": round(pnl, 2),
+                        "entry_reason": entry_strategy or "signal",
+                        "exit_reason": "strategy_switch",
+                        "entry_strategy": entry_strategy,
+                        "exit_strategy": active_strat,
+                        "entry_bucket": entry_bucket_str,
+                        "exit_bucket": bucket,
+                    })
+                    cash += proceeds
+                    shares = 0.0
+                    entry_price = None
+                    entry_date = None
+                    entry_strategy = None
+                    entry_bucket_str = None
+                prev_strat = active_strat
+
+            position_change = float(
+                signals_by_strat.get(active_strat, pd.Series(0.0, index=df.index)).iloc[i]
+            )
+
+            if position_change > 0 and shares == 0:
+                shares_to_buy = math.floor(cash / (price + commission))
+                if shares_to_buy > 0:
+                    cost = shares_to_buy * price + shares_to_buy * commission
+                    cash -= cost
+                    shares = shares_to_buy
+                    entry_price = price
+                    entry_date = _fmt_ts(date)
+                    entry_strategy = active_strat
+                    entry_bucket_str = bucket
+
+            elif position_change < 0 and shares > 0:
+                proceeds = shares * price - shares * commission
+                pnl = proceeds - (shares * entry_price + shares * commission)
+                trades.append({
+                    "entry_date": entry_date,
+                    "exit_date": _fmt_ts(date),
+                    "side": "BUY",
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(price, 4),
+                    "quantity": shares,
+                    "pnl": round(pnl, 2),
+                    "entry_reason": entry_strategy or "signal",
+                    "exit_reason": "strategy_exit",
+                    "entry_strategy": entry_strategy,
+                    "exit_strategy": active_strat,
+                    "entry_bucket": entry_bucket_str,
+                    "exit_bucket": bucket,
+                })
+                cash += proceeds
+                shares = 0.0
+                entry_price = None
+                entry_date = None
+                entry_strategy = None
+                entry_bucket_str = None
+
+            equity_values.append(cash + shares * price)
+
+        equity_series = pd.Series(equity_values, index=df.index)
+        metrics = _calculate_metrics(equity_series, trades, initial_capital, bars_per_year)
+
+        equity_curve = [
+            {"date": _fmt_ts(d), "value": round(v, 2)}
+            for d, v in zip(df.index, equity_values)
+        ]
+        ohlcv = [
+            {
+                "date": _fmt_ts(d),
+                "open": round(float(r["Open"]), 4),
+                "high": round(float(r["High"]), 4),
+                "low": round(float(r["Low"]), 4),
+                "close": round(float(r["Close"]), 4),
+                "volume": int(r["Volume"]),
+                "bucket": str(buckets.iloc[i]),
+                "active_strategy": strat_map[str(buckets.iloc[i])],
+            }
+            for i, (d, r) in enumerate(df.iterrows())
+        ]
+
+        return {
+            "symbol": symbol,
+            "strategy_type": "sentiment_switching",
+            "sentiment_strategies": strat_map,
+            "data_source": str(data_source),
+            "day_trade": day_trade,
+            "interval": interval,
+            "start_date": start_date,
+            "end_date": end_date,
+            "initial_capital": initial_capital,
+            "metrics": metrics,
+            "equity_curve": equity_curve,
+            "trades": trades,
+            "ohlcv": ohlcv,
+            "strategy_switches": strategy_switches,
+            "final_shares": round(shares, 6),
+            "final_cash": round(cash, 2),
+            "final_entry_price": round(entry_price, 4) if entry_price else None,
+            "max_shares_held": round(max((t["quantity"] for t in trades), default=0), 6),
+        }

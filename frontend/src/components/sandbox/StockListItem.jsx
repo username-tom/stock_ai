@@ -6,7 +6,7 @@ import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL
 import { fmt, fmtMoney } from './sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
 
-export default function StockListItem({ pos, quote, isSelected, onClick }) {
+export default function StockListItem({ pos, quote, sector, isSelected, onClick }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
   const [tooltipPos, setTooltipPos] = useState(null)
@@ -43,6 +43,9 @@ export default function StockListItem({ pos, quote, isSelected, onClick }) {
         </div>
         {quote?.company_name && (
           <div className="text-xs text-slate-500 truncate mb-0.5">{quote.company_name}</div>
+        )}
+        {sector && (
+          <div className="text-[11px] text-sky-300/80 truncate mb-0.5">{sector}</div>
         )}
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>{pos.shares > 0 ? `${pos.shares.toFixed(4)} sh` : 'Watchlist'}</span>

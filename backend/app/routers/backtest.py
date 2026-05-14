@@ -75,6 +75,110 @@ async def get_data_sources():
     return {"data_sources": list_data_sources()}
 
 
+class SentimentBacktestRequest(BaseModel):
+    symbol: str = Field(..., example="AAPL")
+    start_date: str = Field(..., example="2022-01-01")
+    end_date: str = Field(..., example="2023-12-31")
+    initial_capital: float = Field(default=10000.0, ge=1000)
+    commission: float = Field(default=0.001, ge=0, le=0.05)
+    data_source: DataSource = Field(default="auto")
+    day_trade: bool = Field(default=False)
+    sentiment_strategies: dict[str, str] = Field(
+        default_factory=lambda: {
+            "crash": "rsi",
+            "bearish": "macd",
+            "neutral": "bollinger_bands",
+            "bullish": "sma_crossover",
+            "euphoric": "rsi",
+        }
+    )
+    sentiment_warmup: int = Field(default=35, ge=5, le=500)
+
+    def validate_strategies(self) -> None:
+        aliases = {
+            "bollinger": "bollinger_bands",
+            "moving_avg": "sma_crossover",
+            "sma": "sma_crossover",
+            "bb": "bollinger_bands",
+        }
+        valid_strategy_types = {s["type"] for s in list_strategies()}
+        for bucket, stype in self.sentiment_strategies.items():
+            resolved = aliases.get(stype, stype)
+            if resolved not in valid_strategy_types:
+                raise ValueError(
+                    f"Unknown strategy '{stype}' for bucket '{bucket}'. "
+                    f"Valid: {sorted(valid_strategy_types)}"
+                )
+
+@router.post("/run-sentiment")
+async def run_sentiment_backtest_endpoint(
+    req: SentimentBacktestRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Run a sentiment backtest and persist the report."""
+    from app.services.backtester import run_sentiment_backtest as _run_sent
+
+    try:
+        req.validate_strategies()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        result = await asyncio.to_thread(
+            _run_sent,
+            symbol=req.symbol.upper(),
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            commission=req.commission,
+            data_source=req.data_source,
+            day_trade=req.day_trade,
+            sentiment_strategies=req.sentiment_strategies,
+            sentiment_warmup=req.sentiment_warmup,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Sentiment backtest error for symbol=%s", req.symbol)
+        raise HTTPException(status_code=500, detail=f"Backtest error: {exc}")
+
+    m = result["metrics"]
+    name = (
+        f"{req.symbol.upper()}_sentiment_{req.start_date}_to_{req.end_date}"
+    )
+    result_data_payload = {
+        "equity_curve": result["equity_curve"],
+        "trades": result["trades"],
+        "ohlcv": result["ohlcv"],
+    }
+    report = BacktestReport(
+        name=name,
+        symbol=req.symbol.upper(),
+        strategy_type="sentiment_switching",
+        parameters=req.sentiment_strategies,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        initial_capital=req.initial_capital,
+        final_value=m["final_value"],
+        total_return_pct=m["total_return_pct"],
+        annualized_return_pct=m["annualized_return_pct"],
+        sharpe_ratio=m["sharpe_ratio"],
+        max_drawdown_pct=m["max_drawdown_pct"],
+        win_rate_pct=m["win_rate_pct"],
+        total_trades=m["total_trades"],
+        result_data=result_data_payload,
+    )
+    db.add(report)
+    await db.commit()
+    await db.refresh(report)
+
+    return {
+        "id": report.id,
+        "name": name,
+        "metrics": m,
+        "result": result,
+    }
+
 @router.post("/run")
 async def run_backtest_endpoint(
     req: BacktestRequest,
@@ -218,7 +322,7 @@ async def run_backtest_endpoint(
             "script_snapshot": frozen_snapshot,
             "created_at": report.created_at.isoformat() if report.created_at else None,
         }
-        saved_path = local_storage.save_backtest_report(report.id, name, offload_payload)
+        saved_path = save_backtest_report(report.id, name, offload_payload)
         report.result_data_path = saved_path
         await db.commit()
     except Exception:
@@ -324,7 +428,7 @@ async def download_report(
         raise HTTPException(status_code=404, detail="Report not found.")
 
     # Try local-storage file first; fall back to DB result_data
-    file_data = local_storage.load_backtest_report(r.id, r.name)
+    file_data = load_backtest_report(r.id, r.name)
     if file_data is None:
         # Build payload from DB columns
         file_data = {
@@ -349,18 +453,18 @@ async def download_report(
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
 
-    safe_name = local_storage._safe_filename(r.name)
+    safe_name = _safe_filename(r.name)
 
     if fmt == "csv":
         trades = (file_data.get("result_data") or {}).get("trades", [])
-        content = local_storage.records_to_csv_bytes(trades)
+        content = records_to_csv_bytes(trades)
         return Response(
             content=content,
             media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="{safe_name}_trades.csv"'},
         )
 
-    content = local_storage.records_to_json_bytes(file_data)
+    content = records_to_json_bytes(file_data)
     return Response(
         content=content,
         media_type="application/json",
@@ -395,7 +499,7 @@ async def offload_report_to_storage(report_id: int, db: AsyncSession = Depends(g
         "script_snapshot": r.script_snapshot,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
-    saved_path = local_storage.save_backtest_report(r.id, r.name, payload)
+    saved_path = save_backtest_report(r.id, r.name, payload)
     r.result_data_path = saved_path
     await db.commit()
     return {"status": "saved", "path": saved_path}
@@ -404,4 +508,4 @@ async def offload_report_to_storage(report_id: int, db: AsyncSession = Depends(g
 @router.get("/local-storage/files")
 async def list_local_report_files():
     """List all backtest report files saved to local PC storage."""
-    return {"files": local_storage.list_backtest_report_files()}
+    return {"files": list_backtest_report_files()}

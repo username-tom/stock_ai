@@ -127,6 +127,7 @@ _cache = _TTLCache()
 
 QUOTE_TTL = 60  # seconds
 IB_QUOTE_TTL = 5  # seconds
+SECTOR_TTL = 86_400  # 24 hours
 
 # IB historical-request hardening: smooth bursts and avoid pacing pressure.
 _IB_HIST_MIN_GAP_S = 0.35
@@ -538,10 +539,13 @@ async def _get_ib_history(symbol: str, period: str) -> dict[str, Any]:
 # Public API
 # ---------------------------------------------------------------------------
 
-async def get_quote(symbol: str) -> dict:
+async def get_quote(symbol: str, source_preference: str | None = None) -> dict:
     """Return a quote dict for *symbol*, served from cache when fresh."""
     sym = symbol.upper()
-    source = "ib" if _ib_connected() else "yf"
+    if source_preference in {"ib", "yf"}:
+        source = source_preference
+    else:
+        source = "ib" if _ib_connected() else "yf"
     ttl = IB_QUOTE_TTL if source == "ib" else QUOTE_TTL
     cache_key = f"quote:{source}:{sym}"
     cached = await _cache.get(cache_key, ttl)
@@ -581,11 +585,11 @@ async def get_quote(symbol: str) -> dict:
     return result
 
 
-async def get_bulk_quotes(symbols: list[str]) -> dict[str, dict]:
+async def get_bulk_quotes(symbols: list[str], source_preference: str | None = None) -> dict[str, dict]:
     """Fetch quotes for multiple symbols concurrently."""
     async def _safe(sym: str) -> tuple[str, dict | None]:
         try:
-            return sym, await get_quote(sym)
+            return sym, await get_quote(sym, source_preference=source_preference)
         except Exception as exc:
             logger.warning("quote failed for %s: %s", sym, exc)
             return sym, None
@@ -711,7 +715,8 @@ async def get_movers(top_n: int = 10, force_refresh: bool = False) -> dict:
         if cached is not None:
             return cached
 
-    quotes = await get_bulk_quotes(_MOVERS_UNIVERSE)
+    # Keep movers on Yahoo quotes even when IB is connected to avoid extra IB load.
+    quotes = await get_bulk_quotes(_MOVERS_UNIVERSE, source_preference="yf")
     ranked = sorted(
         [q for q in quotes.values() if q.get("change_pct") is not None],
         key=lambda q: q["change_pct"],
@@ -765,6 +770,7 @@ async def get_earnings(watchlist: list[str], force_refresh: bool = False) -> dic
             return cached
 
     results = await asyncio.gather(*[_fetch_earnings(s) for s in all_symbols])
+    recent_results = await asyncio.gather(*[_fetch_recent_earnings(s) for s in watchlist_set])
 
     items = []
     seen: set[str] = set()
@@ -778,7 +784,21 @@ async def get_earnings(watchlist: list[str], force_refresh: bool = False) -> dic
     # Sort: watchlist first, then by days_until ascending
     items.sort(key=lambda x: (not x["watchlist_match"], x.get("days_until", 99)))
 
-    result = {"items": items, "as_of": datetime.now(tz=timezone.utc).isoformat()}
+    recent_items: list[dict] = []
+    recent_seen: set[str] = set()
+    for batch in recent_results:
+        for item in batch:
+            if item["id"] in recent_seen:
+                continue
+            recent_seen.add(item["id"])
+            recent_items.append(item)
+    recent_items.sort(key=lambda x: x.get("published_at", 0), reverse=True)
+
+    result = {
+        "items": items,
+        "recent_items": recent_items,
+        "as_of": datetime.now(tz=timezone.utc).isoformat(),
+    }
     await _cache.set(cache_key, result)
     return result
 
@@ -872,6 +892,106 @@ async def _fetch_earnings(symbol: str) -> dict | None:
         return None
 
 
+def _num(v: Any) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dict):
+        raw = v.get("raw")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+    return None
+
+
+def _build_recent_earnings_item(symbol: str, event: dict) -> dict | None:
+    quarter = event.get("quarter") or {}
+    quarter_raw = quarter.get("raw")
+    if quarter_raw is None:
+        return None
+
+    dt = datetime.fromtimestamp(int(quarter_raw), tz=timezone.utc)
+    et = zoneinfo.ZoneInfo("America/New_York")
+    days_since = (datetime.now(tz=et).date() - dt.astimezone(et).date()).days
+    if days_since < 0 or days_since > 90:
+        return None
+
+    eps_actual = _num(event.get("epsActual"))
+    eps_estimate = _num(event.get("epsEstimate"))
+    surprise_pct = _num(event.get("surprisePercent"))
+
+    status = "in_line"
+    if eps_actual is not None and eps_estimate is not None:
+        if eps_actual > eps_estimate:
+            status = "beat"
+        elif eps_actual < eps_estimate:
+            status = "miss"
+
+    tags: list[str] = []
+    if status == "beat":
+        tags.append("Earnings Beat")
+    elif status == "miss":
+        tags.append("Earnings Miss")
+    else:
+        tags.append("In Line")
+    if surprise_pct is not None:
+        tags.append(f"Surprise {surprise_pct:+.2f}%")
+    if eps_actual is not None:
+        tags.append(f"EPS {eps_actual:.2f}")
+    if eps_estimate is not None:
+        tags.append(f"Est {eps_estimate:.2f}")
+
+    return {
+        "id": f"recent-earnings:{symbol}:{int(quarter_raw)}",
+        "title": f"{symbol} reported on {dt.strftime('%b %d, %Y')}",
+        "url": f"https://finance.yahoo.com/quote/{symbol}/",
+        "source": "Yahoo Finance",
+        "published_at": int(quarter_raw),
+        "thumbnail": None,
+        "related": [symbol],
+        "tags": tags,
+        "type": "recent_earnings",
+        "days_since": days_since,
+        "eps_actual": eps_actual,
+        "eps_estimate": eps_estimate,
+        "surprise_pct": surprise_pct,
+        "status": status,
+        "watchlist_match": True,
+    }
+
+
+async def _fetch_recent_earnings(symbol: str) -> list[dict]:
+    """Fetch recent earnings results for a symbol from Yahoo earningsHistory."""
+    client = _get_http_client()
+    try:
+        crumb = await _get_yf_crumb()
+        url = _YF_EARNINGS_URL.format(symbol=symbol.upper())
+        r = await client.get(url, params={"modules": "earningsHistory", "crumb": crumb})
+        if r.status_code == 401:
+            global _yf_crumb
+            _yf_crumb = None
+            crumb = await _get_yf_crumb()
+            r = await client.get(url, params={"modules": "earningsHistory", "crumb": crumb})
+        r.raise_for_status()
+        data = r.json()
+        history = (
+            data.get("quoteSummary", {})
+            .get("result", [{}])[0]
+            .get("earningsHistory", {})
+            .get("history", [])
+        )
+        items: list[dict] = []
+        for event in history:
+            item = _build_recent_earnings_item(symbol, event)
+            if item is not None:
+                items.append(item)
+        items.sort(key=lambda x: x.get("published_at", 0), reverse=True)
+        return items[:2]
+    except Exception as exc:
+        logger.debug("recent earnings fetch failed for %s: %s", symbol, exc)
+        return []
+
+
 # Any article whose title or source contains one of these terms (case-insensitive)
 # is excluded from the news feed.
 _BLOCKED_TERMS = {"cramer", "mad money"}
@@ -933,6 +1053,59 @@ async def get_news(watchlist: list[str], extra_topics: list[str] | None = None, 
     result = {"items": merged, "as_of": datetime.now(tz=timezone.utc).isoformat()}
     await _cache.set(cache_key, result)
     return result
+
+
+async def _fetch_symbol_sector(symbol: str) -> str | None:
+    sym = symbol.upper()
+    cache_key = f"sector:{sym}"
+    cached = await _cache.get(cache_key, SECTOR_TTL)
+    if cached is not None:
+        return cached
+
+    client = _get_http_client()
+    try:
+        crumb = await _get_yf_crumb()
+        url = _YF_EARNINGS_URL.format(symbol=sym)
+        r = await client.get(url, params={"modules": "assetProfile,summaryProfile", "crumb": crumb})
+        if r.status_code == 401:
+            global _yf_crumb
+            _yf_crumb = None
+            crumb = await _get_yf_crumb()
+            r = await client.get(url, params={"modules": "assetProfile,summaryProfile", "crumb": crumb})
+        r.raise_for_status()
+        data = r.json()
+        root = data.get("quoteSummary", {}).get("result", [{}])[0]
+        profile = root.get("assetProfile") or root.get("summaryProfile") or {}
+        sector = profile.get("sector")
+        if not isinstance(sector, str) or not sector.strip():
+            sector = None
+        await _cache.set(cache_key, sector)
+        return sector
+    except Exception as exc:
+        logger.debug("sector lookup failed for %s: %s", sym, exc)
+        await _cache.set(cache_key, None)
+        return None
+
+
+async def get_symbol_sectors(symbols: list[str]) -> dict[str, str | None]:
+    """Return a map of symbol -> sector (Yahoo profile, cached 24h)."""
+    unique_symbols = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        sym = (symbol or "").upper().strip()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        unique_symbols.append(sym)
+
+    async def _safe(sym: str) -> tuple[str, str | None]:
+        try:
+            return sym, await _fetch_symbol_sector(sym)
+        except Exception:
+            return sym, None
+
+    pairs = await asyncio.gather(*[_safe(s) for s in unique_symbols])
+    return {sym: sector for sym, sector in pairs}
 
 
 INTRADAY_DF_TTL = 55   # seconds – just under the 60 s engine tick so each tick gets a fresh bar

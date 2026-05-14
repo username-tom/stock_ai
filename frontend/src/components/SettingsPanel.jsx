@@ -158,8 +158,6 @@ export default function SettingsPanel() {
       TRADING_MODE:       data.trading.TRADING_MODE,
       DATABASE_URL:       data.storage.DATABASE_URL,
       REPORTS_DIR:        data.storage.REPORTS_DIR,
-      // Add portfolio manager settings if present
-      ...(data.portfolio_manager_settings || {}),
       LOCAL_STORAGE_DIR:  data.storage.LOCAL_STORAGE_DIR,
       CORS_ORIGINS:       data.network.CORS_ORIGINS,
     })
@@ -313,28 +311,6 @@ export default function SettingsPanel() {
         />
       </Field>
     </div>
-  </SectionCard>
-
-  {/* ── Group: Sandbox Trading Rules ── */}
-
-  <SectionCard
-    icon={BoltIcon}
-    title="Sandbox Trading Rules"
-    description="Control sandbox trading restrictions."
-  >
-    <Field
-      label="Allow Buy Outside Allocation"
-      hint="Allow buying in the sandbox even if allocated funds are insufficient. If off, buys are limited to allocated funds."
-    >
-      <input
-        type="checkbox"
-        checked={!!form.allow_buy_outside_allocation}
-        onChange={e => set('allow_buy_outside_allocation', e.target.checked)}
-        className="form-checkbox h-4 w-4 text-emerald-600 rounded focus:ring-emerald-500 border-slate-600 bg-dark-700"
-        id="allow-buy-outside-allocation"
-      />
-      <label htmlFor="allow-buy-outside-allocation" className="ml-2 text-slate-300 text-xs">Allow buy with funds outside allocation</label>
-    </Field>
   </SectionCard>
 
       {/* ── Group 2: Trading ── */}

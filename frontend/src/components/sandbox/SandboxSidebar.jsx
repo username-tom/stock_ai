@@ -20,6 +20,7 @@ export default function SandboxSidebar({
   totalRealizedPnl,
   positions,
   quotes,
+  sectors,
   selectedSymbol,
   onSelectSymbol,
   onShowOverview,
@@ -289,6 +290,7 @@ export default function SandboxSidebar({
         <div className="space-y-1">
           {positions.map(pos => (
             <StockListItem key={pos.symbol} pos={pos} quote={quotes[pos.symbol]}
+              sector={sectors?.[pos.symbol]}
               isSelected={selectedSymbol === pos.symbol}
               onClick={() => onSelectSymbol(pos.symbol)} />
           ))}

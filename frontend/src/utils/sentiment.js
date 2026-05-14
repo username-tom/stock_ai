@@ -8,9 +8,11 @@
  *  3. Price vs prev close     – above → +1, below → -1
  *
  * Result:
- *  score ≥  2 → "Bullish"
- *  score ≤ -2 → "Bearish"
- *  otherwise  → "Neutral"
+ *  score =  3 and change > +2% → "Euphoric"
+ *  score = -3 and change < -2% → "Crash"
+ *  score ≥  2                → "Bullish"
+ *  score ≤ -2                → "Bearish"
+ *  otherwise                 → "Neutral"
  */
 export function quotesentiment(quote) {
   if (!quote) return null
@@ -40,6 +42,8 @@ export function quotesentiment(quote) {
     else if (price < prev) score -= 1
   }
 
+  if (score >= 3 && (quote.change_pct ?? 0) > 2) return 'euphoric'
+  if (score <= -3 && (quote.change_pct ?? 0) < -2) return 'crash'
   if (score >= 2)  return 'bullish'
   if (score <= -2) return 'bearish'
   return 'neutral'
@@ -97,15 +101,19 @@ export function quotesignal(quote) {
 
 /** Tailwind colour classes for each sentiment value */
 export const SENTIMENT_COLORS = {
+  euphoric: 'text-fuchsia-300 bg-fuchsia-500/15 border-fuchsia-500/40',
   bullish: 'text-emerald-400 bg-emerald-400/10 border-emerald-500/30',
   bearish: 'text-red-400 bg-red-400/10 border-red-500/30',
+  crash: 'text-rose-300 bg-rose-600/20 border-rose-500/50',
   neutral: 'text-slate-400 bg-slate-400/10 border-slate-500/30',
 }
 
 /** Short display label */
 export const SENTIMENT_LABELS = {
+  euphoric: '⬈ Euphoric',
   bullish: '▲ Bullish',
   bearish: '▼ Bearish',
+  crash: '⤋ Crash',
   neutral: '◆ Neutral',
 }
 

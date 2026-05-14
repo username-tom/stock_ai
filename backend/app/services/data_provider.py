@@ -440,6 +440,7 @@ def fetch_ohlcv(
         "ib": _fetch_ib,
     }
 
+    requested_source = source
     source = _resolve_source(source)
 
     if source not in fetchers:
@@ -460,10 +461,12 @@ def fetch_ohlcv(
         try:
             return _fetch_yfinance(symbol, start, end)
         except ValueError as exc:
-            logger.warning(
-                "yfinance failed (%s); falling back to stooq for %s.", exc, symbol
-            )
-            return _fetch_stooq(symbol, start, end)
+            if requested_source in ("auto", "ib"):
+                logger.warning(
+                    "yfinance failed (%s); falling back to stooq for %s.", exc, symbol
+                )
+                return _fetch_stooq(symbol, start, end)
+            raise
 
     return fetchers[source](symbol, start, end)
 

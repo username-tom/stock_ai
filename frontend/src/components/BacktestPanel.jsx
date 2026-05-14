@@ -1,6 +1,6 @@
-﻿import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { getStrategies, runBacktest, getScripts, getBuiltinTemplates } from '../api/client'
+import { getStrategies, runBacktest, runSentimentBacktest, getScripts, getBuiltinTemplates } from '../api/client'
 import EquityChart from './charts/EquityChart'
 import SubplotChart from './charts/SubplotChart'
 import SymbolAutocomplete from './shared/SymbolAutocomplete'
@@ -189,6 +189,22 @@ const TEMPLATE_PARAM_UI = {
 const CUSTOM_SCRIPT_KEY = '__custom_script__'
 const TEMPLATE_SCRIPT_KEY = '__template__'
 
+const BUCKETS = [
+  { key: 'crash',    label: 'Crash',    cls: 'bg-red-900/50 text-red-300 border-red-700/40' },
+  { key: 'bearish',  label: 'Bearish',  cls: 'bg-orange-900/50 text-orange-300 border-orange-700/40' },
+  { key: 'neutral',  label: 'Neutral',  cls: 'bg-slate-700/50 text-slate-300 border-slate-600/40' },
+  { key: 'bullish',  label: 'Bullish',  cls: 'bg-emerald-900/50 text-emerald-300 border-emerald-700/40' },
+  { key: 'euphoric', label: 'Euphoric', cls: 'bg-purple-900/50 text-purple-300 border-purple-700/40' },
+]
+
+const DEFAULT_SENT_STRATS = {
+  crash: 'rsi',
+  bearish: 'macd',
+  neutral: 'bollinger_bands',
+  bullish: 'sma_crossover',
+  euphoric: 'rsi',
+}
+
 export default function BacktestPanel() {
   const { data: stratData, isLoading: stratLoading } = useQuery({
     queryKey: ['strategies'],
@@ -240,6 +256,63 @@ export default function BacktestPanel() {
     window.addEventListener('watchlist-updated', sync)
     return () => window.removeEventListener('watchlist-updated', sync)
   }, [])
+
+  // ── Advanced / Sentiment mode ──────────────────────────────────────────── //
+  const [mode, setMode] = useState('standard') // 'standard' | 'sentiment'
+  const [sentForm, setSentForm] = useState({
+    symbol: 'AAPL',
+    start_date: '2022-01-01',
+    end_date: '2023-12-31',
+    initial_capital: 10000,
+    commission: 0.005,
+    day_trade: false,
+    sentimentStrategies: { ...DEFAULT_SENT_STRATS },
+    sentiment_warmup: 35,
+  })
+  const [sentResult, setSentResult] = useState(null)
+  const [sentActiveTab, setSentActiveTab] = useState('equity')
+  const [sentProgress, setSentProgress] = useState(0)
+  const sentProgressRef = useRef(null)
+
+  const sentMutation = useMutation({
+    mutationFn: (payload) => runSentimentBacktest(payload),
+    onSuccess: (data) => {
+      clearInterval(sentProgressRef.current)
+      setSentProgress(100)
+      setTimeout(() => setSentProgress(0), 600)
+      setSentResult(data)
+    },
+    onError: () => {
+      clearInterval(sentProgressRef.current)
+      setSentProgress(0)
+    },
+  })
+
+  useEffect(() => () => clearInterval(sentProgressRef.current), [])
+
+  const handleSentSubmit = (e) => {
+    e.preventDefault()
+    setSentProgress(0)
+    const tradingDays = estimateTradingDays(sentForm.start_date, sentForm.end_date)
+    const tickMs = Math.min(600, Math.max(80, tradingDays * 120 / 25))
+    let cur = 0
+    clearInterval(sentProgressRef.current)
+    sentProgressRef.current = setInterval(() => {
+      cur += 1
+      setSentProgress(Math.min(cur, 99))
+      if (cur >= 99) clearInterval(sentProgressRef.current)
+    }, tickMs)
+    sentMutation.mutate({
+      symbol: sentForm.symbol,
+      start_date: sentForm.start_date,
+      end_date: sentForm.end_date,
+      initial_capital: sentForm.initial_capital,
+      commission: sentForm.commission,
+      day_trade: sentForm.day_trade,
+      sentiment_strategies: sentForm.sentimentStrategies,
+      sentiment_warmup: sentForm.sentiment_warmup,
+    })
+  }
 
   const isCustomScript = form.strategy_type === CUSTOM_SCRIPT_KEY
   const isTemplate = form.strategy_type === TEMPLATE_SCRIPT_KEY
@@ -332,12 +405,31 @@ export default function BacktestPanel() {
 
   return (
     <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-100">Backtesting</h1>
-        <p className="text-sm text-slate-400 mt-0.5">Test a strategy against historical data</p>
-      </div>
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-100">Backtesting</h1>
+            <p className="text-sm text-slate-400 mt-0.5">Test a strategy against historical data</p>
+          </div>
+          <div className="flex gap-1 bg-dark-800/60 rounded-lg p-1 border border-dark-600 shrink-0">
+            <button
+              type="button"
+              onClick={() => setMode('standard')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${mode === 'standard' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'}`}
+            >
+              Standard
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('sentiment')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${mode === 'sentiment' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'}`}
+            >
+              Advanced — Sentiment
+            </button>
+          </div>
+        </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        {mode === 'standard' && (
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* Config panel */}
         <form onSubmit={handleSubmit} className="card space-y-4 xl:col-span-1">
           <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">
@@ -931,6 +1023,289 @@ export default function BacktestPanel() {
           )}
         </div>
       </div>
+          )}
+
+        {mode === 'sentiment' && (
+          <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+            {/* Sentiment Config */}
+            <form onSubmit={handleSentSubmit} className="card space-y-4 xl:col-span-1">
+              <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider flex items-center gap-2">
+                Advanced Backtest
+                <span className="text-indigo-400 text-xs font-normal normal-case">Sentiment Switching</span>
+              </h2>
+              <p className="text-xs text-slate-500 -mt-2">
+                Strategy auto-switches per bar based on rolling RSI + MACD + SMA. Positions
+                are force-closed on each switch.
+              </p>
+
+              <div>
+                <label className="label">Symbol</label>
+                <SymbolAutocomplete
+                  value={sentForm.symbol}
+                  onChange={v => setSentForm(f => ({ ...f, symbol: v }))}
+                  placeholder="Search or type symbol…"
+                  extraSuggestions={watchlist.map(s => ({ symbol: s }))}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">Start Date</label>
+                  <input className="input" type="date" value={sentForm.start_date}
+                    onChange={e => setSentForm(f => ({ ...f, start_date: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="label">End Date</label>
+                  <input className="input" type="date" value={sentForm.end_date}
+                    onChange={e => setSentForm(f => ({ ...f, end_date: e.target.value }))} />
+                </div>
+              </div>
+
+              <div>
+                <label className="label">Initial Capital ($)</label>
+                <input className="input" type="number" value={sentForm.initial_capital}
+                  onChange={e => setSentForm(f => ({ ...f, initial_capital: parseFloat(e.target.value) }))} />
+              </div>
+
+              <div>
+                <label className="label">Commission</label>
+                <select className="input" value={String(sentForm.commission)}
+                  onChange={e => setSentForm(f => ({ ...f, commission: parseFloat(e.target.value) }))}
+                >
+                  {COMMISSION_PRESETS.filter(p => p.value !== null).map(p => (
+                    <option key={p.label} value={String(p.value)}>{p.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Sentiment strategy map */}
+              <div className="border border-dark-500 rounded-lg p-3 space-y-3 bg-dark-900/30">
+                <div className="text-xs text-slate-500 uppercase tracking-wider">Sentiment → Strategy Map</div>
+                <div className="space-y-2">
+                  {BUCKETS.map(b => (
+                    <div key={b.key} className="flex items-center gap-2">
+                      <span className={`shrink-0 inline-block w-16 text-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${b.cls}`}>
+                        {b.label}
+                      </span>
+                      <select
+                        className="input flex-1 text-xs py-1"
+                        value={sentForm.sentimentStrategies[b.key] ?? 'rsi'}
+                        onChange={e => setSentForm(f => ({
+                          ...f,
+                          sentimentStrategies: { ...f.sentimentStrategies, [b.key]: e.target.value },
+                        }))}
+                      >
+                        {(stratData?.strategies || []).map(s => (
+                          <option key={s.type} value={s.type}>
+                            {s.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-600 border-t border-dark-600 pt-2">
+                  Sentiment scored per bar via RSI-14, MACD, &amp; SMA-20. Positions close on switch.
+                </p>
+              </div>
+
+              {/* Warmup bars */}
+              <div>
+                <label className="label">Sentiment Warmup Bars</label>
+                <input className="input" type="number" min={5} max={500}
+                  value={sentForm.sentiment_warmup}
+                  onChange={e => setSentForm(f => ({ ...f, sentiment_warmup: parseInt(e.target.value, 10) }))} />
+                <p className="text-xs text-slate-500 mt-1">
+                  Bars before switching begins (indicators need data to warm up). Default 35.
+                </p>
+              </div>
+
+              {/* Progress bar */}
+              {sentMutation.isPending && (
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-xs text-slate-400">
+                    <span>Computing sentiment &amp; signals…</span>
+                    <span>{sentProgress}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-dark-700 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full transition-all duration-200 ease-linear"
+                      style={{ width: `${sentProgress}%`, background: 'linear-gradient(90deg,#6366f1,#818cf8)' }} />
+                  </div>
+                </div>
+              )}
+
+              <button type="submit" className="btn-primary w-full justify-center"
+                disabled={sentMutation.isPending}
+                style={sentMutation.isPending ? {} : { background: 'linear-gradient(90deg,#4f46e5,#7c3aed)' }}
+              >
+                {sentMutation.isPending ? (
+                  <><ArrowPathIcon className="h-4 w-4 animate-spin" />Running…</>
+                ) : (
+                  <><ArrowPathIcon className="h-4 w-4" />Run Sentiment Backtest</>
+                )}
+              </button>
+
+              {sentMutation.isError && (
+                <div className="flex items-start gap-2 p-3 bg-red-900/20 border border-red-700/30 rounded-lg text-sm text-red-400">
+                  <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 shrink-0" />
+                  {sentMutation.error?.response?.data?.detail || sentMutation.error?.message || 'Unknown error'}
+                </div>
+              )}
+              {sentMutation.isSuccess && (
+                <div className="flex items-center gap-2 p-3 bg-indigo-900/20 border border-indigo-700/30 rounded-lg text-sm text-indigo-300">
+                  <CheckCircleIcon className="h-4 w-4" />
+                  Sentiment backtest complete — report saved.
+                </div>
+              )}
+            </form>
+
+            {/* Sentiment Results */}
+            <div className="xl:col-span-2 space-y-5">
+              {sentResult ? (
+                <>
+                  <SummaryPanel result={sentResult} />
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <MetricCard label="Total Return"
+                      value={`${sentResult.metrics.total_return_pct >= 0 ? '+' : ''}${sentResult.metrics.total_return_pct?.toFixed(2)}%`}
+                      positive={sentResult.metrics.total_return_pct >= 0} />
+                    <MetricCard label="Annualised Return"
+                      value={`${sentResult.metrics.annualized_return_pct >= 0 ? '+' : ''}${sentResult.metrics.annualized_return_pct?.toFixed(2)}%`}
+                      positive={sentResult.metrics.annualized_return_pct >= 0} />
+                    <MetricCard label="Sharpe Ratio"
+                      value={sentResult.metrics.sharpe_ratio?.toFixed(2)}
+                      positive={sentResult.metrics.sharpe_ratio >= 1} />
+                    <MetricCard label="Max Drawdown"
+                      value={`${sentResult.metrics.max_drawdown_pct?.toFixed(2)}%`}
+                      positive={false} />
+                    <MetricCard label="Final Value"
+                      value={`$${sentResult.metrics.final_value?.toLocaleString()}`} />
+                    <MetricCard label="Win Rate"
+                      value={`${sentResult.metrics.win_rate_pct?.toFixed(1)}%`}
+                      positive={sentResult.metrics.win_rate_pct >= 50} />
+                    <MetricCard label="Total Trades" value={sentResult.metrics.total_trades} />
+                    <MetricCard label="Strategy Switches"
+                      value={(sentResult.result?.strategy_switches ?? []).length} />
+                  </div>
+
+                  {/* Chart / table tabs */}
+                  <div className="card space-y-4">
+                    <div className="flex gap-2 border-b border-dark-500 pb-3 flex-wrap">
+                      {['equity', 'price', 'trades', 'switches'].map(tab => (
+                        <button key={tab} onClick={() => setSentActiveTab(tab)}
+                          className={`px-3 py-1.5 text-sm rounded-md transition-colors capitalize ${
+                            sentActiveTab === tab
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
+                          }`}>
+                          {tab === 'equity' ? 'Equity Curve'
+                            : tab === 'price' ? 'Price Chart'
+                            : tab === 'trades' ? 'Trade Log'
+                            : 'Strategy Switches'}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className={sentActiveTab === 'equity' ? '' : 'hidden'}>
+                      <EquityChart data={sentResult.result?.equity_curve ?? []}
+                        initialCapital={sentResult.result?.initial_capital} height={300} />
+                    </div>
+
+                    <div className={sentActiveTab === 'price' ? '' : 'hidden'}>
+                      <SubplotChart data={sentResult.result?.ohlcv ?? []} height={240} />
+                    </div>
+
+                    <div className={sentActiveTab === 'trades' ? '' : 'hidden'}>
+                      <div className="table-container max-h-80 overflow-y-auto">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Entry</th><th>Exit</th>
+                              <th>Entry $</th><th>Exit $</th>
+                              <th>Qty</th>
+                              <th>Strategy</th>
+                              <th>Bucket</th>
+                              <th>Exit Reason</th>
+                              <th>P&amp;L</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(sentResult.result?.trades ?? []).map((t, i) => (
+                              <tr key={i}>
+                                <td className="font-mono text-xs">{t.entry_date}</td>
+                                <td className="font-mono text-xs">{t.exit_date}</td>
+                                <td className="font-mono">${t.entry_price}</td>
+                                <td className="font-mono">${t.exit_price}</td>
+                                <td>{t.quantity}</td>
+                                <td className="text-xs text-indigo-300">{t.entry_strategy ?? '—'}</td>
+                                <td>
+                                  {t.entry_bucket ? (
+                                    <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-medium ${BUCKETS.find(b => b.key === t.entry_bucket)?.cls ?? 'bg-slate-700/50 text-slate-400 border-slate-600'}`}>
+                                      {t.entry_bucket}
+                                    </span>
+                                  ) : '—'}
+                                </td>
+                                <td>
+                                  <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-medium ${t.exit_reason === 'strategy_switch' ? 'bg-amber-900/50 text-amber-300 border-amber-700/40' : 'bg-slate-700/50 text-slate-400 border-slate-600/40'}`}>
+                                    {t.exit_reason?.replace(/_/g, ' ') ?? '—'}
+                                  </span>
+                                </td>
+                                <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
+                                  {t.pnl >= 0 ? '+' : ''}${t.pnl?.toFixed(2)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {!(sentResult.result?.trades?.length) && (
+                          <div className="text-center text-slate-500 text-sm py-8">No trades executed</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className={sentActiveTab === 'switches' ? '' : 'hidden'}>
+                      {(sentResult.result?.strategy_switches ?? []).length === 0 ? (
+                        <div className="text-center text-slate-500 text-sm py-8">No strategy switches occurred</div>
+                      ) : (
+                        <div className="space-y-0 max-h-80 overflow-y-auto">
+                          <div className="grid grid-cols-4 text-xs text-slate-500 uppercase tracking-wider px-2 pb-1 border-b border-dark-600">
+                            <span>Date</span><span>From</span><span>To</span><span>Sentiment</span>
+                          </div>
+                          {(sentResult.result?.strategy_switches ?? []).map((sw, i) => (
+                            <div key={i} className="grid grid-cols-4 items-center text-xs py-1.5 px-2 border-b border-dark-700/50 hover:bg-dark-800/30">
+                              <span className="font-mono text-slate-500">{sw.date}</span>
+                              <span className="text-slate-400">{sw.from ?? <span className="text-slate-600">start</span>}</span>
+                              <span className="text-indigo-300 font-medium">{sw.to}</span>
+                              <span>
+                                <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold ${BUCKETS.find(b => b.key === sw.bucket)?.cls ?? 'bg-slate-700/50 text-slate-400 border-slate-600'}`}>
+                                  {sw.bucket}
+                                </span>
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : sentMutation.isPending ? (
+                <div className="card flex flex-col items-center justify-center h-64 gap-3 text-slate-400">
+                  <ArrowPathIcon className="h-8 w-8 animate-spin text-indigo-400" />
+                  <p className="text-sm">Running sentiment backtest…</p>
+                </div>
+              ) : (
+                <div className="card flex flex-col items-center justify-center h-64 text-slate-500 gap-2">
+                  <ArrowPathIcon className="h-10 w-10 text-slate-600 mb-1" />
+                  <p className="font-medium">Configure sentiment strategy map and run</p>
+                  <p className="text-xs text-slate-600 text-center max-w-xs">
+                    Each bar's strategy is chosen by computing rolling RSI, MACD &amp; SMA,
+                    then mapping the result to one of five sentiment buckets.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
     </div>
   )
 }

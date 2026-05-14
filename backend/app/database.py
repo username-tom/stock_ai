@@ -70,6 +70,16 @@ async def _migrate(conn):
         )""",
         # sandbox_positions.total_invested (cumulative cost of all BUY fills for realized % calc)
         "ALTER TABLE sandbox_positions ADD COLUMN total_invested REAL NOT NULL DEFAULT 0.0",
+        # sandbox_positions max allocation cap per symbol
+        "ALTER TABLE sandbox_positions ADD COLUMN max_allocation_mode VARCHAR(20) NOT NULL DEFAULT 'dollar'",
+        "ALTER TABLE sandbox_positions ADD COLUMN max_allocation_value REAL",
+        # portfolio_manager_settings min funds mode (dollar vs percent of total funds)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN min_position_funds_mode VARCHAR(20) NOT NULL DEFAULT 'dollar'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN min_position_funds_pct REAL NOT NULL DEFAULT 1.0",
+        # sandbox_positions sentiment-driven strategy mode
+        "ALTER TABLE sandbox_positions ADD COLUMN sentiment_mode VARCHAR(20)",
+        # portfolio_manager_settings global sentiment strategy toggle
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_strategy_enabled BOOLEAN NOT NULL DEFAULT 1",
     ]
     for stmt in migrations:
         try:

@@ -1,16 +1,81 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
   ChartBarIcon, CheckCircleIcon, XCircleIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { fmtMoney } from './sandboxHelpers'
+
+const STORAGE_KEY = 'portfolio_manager_savestates_v1'
+const PROFILE_ORDER = ['simulated', 'paper', 'live']
 
 const BULL_COLOR = '#10b981'
 const BEAR_COLOR = '#ef4444'
 const NEUTRAL_COLOR = '#64748b'
+const SENTIMENT_BUCKETS = ['crash', 'bearish', 'neutral', 'bullish', 'euphoric']
+const SENTIMENT_LABELS = {
+  crash: 'Crash',
+  bearish: 'Bearish',
+  neutral: 'Neutral',
+  bullish: 'Bullish',
+  euphoric: 'Euphoric',
+}
+const DEFAULT_SENTIMENT_STRATEGIES = {
+  crash: 'rsi',
+  bearish: 'macd',
+  neutral: 'bollinger',
+  bullish: 'sma_crossover',
+  euphoric: 'rsi',
+}
+
+function buildDraftFromSettings(settings) {
+  return {
+    transfer_pct: Math.round(settings.transfer_pct * 100),
+    transfer_interval_s: settings.transfer_interval_s,
+    indicator_interval_s: settings.indicator_interval_s,
+    min_position_funds: settings.min_position_funds,
+    min_position_funds_mode: settings.min_position_funds_mode ?? 'dollar',
+    min_position_funds_pct: settings.min_position_funds_pct ?? 1,
+    deploy_available_funds: settings.deploy_available_funds ?? true,
+    deploy_target: settings.deploy_target ?? 'most_bearish',
+    deploy_target_symbol: settings.deploy_target_symbol ?? '',
+    reallocation_enabled: settings.reallocation_enabled ?? true,
+    reallocation_mode: settings.reallocation_mode ?? 'to_stock',
+    allow_buy_outside_allocation: settings.allow_buy_outside_allocation ?? false,
+    market_sentiment_strategies: {
+      ...DEFAULT_SENTIMENT_STRATEGIES,
+      ...(settings.market_sentiment_strategies ?? {}),
+    },
+    symbol_sentiment_strategies: {
+      ...DEFAULT_SENTIMENT_STRATEGIES,
+      ...(settings.symbol_sentiment_strategies ?? {}),
+    },
+    sentiment_strategy_enabled: settings.sentiment_strategy_enabled ?? true,
+  }
+}
+
+function normalizeProfile(profile) {
+  return PROFILE_ORDER.includes(profile) ? profile : 'simulated'
+}
+
+function loadSavedStates() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') return parsed
+    }
+  } catch {}
+  return {}
+}
+
+function saveSavedStates(states) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(states))
+  } catch {}
+}
 
 function classColor(cls) {
   if (cls === 'bullish') return BULL_COLOR
@@ -34,26 +99,69 @@ function SettingRow({ label, hint, children }) {
   )
 }
 
-export default function PortfolioManagerPanel() {
+export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   const qc = useQueryClient()
   const appSettings = useAppSettings()
+  const activeProfile = normalizeProfile(profile)
   const [editSettings, setEditSettings] = useState(false)
   const [draft, setDraft] = useState(null)
+  const [savedStates, setSavedStates] = useState(() => loadSavedStates())
 
   const { data: managerData, isLoading } = useQuery({
     queryKey: ['portfolio-manager-state'],
     queryFn: getPortfolioManagerState,
     refetchInterval: appSettings.portfolio_positions_ms,
   })
+  const { data: strategyData } = useQuery({
+    queryKey: ['strategies'],
+    queryFn: getStrategies,
+    staleTime: 60_000,
+  })
 
   const updateMut = useMutation({
     mutationFn: updatePortfolioManagerSettings,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+      setSavedStates(prev => {
+        const next = {
+          ...prev,
+          [activeProfile]: {
+            draft,
+            editSettings: false,
+            updatedAt: new Date().toISOString(),
+          },
+        }
+        saveSavedStates(next)
+        return next
+      })
       setEditSettings(false)
-      setDraft(null)
     },
   })
+
+  useEffect(() => {
+    if (isLoading || !managerData) return
+    setSavedStates(prev => {
+      const current = prev[activeProfile]
+      if (current?.draft) {
+        setDraft(current.draft)
+        setEditSettings(!!current.editSettings)
+        return prev
+      }
+      const next = {
+        ...prev,
+        [activeProfile]: {
+          draft: buildDraftFromSettings(managerData.settings),
+          editSettings: false,
+          updatedAt: new Date().toISOString(),
+        },
+      }
+      saveSavedStates(next)
+      setDraft(next[activeProfile].draft)
+      setEditSettings(false)
+      return next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProfile, managerData, isLoading])
 
   if (isLoading || !managerData) return null
 
@@ -62,32 +170,85 @@ export default function PortfolioManagerPanel() {
   const activity = managerData.last_activity ?? []
 
   function openEdit() {
-    setDraft({
-      transfer_pct: Math.round(settings.transfer_pct * 100),
-      transfer_interval_s: settings.transfer_interval_s,
-      indicator_interval_s: settings.indicator_interval_s,
-      min_position_funds: settings.min_position_funds,
-      deploy_available_funds: settings.deploy_available_funds ?? true,
-      deploy_target: settings.deploy_target ?? 'most_bearish',
-      deploy_target_symbol: settings.deploy_target_symbol ?? '',
-      reallocation_enabled: settings.reallocation_enabled ?? true,
-      reallocation_mode: settings.reallocation_mode ?? 'to_stock',
-    })
+    const nextDraft = savedStates[activeProfile]?.draft ?? buildDraftFromSettings(settings)
+    setDraft(nextDraft)
     setEditSettings(true)
+    const next = {
+      ...savedStates,
+      [activeProfile]: {
+        draft: nextDraft,
+        editSettings: true,
+        updatedAt: new Date().toISOString(),
+      },
+    }
+    setSavedStates(next)
+    saveSavedStates(next)
+  }
+
+  function doneEditing() {
+    const nextDraft = savedStates[activeProfile]?.draft ?? buildDraftFromSettings(settings)
+    setEditSettings(false)
+    setDraft(nextDraft)
+    const next = {
+      ...savedStates,
+      [activeProfile]: {
+        draft: nextDraft,
+        editSettings: false,
+        updatedAt: new Date().toISOString(),
+      },
+    }
+    setSavedStates(next)
+    saveSavedStates(next)
+  }
+
+  function updateDraft(updater) {
+    setDraft(prev => {
+      const nextDraft = typeof updater === 'function' ? updater(prev) : updater
+      setSavedStates(prevStates => {
+        const next = {
+          ...prevStates,
+          [activeProfile]: {
+            draft: nextDraft,
+            editSettings,
+            updatedAt: new Date().toISOString(),
+          },
+        }
+        saveSavedStates(next)
+        return next
+      })
+      return nextDraft
+    })
   }
 
   function handleSave() {
+    if (!draft) return
     updateMut.mutate({
       transfer_pct: draft.transfer_pct / 100,
       transfer_interval_s: Number(draft.transfer_interval_s),
       indicator_interval_s: Number(draft.indicator_interval_s),
       min_position_funds: Number(draft.min_position_funds),
+      min_position_funds_mode: draft.min_position_funds_mode,
+      min_position_funds_pct: Number(draft.min_position_funds_pct),
       deploy_available_funds: draft.deploy_available_funds,
       deploy_target: draft.deploy_target,
       deploy_target_symbol: draft.deploy_target_symbol ?? '',
       reallocation_enabled: draft.reallocation_enabled,
       reallocation_mode: draft.reallocation_mode,
+      allow_buy_outside_allocation: draft.allow_buy_outside_allocation,
+      market_sentiment_strategies: draft.market_sentiment_strategies,
+      symbol_sentiment_strategies: draft.symbol_sentiment_strategies,
+      sentiment_strategy_enabled: draft.sentiment_strategy_enabled,
     })
+  }
+
+  const strategyOptions = strategyData?.strategies ?? []
+  const marketSentimentStrategies = {
+    ...DEFAULT_SENTIMENT_STRATEGIES,
+    ...(settings.market_sentiment_strategies ?? {}),
+  }
+  const symbolSentimentStrategies = {
+    ...DEFAULT_SENTIMENT_STRATEGIES,
+    ...(settings.symbol_sentiment_strategies ?? {}),
   }
 
   const symbolCount = Object.keys(scores).length
@@ -102,6 +263,9 @@ export default function PortfolioManagerPanel() {
         <div className="flex items-center gap-2">
           <CpuChipIcon className="h-4 w-4 text-violet-400" />
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Portfolio Manager</h2>
+          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-dark-700 text-slate-400 border border-dark-600 uppercase tracking-wide">
+            {activeProfile}
+          </span>
           <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold border ${
             settings.enabled
               ? 'bg-violet-900/30 text-violet-300 border-violet-700/40'
@@ -112,12 +276,21 @@ export default function PortfolioManagerPanel() {
               : <><XCircleIcon className="h-3 w-3" />Inactive</>}
           </span>
         </div>
-        <button
-          onClick={openEdit}
-          className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
-        >
-          Settings
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={editSettings ? doneEditing : openEdit}
+            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
+          >
+            {editSettings ? 'Done' : 'Edit'}
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!editSettings || !draft || updateMut.isPending}
+            className="text-xs bg-violet-700 hover:bg-violet-600 text-white font-semibold rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {updateMut.isPending ? 'Saving…' : 'Save'}
+          </button>
+        </div>
       </div>
 
       {/* Summary stats */}
@@ -155,7 +328,11 @@ export default function PortfolioManagerPanel() {
           <span className="flex items-center gap-1 text-slate-600"><ArrowsRightLeftIcon className="h-3.5 w-3.5" />Reallocation off</span>
         )}
         <span className="flex items-center gap-1"><ChartBarIcon className="h-3.5 w-3.5" />Score refresh {settings.indicator_interval_s}s</span>
-        <span className="flex items-center gap-1"><BanknotesIcon className="h-3.5 w-3.5" />Min {fmtMoney(settings.min_position_funds)} per position</span>
+        <span className="flex items-center gap-1"><BanknotesIcon className="h-3.5 w-3.5" />
+          {(settings.min_position_funds_mode ?? 'dollar') === 'percent'
+            ? `Min ${settings.min_position_funds_pct ?? 1}% of total funds per position`
+            : `Min ${fmtMoney(settings.min_position_funds)} per position`}
+        </span>
         <span className={`flex items-center gap-1 ${settings.deploy_available_funds ? 'text-violet-400' : 'text-slate-600'}`}>
           <BanknotesIcon className="h-3.5 w-3.5" />
           {settings.deploy_available_funds
@@ -163,6 +340,78 @@ export default function PortfolioManagerPanel() {
             : 'Available funds deployment off'}
         </span>
       </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+        <div className="bg-dark-800/70 border border-dark-600 rounded-lg p-3 space-y-1.5">
+          <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Market Sentiment Strategies</div>
+          <div className="flex flex-wrap gap-1.5">
+            {SENTIMENT_BUCKETS.map(sentiment => (
+              <span key={`market-${sentiment}`} className="text-[11px] text-slate-400 bg-dark-700 px-2 py-0.5 rounded-md">
+                {SENTIMENT_LABELS[sentiment]}: {marketSentimentStrategies[sentiment]}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="bg-dark-800/70 border border-dark-600 rounded-lg p-3 space-y-1.5">
+          <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Symbol Sentiment Strategies</div>
+          <div className="flex flex-wrap gap-1.5">
+            {SENTIMENT_BUCKETS.map(sentiment => (
+              <span key={`symbol-${sentiment}`} className="text-[11px] text-slate-400 bg-dark-700 px-2 py-0.5 rounded-md">
+                {SENTIMENT_LABELS[sentiment]}: {symbolSentimentStrategies[sentiment]}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Sentiment strategy status */}
+      {settings.sentiment_strategy_enabled && (
+        <div className="bg-dark-800/70 border border-dark-600 rounded-lg p-3 space-y-2">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Sentiment Strategy Routing</div>
+            {managerData.market_classification && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-slate-500">Market:</span>
+                <span
+                  className="font-bold"
+                  style={{ color: classColor(managerData.market_classification.classification) }}
+                >
+                  {SENTIMENT_LABELS[managerData.market_classification.bucket] ?? managerData.market_classification.bucket}
+                </span>
+                <span className="text-slate-600">({managerData.market_classification.score > 0 ? '+' : ''}{managerData.market_classification.score})</span>
+              </div>
+            )}
+          </div>
+          {/* Symbol group lists */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-[11px] text-slate-500 mb-1 font-medium uppercase tracking-wide">Market Sentiment</div>
+              {(managerData.sentiment_groups?.market ?? []).length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {(managerData.sentiment_groups.market).map(sym => (
+                    <span key={sym} className="text-[11px] font-mono font-bold bg-blue-900/20 text-blue-300 border border-blue-800/30 px-1.5 py-0.5 rounded">{sym}</span>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-[11px] text-slate-600">None assigned</span>
+              )}
+            </div>
+            <div>
+              <div className="text-[11px] text-slate-500 mb-1 font-medium uppercase tracking-wide">Symbol Sentiment</div>
+              {(managerData.sentiment_groups?.symbol ?? []).length > 0 ? (
+                <div className="flex flex-wrap gap-1">
+                  {(managerData.sentiment_groups.symbol).map(sym => (
+                    <span key={sym} className="text-[11px] font-mono font-bold bg-emerald-900/20 text-emerald-300 border border-emerald-800/30 px-1.5 py-0.5 rounded">{sym}</span>
+                  ))}
+                </div>
+              ) : (
+                <span className="text-[11px] text-slate-600">None assigned</span>
+              )}
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-600">Assign a Sentiment Mode per symbol in its position settings.</p>
+        </div>
+      )}
 
       {/* Symbol scores */}
       {symbolCount > 0 && (
@@ -208,14 +457,22 @@ export default function PortfolioManagerPanel() {
         </div>
       )}
 
-      {/* Settings modal */}
-      {editSettings && draft && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-dark-800 border border-dark-600 rounded-xl shadow-2xl w-full max-w-md p-6 space-y-5 overflow-y-auto max-h-[90vh]">
+      {/* Inline settings */}
+      {draft && (
+        <div className="bg-dark-800/70 border border-dark-600 rounded-xl p-4 space-y-4">
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <CpuChipIcon className="h-5 w-5 text-violet-400" />
-              <h3 className="text-base font-bold text-slate-100">Portfolio Manager Settings</h3>
+              <CpuChipIcon className="h-4.5 w-4.5 text-violet-400" />
+              <h3 className="text-sm font-semibold text-slate-200 uppercase tracking-wider">Manager Settings</h3>
             </div>
+            <span className={`text-[11px] px-2 py-0.5 rounded-md border ${editSettings
+              ? 'text-violet-300 bg-violet-900/30 border-violet-700/40'
+              : 'text-slate-500 bg-dark-700 border-dark-600'}`}>
+              {editSettings ? 'Editing enabled' : 'Read only'}
+            </span>
+          </div>
+
+          <fieldset disabled={!editSettings || updateMut.isPending} className="space-y-5 disabled:opacity-70">
 
             <SettingRow
               label="Fund Reallocation"
@@ -224,7 +481,10 @@ export default function PortfolioManagerPanel() {
               <label className="flex items-center gap-2 cursor-pointer">
                 <div
                   className={`relative w-9 h-5 rounded-full transition-colors ${draft.reallocation_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => setDraft(d => ({ ...d, reallocation_enabled: !d.reallocation_enabled }))}
+                  onClick={() => {
+                    if (!editSettings) return
+                    updateDraft(d => ({ ...d, reallocation_enabled: !d.reallocation_enabled }))
+                  }}
                 >
                   <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.reallocation_enabled ? 'translate-x-4' : ''}`} />
                 </div>
@@ -242,7 +502,7 @@ export default function PortfolioManagerPanel() {
                     <input
                       type="radio" name="reallocation_mode" value="to_stock"
                       checked={draft.reallocation_mode === 'to_stock'}
-                      onChange={() => setDraft(d => ({ ...d, reallocation_mode: 'to_stock' }))}
+                      onChange={() => updateDraft(d => ({ ...d, reallocation_mode: 'to_stock' }))}
                       className="mt-0.5 accent-violet-500"
                     />
                     <span>
@@ -254,7 +514,7 @@ export default function PortfolioManagerPanel() {
                     <input
                       type="radio" name="reallocation_mode" value="to_available"
                       checked={draft.reallocation_mode === 'to_available'}
-                      onChange={() => setDraft(d => ({ ...d, reallocation_mode: 'to_available' }))}
+                      onChange={() => updateDraft(d => ({ ...d, reallocation_mode: 'to_available' }))}
                       className="mt-0.5 accent-violet-500"
                     />
                     <span>
@@ -277,7 +537,7 @@ export default function PortfolioManagerPanel() {
                 <input
                   type="range" min={1} max={100} step={1}
                   value={draft.transfer_pct}
-                  onChange={e => setDraft(d => ({ ...d, transfer_pct: Number(e.target.value) }))}
+                    onChange={e => updateDraft(d => ({ ...d, transfer_pct: Number(e.target.value) }))}
                   className="flex-1 accent-violet-500"
                 />
                 <span className="w-10 text-right text-sm font-bold text-slate-200">{draft.transfer_pct}%</span>
@@ -294,7 +554,7 @@ export default function PortfolioManagerPanel() {
                 <input
                   type="number" min={30} step={30}
                   value={draft.transfer_interval_s}
-                  onChange={e => setDraft(d => ({ ...d, transfer_interval_s: e.target.value }))}
+                    onChange={e => updateDraft(d => ({ ...d, transfer_interval_s: e.target.value }))}
                   className="input w-28 text-sm py-1.5"
                 />
                 <span className="text-xs text-slate-500">
@@ -317,7 +577,7 @@ export default function PortfolioManagerPanel() {
                 <input
                   type="number" min={30} step={30}
                   value={draft.indicator_interval_s}
-                  onChange={e => setDraft(d => ({ ...d, indicator_interval_s: e.target.value }))}
+                    onChange={e => updateDraft(d => ({ ...d, indicator_interval_s: e.target.value }))}
                   className="input w-28 text-sm py-1.5"
                 />
                 <span className="text-xs text-slate-500">
@@ -333,6 +593,40 @@ export default function PortfolioManagerPanel() {
 
             {draft.reallocation_enabled && (
             <SettingRow
+              label="Minimum Funds Mode"
+              hint="Choose whether minimum position funds use a fixed dollar amount or a percentage of total funds."
+            >
+              <div className="space-y-2">
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="radio" name="min_position_funds_mode" value="dollar"
+                    checked={draft.min_position_funds_mode === 'dollar'}
+                    onChange={() => updateDraft(d => ({ ...d, min_position_funds_mode: 'dollar' }))}
+                    className="mt-0.5 accent-violet-500"
+                  />
+                  <span>
+                    <span className="text-xs font-medium text-slate-200">Dollar Amount</span>
+                    <span className="text-xs text-slate-500 ml-1">&mdash; Keep at least a fixed amount in each position</span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="radio" name="min_position_funds_mode" value="percent"
+                    checked={draft.min_position_funds_mode === 'percent'}
+                    onChange={() => updateDraft(d => ({ ...d, min_position_funds_mode: 'percent' }))}
+                    className="mt-0.5 accent-violet-500"
+                  />
+                  <span>
+                    <span className="text-xs font-medium text-slate-200">Percent of Total Funds</span>
+                    <span className="text-xs text-slate-500 ml-1">&mdash; Keep a proportional floor in each position</span>
+                  </span>
+                </label>
+              </div>
+            </SettingRow>
+            )}
+
+            {draft.reallocation_enabled && draft.min_position_funds_mode === 'dollar' && (
+            <SettingRow
               label="Minimum Funds per Position ($)"
               hint="Each position always keeps at least this much cash allocated, even when bearish."
             >
@@ -341,9 +635,26 @@ export default function PortfolioManagerPanel() {
                 <input
                   type="number" min={0} step={50}
                   value={draft.min_position_funds}
-                  onChange={e => setDraft(d => ({ ...d, min_position_funds: e.target.value }))}
+                    onChange={e => updateDraft(d => ({ ...d, min_position_funds: e.target.value }))}
                   className="input w-28 text-sm py-1.5"
                 />
+              </div>
+            </SettingRow>
+            )}
+
+            {draft.reallocation_enabled && draft.min_position_funds_mode === 'percent' && (
+            <SettingRow
+              label="Minimum Funds per Position (% of total funds)"
+              hint="Each position keeps at least this percentage of total account funds before cash is reallocated."
+            >
+              <div className="flex items-center gap-1">
+                <input
+                  type="number" min={0} max={100} step={0.1}
+                  value={draft.min_position_funds_pct}
+                    onChange={e => updateDraft(d => ({ ...d, min_position_funds_pct: e.target.value }))}
+                  className="input w-28 text-sm py-1.5"
+                />
+                <span className="text-slate-400 text-sm">%</span>
               </div>
             </SettingRow>
             )}
@@ -355,11 +666,32 @@ export default function PortfolioManagerPanel() {
               <label className="flex items-center gap-2 cursor-pointer">
                 <div
                   className={`relative w-9 h-5 rounded-full transition-colors ${draft.deploy_available_funds ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => setDraft(d => ({ ...d, deploy_available_funds: !d.deploy_available_funds }))}
+                  onClick={() => {
+                    if (!editSettings) return
+                      updateDraft(d => ({ ...d, deploy_available_funds: !d.deploy_available_funds }))
+                  }}
                 >
                   <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.deploy_available_funds ? 'translate-x-4' : ''}`} />
                 </div>
                 <span className="text-xs text-slate-300">{draft.deploy_available_funds ? 'Enabled' : 'Disabled'}</span>
+              </label>
+            </SettingRow>
+
+            <SettingRow
+              label="Allow Buy Outside Allocation"
+              hint="Permit sandbox buy orders even if allocated position funds are insufficient."
+            >
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.allow_buy_outside_allocation ? 'bg-violet-600' : 'bg-dark-600'}`}
+                  onClick={() => {
+                    if (!editSettings) return
+                      updateDraft(d => ({ ...d, allow_buy_outside_allocation: !d.allow_buy_outside_allocation }))
+                  }}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.allow_buy_outside_allocation ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs text-slate-300">{draft.allow_buy_outside_allocation ? 'Enabled' : 'Disabled'}</span>
               </label>
             </SettingRow>
 
@@ -382,7 +714,7 @@ export default function PortfolioManagerPanel() {
                         name="deploy_target"
                         value={opt.value}
                         checked={draft.deploy_target === opt.value}
-                        onChange={() => setDraft(d => ({ ...d, deploy_target: opt.value }))}
+                        onChange={() => updateDraft(d => ({ ...d, deploy_target: opt.value }))}
                         className="mt-0.5 accent-violet-500"
                       />
                       <span>
@@ -396,7 +728,7 @@ export default function PortfolioManagerPanel() {
                       type="text"
                       placeholder="Symbol e.g. AAPL"
                       value={draft.deploy_target_symbol}
-                      onChange={e => setDraft(d => ({ ...d, deploy_target_symbol: e.target.value.toUpperCase() }))}
+                        onChange={e => updateDraft(d => ({ ...d, deploy_target_symbol: e.target.value.toUpperCase() }))}
                       className="input w-36 text-sm py-1.5 mt-1 font-mono uppercase"
                     />
                   )}
@@ -404,22 +736,77 @@ export default function PortfolioManagerPanel() {
               </SettingRow>
             )}
 
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                onClick={() => { setEditSettings(false); setDraft(null) }}
-                className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-4 py-2 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={updateMut.isPending}
-                className="text-xs bg-violet-700 hover:bg-violet-600 text-white font-semibold rounded-lg px-4 py-2 transition-colors disabled:opacity-50"
-              >
-                {updateMut.isPending ? 'Saving…' : 'Save Settings'}
-              </button>
-            </div>
-          </div>
+            <SettingRow
+              label="Sentiment Strategy Switching"
+              hint="When enabled, the portfolio manager automatically updates the strategy for each symbol based on its assigned sentiment mode."
+            >
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.sentiment_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                  onClick={() => {
+                    if (!editSettings) return
+                    updateDraft(d => ({ ...d, sentiment_strategy_enabled: !d.sentiment_strategy_enabled }))
+                  }}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.sentiment_strategy_enabled ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs text-slate-300">{draft.sentiment_strategy_enabled ? 'Enabled' : 'Disabled'}</span>
+              </label>
+            </SettingRow>
+
+            <SettingRow
+              label="Market Sentiment Strategy"
+              hint="Choose the default strategy to use under each overall market sentiment."
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {SENTIMENT_BUCKETS.map(sentiment => (
+                  <div key={`market-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
+                    <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
+                    <select
+                      className="input text-xs py-1.5"
+                      value={draft.market_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]}
+                      onChange={e => updateDraft(d => ({
+                        ...d,
+                        market_sentiment_strategies: {
+                          ...d.market_sentiment_strategies,
+                          [sentiment]: e.target.value,
+                        },
+                      }))}
+                    >
+                      {strategyOptions.map(s => <option key={`market-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </SettingRow>
+
+            <SettingRow
+              label="Symbol Sentiment Strategy"
+              hint="Choose the default strategy to use under each individual symbol sentiment."
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {SENTIMENT_BUCKETS.map(sentiment => (
+                  <div key={`symbol-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
+                    <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
+                    <select
+                      className="input text-xs py-1.5"
+                      value={draft.symbol_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]}
+                      onChange={e => updateDraft(d => ({
+                        ...d,
+                        symbol_sentiment_strategies: {
+                          ...d.symbol_sentiment_strategies,
+                          [sentiment]: e.target.value,
+                        },
+                      }))}
+                    >
+                      {strategyOptions.map(s => <option key={`symbol-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            </SettingRow>
+
+          </fieldset>
         </div>
       )}
     </div>

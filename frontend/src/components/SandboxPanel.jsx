@@ -10,6 +10,7 @@ import {
   getSandboxTrades, placeSandboxTrade,
   exportSandbox, importSandbox, resetSandbox, resetSandboxSoft,
   getBulkQuotes, getIBStatus, connectIB, disconnectIB, setIBMode,
+  getSymbolSectors,
   resetIBPaperPortfolio,
   getIBPositions, getIBOrders,
   getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
@@ -28,6 +29,7 @@ import PositionDetail from './sandbox/PositionDetail'
 import TradeNotificationBanner from './sandbox/TradeNotificationBanner'
 import ActivityLog from './sandbox/ActivityLog'
 import StrategySelector from './sandbox/StrategySelector'
+import PortfolioManagerPanel from './sandbox/PortfolioManagerPanel'
 
 const WATCHLIST_STORAGE_KEY = 'dashboard_watchlist'
 const WATCHLIST_DEFAULT = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
@@ -89,6 +91,7 @@ export default function SandboxPanel() {
   const [bulkScriptId, setBulkScriptId] = useState(null)
   const [bulkTemplateFilename, setBulkTemplateFilename] = useState(null)
   const [bulkStratParams, setBulkStratParams] = useState({})
+  const [activeMainTab, setActiveMainTab] = useState('summary')
 
   // IB status
   const { data: ibStatus } = useQuery({ queryKey: ['ib-status'], queryFn: getIBStatus, refetchInterval: appSettings.trading_status_ms })
@@ -167,6 +170,13 @@ export default function SandboxPanel() {
     refetchInterval: appSettings.sandbox_quotes_ms,
   })
   const quotes = quotesData ?? {}
+  const { data: sectorsData } = useQuery({
+    queryKey: ['sandbox-sectors', symbols.join(',')],
+    queryFn: () => symbols.length ? getSymbolSectors(symbols) : Promise.resolve({}),
+    enabled: symbols.length > 0,
+    staleTime: 3_600_000,
+  })
+  const sectors = sectorsData ?? {}
   const { data: tradesData } = useQuery({
     queryKey: ['sandbox-trades', selectedSymbol],
     queryFn: () => getSandboxTrades(selectedSymbol),
@@ -569,6 +579,7 @@ export default function SandboxPanel() {
         totalRealizedPnl={totalRealizedPnl}
         positions={positions}
         quotes={quotes}
+        sectors={sectors}
         selectedSymbol={selectedSymbol}
         onSelectSymbol={handleSelectSymbol}
         onShowOverview={() => handleSelectSymbol(null)}
@@ -577,217 +588,243 @@ export default function SandboxPanel() {
 
       {/* Right panel */}
       <main className="flex-1 overflow-y-auto bg-dark-900 min-h-0">
-
-        {/* Toolbar */}
-        <div className="flex items-center justify-between px-6 py-3 border-b border-dark-700 bg-dark-800/60">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-500 font-medium uppercase tracking-wider">
-              {ibMode === 'live' ? 'Live Mode — IB Connected' : ibMode === 'paper' ? 'Paper Mode — IB Connected' : 'Portfolio Simulation'}
-            </span>
-            {ibMode && (
-              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold ${
-                ibMode === 'live'
-                  ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/40'
-                  : 'bg-blue-900/40 text-blue-400 border border-blue-700/40'
-              }`}>
-                <SignalIcon className="h-3 w-3" />{ibMode === 'live' ? 'LIVE IB' : 'PAPER IB'}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1.5 mr-1">
-              <div className="inline-flex items-center rounded-md border border-dark-500 overflow-hidden">
+        <div className="sticky top-0 z-30 border-b border-dark-700 bg-dark-900/85 backdrop-blur-xl backdrop-saturate-150 shadow-[0_8px_24px_rgba(0,0,0,0.22)] supports-[backdrop-filter]:bg-dark-900/70">
+          {/* Toolbar */}
+          <div className="flex items-center justify-between px-6 py-2.5 border-b border-dark-700/80 bg-dark-800/50">
+            <div className="flex items-center gap-3 min-w-0 flex-wrap">
+              <div className="inline-flex items-center rounded-lg border border-dark-600 overflow-hidden shrink-0">
                 <button
-                  className={`text-[10px] px-2 py-1 font-semibold transition-colors ${
-                    ibSelectedMode === 'paper'
-                      ? 'bg-blue-900/35 text-blue-300'
+                  className={`px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    activeMainTab === 'summary'
+                      ? 'bg-emerald-900/30 text-emerald-300'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
                   }`}
-                  onClick={() => setIbModeMut.mutate('paper')}
-                  disabled={setIbModeMut.isPending || ibSelectedMode === 'paper'}
-                  title="Switch IB mode to paper"
+                  onClick={() => setActiveMainTab('summary')}
                 >
-                  Paper
+                  Portfolio Summary
                 </button>
                 <button
-                  className={`text-[10px] px-2 py-1 font-semibold transition-colors border-l border-dark-500 ${
-                    ibSelectedMode === 'live'
-                      ? 'bg-emerald-900/35 text-emerald-300'
+                  className={`px-3 py-1.5 text-xs font-semibold border-l border-dark-600 transition-colors ${
+                    activeMainTab === 'manager'
+                      ? 'bg-violet-900/30 text-violet-300'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
                   }`}
-                  onClick={() => setIbModeMut.mutate('live')}
-                  disabled={setIbModeMut.isPending || ibSelectedMode === 'live'}
-                  title="Switch IB mode to live"
+                  onClick={() => setActiveMainTab('manager')}
                 >
-                  Live
+                  Portfolio Manager
                 </button>
               </div>
-              <button
-                className={`text-[10px] border rounded-md px-2.5 py-1 font-semibold transition-colors disabled:opacity-50 ${
-                  ibConnected
-                    ? 'border-red-700/50 text-red-300 hover:bg-red-900/20'
-                    : 'border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/20'
-                }`}
-                onClick={() => (ibConnected ? ibDisconnectMut.mutate() : ibConnectMut.mutate())}
-                disabled={ibConnectMut.isPending || ibDisconnectMut.isPending || setIbModeMut.isPending}
-                title={ibConnected ? 'Disconnect Interactive Brokers' : `Connect Interactive Brokers (${ibSelectedMode})`}
-              >
-                {ibConnectMut.isPending || ibDisconnectMut.isPending
-                  ? '…'
-                  : ibConnected
-                    ? 'Disconnect'
-                    : 'Connect'}
-              </button>
-            </div>
-            {(() => {
-              const withStrat = positions.filter(p => p.strategy_name)
-              const allRunning = withStrat.length > 0 && withStrat.every(p => p.strategy_enabled)
-              return withStrat.length > 0 ? (
-                <button
-                  className={`flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 ${
-                    allRunning
-                      ? 'border-emerald-700/50 text-emerald-400 hover:bg-emerald-900/20'
-                      : 'border-slate-600 text-slate-300 hover:bg-dark-700'
-                  }`}
-                  onClick={() => toggleAllEnginesMut.mutate()}
-                  disabled={toggleAllEnginesMut.isPending}
-                  title={allRunning ? 'Stop all strategy engines' : 'Start all strategy engines'}
-                >
-                  <SignalIcon className="h-3.5 w-3.5" />
-                  {toggleAllEnginesMut.isPending ? '…' : allRunning ? 'Stop All Engines' : 'Start All Engines'}
-                </button>
-              ) : null
-            })()}
-            {positions.length > 0 && (
-              <button
-                className="flex items-center gap-1.5 text-xs border border-sky-700/50 text-sky-400 hover:bg-sky-900/20 rounded-lg px-3 py-1.5 transition-colors"
-                onClick={handleBulkStratOpen}
-                title="Apply one strategy to all sandbox positions"
-              >
-                <RectangleGroupIcon className="h-3.5 w-3.5" />
-                Set Strategy for All
-              </button>
-            )}
-            {/* Portfolio Manager toggle */}
-            {(() => {
-              const pmEnabled = managerState?.settings?.enabled ?? false
-              return (
-                <button
-                  className={`flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 ${
-                    pmEnabled
-                      ? 'border-violet-700/50 text-violet-400 hover:bg-violet-900/20'
-                      : 'border-slate-600 text-slate-300 hover:bg-dark-700'
-                  }`}
-                  onClick={() => toggleManagerMut.mutate()}
-                  disabled={toggleManagerMut.isPending}
-                  title={pmEnabled ? 'Disable portfolio manager' : 'Enable portfolio manager'}
-                >
-                  <CpuChipIcon className="h-3.5 w-3.5" />
-                  {toggleManagerMut.isPending ? '…' : pmEnabled ? 'Manager On' : 'Manager Off'}
-                </button>
-              )
-            })()}
-            <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50"
-              onClick={handleExport} disabled={exportLoading} title="Export sandbox as JSON">
-              <ArrowDownTrayIcon className="h-3.5 w-3.5" />{exportLoading ? 'Exporting…' : 'Export'}
-            </button>
-            <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
-              onClick={() => importInputRef.current?.click()} title="Import sandbox from JSON">
-              <ArrowUpTrayIcon className="h-3.5 w-3.5" />Import
-            </button>
-            <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImport} />
-            {ibMode === 'live' ? null : ibMode === 'paper' ? (
-              paperResetConfirm ? (
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-amber-400">Reset paper portfolio on IB?</span>
-                  <button
-                    className="text-xs bg-amber-700 hover:bg-amber-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
-                    onClick={() => paperResetMut.mutate()}
-                    disabled={paperResetMut.isPending}
-                  >
-                    {paperResetMut.isPending ? 'Resetting…' : 'Yes, Reset Paper'}
-                  </button>
-                  <button
-                    className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-2.5 py-1.5 transition-colors"
-                    onClick={() => setPaperResetConfirm(false)}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
-                <button
-                  className="flex items-center gap-1.5 text-xs border border-amber-900/40 text-amber-400/80 hover:text-amber-300 rounded-lg px-3 py-1.5 transition-colors hover:bg-amber-900/10 disabled:opacity-50"
-                  onClick={() => setPaperResetConfirm(true)}
-                  disabled={paperResetMut.isPending}
-                  title="Cancel open orders and flatten all paper positions"
-                >
-                  <ArrowPathIcon className="h-3.5 w-3.5" />Reset Paper Portfolio
-                </button>
-              )
-            ) : resetConfirm ? (
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-red-400">Full reset — are you sure?</span>
-                <button className="text-xs bg-red-700 hover:bg-red-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
-                  onClick={() => resetMut.mutate()} disabled={resetMut.isPending}>
-                  {resetMut.isPending ? 'Resetting…' : 'Yes, Reset All'}
-                </button>
-                <button className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-2.5 py-1.5 transition-colors"
-                  onClick={() => setResetConfirm(false)}>Cancel</button>
-              </div>
-            ) : resetSoftConfirm ? (
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-amber-400">Keep symbols, reset data?</span>
-                <button className="text-xs bg-amber-700 hover:bg-amber-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
-                  onClick={() => resetSoftMut.mutate()} disabled={resetSoftMut.isPending}>
-                  {resetSoftMut.isPending ? 'Resetting…' : 'Yes, Soft Reset'}
-                </button>
-                <button className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-2.5 py-1.5 transition-colors"
-                  onClick={() => setResetSoftConfirm(false)}>Cancel</button>
-              </div>
-            ) : (
-              <div className="relative">
-                {showResetMenu && (
-                  <div className="fixed inset-0 z-40" onClick={() => setShowResetMenu(false)} />
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-xs text-slate-500 font-medium uppercase tracking-wider">
+                  {ibMode === 'live' ? 'Live Mode — IB Connected' : ibMode === 'paper' ? 'Paper Mode — IB Connected' : 'Portfolio Simulation'}
+                </span>
+                {ibMode && (
+                  <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold ${
+                    ibMode === 'live'
+                      ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/40'
+                      : 'bg-blue-900/40 text-blue-400 border border-blue-700/40'
+                  }`}>
+                    <SignalIcon className="h-3 w-3" />{ibMode === 'live' ? 'LIVE IB' : 'PAPER IB'}
+                  </span>
                 )}
-                <div className="flex items-center border border-red-900/40 rounded-lg overflow-visible">
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5 mr-1">
+                <div className="inline-flex items-center rounded-md border border-dark-500 overflow-hidden">
                   <button
-                    className="flex items-center gap-1.5 text-xs text-red-400/70 hover:text-red-400 px-3 py-1.5 transition-colors hover:bg-red-900/10"
-                    onClick={() => setShowResetMenu(v => !v)}
-                    title="Reset portfolio options">
-                    <ArrowPathIcon className="h-3.5 w-3.5" />Reset Portfolio
+                    className={`text-[10px] px-2 py-1 font-semibold transition-colors ${
+                      ibSelectedMode === 'paper'
+                        ? 'bg-blue-900/35 text-blue-300'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
+                    }`}
+                    onClick={() => setIbModeMut.mutate('paper')}
+                    disabled={setIbModeMut.isPending || ibSelectedMode === 'paper'}
+                    title="Switch IB mode to paper"
+                  >
+                    Paper
                   </button>
                   <button
-                    className="text-xs text-red-400/50 hover:text-red-400 px-1.5 py-1.5 border-l border-red-900/40 transition-colors hover:bg-red-900/10"
-                    onClick={() => setShowResetMenu(v => !v)}
-                    title="More reset options"
-                  >▾</button>
+                    className={`text-[10px] px-2 py-1 font-semibold transition-colors border-l border-dark-500 ${
+                      ibSelectedMode === 'live'
+                        ? 'bg-emerald-900/35 text-emerald-300'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
+                    }`}
+                    onClick={() => setIbModeMut.mutate('live')}
+                    disabled={setIbModeMut.isPending || ibSelectedMode === 'live'}
+                    title="Switch IB mode to live"
+                  >
+                    Live
+                  </button>
                 </div>
-                {showResetMenu && (
-                  <div className="absolute right-0 top-full mt-1 z-50 w-52 bg-dark-800 border border-dark-500 rounded-lg shadow-xl overflow-hidden">
+                <button
+                  className={`text-[10px] border rounded-md px-2.5 py-1 font-semibold transition-colors disabled:opacity-50 ${
+                    ibConnected
+                      ? 'border-red-700/50 text-red-300 hover:bg-red-900/20'
+                      : 'border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/20'
+                  }`}
+                  onClick={() => (ibConnected ? ibDisconnectMut.mutate() : ibConnectMut.mutate())}
+                  disabled={ibConnectMut.isPending || ibDisconnectMut.isPending || setIbModeMut.isPending}
+                  title={ibConnected ? 'Disconnect Interactive Brokers' : `Connect Interactive Brokers (${ibSelectedMode})`}
+                >
+                  {ibConnectMut.isPending || ibDisconnectMut.isPending
+                    ? '…'
+                    : ibConnected
+                      ? 'Disconnect'
+                      : 'Connect'}
+                </button>
+              </div>
+              {(() => {
+                const withStrat = positions.filter(p => p.strategy_name)
+                const allRunning = withStrat.length > 0 && withStrat.every(p => p.strategy_enabled)
+                return withStrat.length > 0 ? (
+                  <button
+                    className={`flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 ${
+                      allRunning
+                        ? 'border-emerald-700/50 text-emerald-400 hover:bg-emerald-900/20'
+                        : 'border-slate-600 text-slate-300 hover:bg-dark-700'
+                    }`}
+                    onClick={() => toggleAllEnginesMut.mutate()}
+                    disabled={toggleAllEnginesMut.isPending}
+                    title={allRunning ? 'Stop all strategy engines' : 'Start all strategy engines'}
+                  >
+                    <SignalIcon className="h-3.5 w-3.5" />
+                    {toggleAllEnginesMut.isPending ? '…' : allRunning ? 'Stop All Engines' : 'Start All Engines'}
+                  </button>
+                ) : null
+              })()}
+              {positions.length > 0 && (
+                <button
+                  className="flex items-center gap-1.5 text-xs border border-sky-700/50 text-sky-400 hover:bg-sky-900/20 rounded-lg px-3 py-1.5 transition-colors"
+                  onClick={handleBulkStratOpen}
+                  title="Apply one strategy to all sandbox positions"
+                >
+                  <RectangleGroupIcon className="h-3.5 w-3.5" />
+                  Set Strategy for All
+                </button>
+              )}
+              {/* Portfolio Manager toggle */}
+              {(() => {
+                const pmEnabled = managerState?.settings?.enabled ?? false
+                return (
+                  <button
+                    className={`flex items-center gap-1.5 text-xs border rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 ${
+                      pmEnabled
+                        ? 'border-violet-700/50 text-violet-400 hover:bg-violet-900/20'
+                        : 'border-slate-600 text-slate-300 hover:bg-dark-700'
+                    }`}
+                    onClick={() => toggleManagerMut.mutate()}
+                    disabled={toggleManagerMut.isPending}
+                    title={pmEnabled ? 'Disable portfolio manager' : 'Enable portfolio manager'}
+                  >
+                    <CpuChipIcon className="h-3.5 w-3.5" />
+                    {toggleManagerMut.isPending ? '…' : pmEnabled ? 'Manager On' : 'Manager Off'}
+                  </button>
+                )
+              })()}
+              <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50"
+                onClick={handleExport} disabled={exportLoading} title="Export sandbox as JSON">
+                <ArrowDownTrayIcon className="h-3.5 w-3.5" />{exportLoading ? 'Exporting…' : 'Export'}
+              </button>
+              <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
+                onClick={() => importInputRef.current?.click()} title="Import sandbox from JSON">
+                <ArrowUpTrayIcon className="h-3.5 w-3.5" />Import
+              </button>
+              <input ref={importInputRef} type="file" accept=".json" className="hidden" onChange={handleImport} />
+              {ibMode === 'live' ? null : ibMode === 'paper' ? (
+                paperResetConfirm ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-amber-400">Reset paper portfolio on IB?</span>
                     <button
-                      className="w-full text-left flex items-start gap-2 px-3 py-2.5 text-xs hover:bg-dark-700 transition-colors"
-                      onClick={() => { setShowResetMenu(false); setResetSoftConfirm(true) }}
+                      className="text-xs bg-amber-700 hover:bg-amber-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
+                      onClick={() => paperResetMut.mutate()}
+                      disabled={paperResetMut.isPending}
                     >
-                      <div>
-                        <div className="text-amber-400 font-semibold mb-0.5">Soft Reset</div>
-                        <div className="text-slate-500">Keep symbols &amp; allocations, clear shares, trades, and PnL</div>
-                      </div>
+                      {paperResetMut.isPending ? 'Resetting…' : 'Yes, Reset Paper'}
                     </button>
-                    <div className="border-t border-dark-600" />
                     <button
-                      className="w-full text-left flex items-start gap-2 px-3 py-2.5 text-xs hover:bg-dark-700 transition-colors"
-                      onClick={() => { setShowResetMenu(false); setResetConfirm(true) }}
+                      className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-2.5 py-1.5 transition-colors"
+                      onClick={() => setPaperResetConfirm(false)}
                     >
-                      <div>
-                        <div className="text-red-400 font-semibold mb-0.5">Full Reset</div>
-                        <div className="text-slate-500">Wipe everything — symbols, trades, funds</div>
-                      </div>
+                      Cancel
                     </button>
                   </div>
-                )}
-              </div>
-            )}
+                ) : (
+                  <button
+                    className="flex items-center gap-1.5 text-xs border border-amber-900/40 text-amber-400/80 hover:text-amber-300 rounded-lg px-3 py-1.5 transition-colors hover:bg-amber-900/10 disabled:opacity-50"
+                    onClick={() => setPaperResetConfirm(true)}
+                    disabled={paperResetMut.isPending}
+                    title="Cancel open orders and flatten all paper positions"
+                  >
+                    <ArrowPathIcon className="h-3.5 w-3.5" />Reset Paper Portfolio
+                  </button>
+                )
+              ) : resetConfirm ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-red-400">Full reset — are you sure?</span>
+                  <button className="text-xs bg-red-700 hover:bg-red-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
+                    onClick={() => resetMut.mutate()} disabled={resetMut.isPending}>
+                    {resetMut.isPending ? 'Resetting…' : 'Yes, Reset All'}
+                  </button>
+                  <button className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-2.5 py-1.5 transition-colors"
+                    onClick={() => setResetConfirm(false)}>Cancel</button>
+                </div>
+              ) : resetSoftConfirm ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-amber-400">Keep symbols, reset data?</span>
+                  <button className="text-xs bg-amber-700 hover:bg-amber-600 text-white rounded-lg px-2.5 py-1.5 font-semibold transition-colors disabled:opacity-50"
+                    onClick={() => resetSoftMut.mutate()} disabled={resetSoftMut.isPending}>
+                    {resetSoftMut.isPending ? 'Resetting…' : 'Yes, Soft Reset'}
+                  </button>
+                  <button className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 rounded-lg px-2.5 py-1.5 transition-colors"
+                    onClick={() => setResetSoftConfirm(false)}>Cancel</button>
+                </div>
+              ) : (
+                <div className="relative">
+                  {showResetMenu && (
+                    <div className="fixed inset-0 z-40" onClick={() => setShowResetMenu(false)} />
+                  )}
+                  <div className="flex items-center border border-red-900/40 rounded-lg overflow-visible">
+                    <button
+                      className="flex items-center gap-1.5 text-xs text-red-400/70 hover:text-red-400 px-3 py-1.5 transition-colors hover:bg-red-900/10"
+                      onClick={() => setShowResetMenu(v => !v)}
+                      title="Reset portfolio options">
+                      <ArrowPathIcon className="h-3.5 w-3.5" />Reset Portfolio
+                    </button>
+                    <button
+                      className="text-xs text-red-400/50 hover:text-red-400 px-1.5 py-1.5 border-l border-red-900/40 transition-colors hover:bg-red-900/10"
+                      onClick={() => setShowResetMenu(v => !v)}
+                      title="More reset options"
+                    >▾</button>
+                  </div>
+                  {showResetMenu && (
+                    <div className="absolute right-0 top-full mt-1 z-50 w-52 bg-dark-800 border border-dark-500 rounded-lg shadow-xl overflow-hidden">
+                      <button
+                        className="w-full text-left flex items-start gap-2 px-3 py-2.5 text-xs hover:bg-dark-700 transition-colors"
+                        onClick={() => { setShowResetMenu(false); setResetSoftConfirm(true) }}
+                      >
+                        <div>
+                          <div className="text-amber-400 font-semibold mb-0.5">Soft Reset</div>
+                          <div className="text-slate-500">Keep symbols &amp; allocations, clear shares, trades, and PnL</div>
+                        </div>
+                      </button>
+                      <div className="border-t border-dark-600" />
+                      <button
+                        className="w-full text-left flex items-start gap-2 px-3 py-2.5 text-xs hover:bg-dark-700 transition-colors"
+                        onClick={() => { setShowResetMenu(false); setResetConfirm(true) }}
+                      >
+                        <div>
+                          <div className="text-red-400 font-semibold mb-0.5">Full Reset</div>
+                          <div className="text-slate-500">Wipe everything — symbols, trades, funds</div>
+                        </div>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
+
         </div>
 
         {importMsg && (
@@ -798,7 +835,39 @@ export default function SandboxPanel() {
         )}
 
         <div className="p-6 space-y-6">
-          {!selectedSymbol ? (
+          {activeMainTab === 'summary' && (
+            <div className="card border border-violet-800/30 bg-violet-950/10">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-violet-300">Portfolio Manager Summary</h3>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Automatically rebalances idle capital, refreshes sentiment scores, and can deploy available cash based on your manager rules.
+                  </p>
+                  <div className="flex flex-wrap gap-2 mt-3 text-[11px] text-slate-300">
+                    <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
+                      Status: {(managerState?.settings?.enabled ?? false) ? 'Enabled' : 'Disabled'}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
+                      Reallocation: {(managerState?.settings?.reallocation_enabled ?? true) ? 'On' : 'Off'}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
+                      Interval: {managerState?.settings?.transfer_interval_s ?? 300}s
+                    </span>
+                  </div>
+                </div>
+                <button
+                  className="text-xs border border-violet-700/50 text-violet-300 hover:bg-violet-900/20 rounded-lg px-3 py-1.5 transition-colors"
+                  onClick={() => setActiveMainTab('manager')}
+                >
+                  Open Manager
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeMainTab === 'manager' ? (
+            <PortfolioManagerPanel profile={activeProfile} />
+          ) : !selectedSymbol ? (
             <PortfolioOverview
               ibMode={ibMode}
               accountData={accountData}

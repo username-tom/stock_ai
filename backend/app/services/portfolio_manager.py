@@ -38,12 +38,29 @@ _settings: dict[str, Any] = {
     "transfer_interval_s": 300,      # rebalance every 5 minutes
     "indicator_interval_s": 120,     # refresh scores every 2 minutes
     "min_position_funds": 100.0,     # never leave less than $100 in any position
+    "min_position_funds_mode": "dollar",  # dollar | percent (of total funds)
+    "min_position_funds_pct": 1.0,   # used when mode == percent
     "deploy_available_funds": True,   # allocate unassigned account cash each cycle
     "deploy_target": "most_bearish",   # most_bearish | most_bullish | most_held | least_held | specific
     "deploy_target_symbol": "",        # used when deploy_target == 'specific'
     "reallocation_enabled": True,      # enable bearish→bullish (or →available) rebalancing
     "reallocation_mode": "to_stock",   # to_stock | to_available
     "allow_buy_outside_allocation": False, # allow sandbox buy with funds outside allocation
+    "market_sentiment_strategies": {
+        "crash": "rsi",
+        "bearish": "macd",
+        "neutral": "bollinger",
+        "bullish": "sma_crossover",
+        "euphoric": "rsi",
+    },
+    "symbol_sentiment_strategies": {
+        "crash": "rsi",
+        "bearish": "macd",
+        "neutral": "bollinger",
+        "bullish": "sma_crossover",
+        "euphoric": "rsi",
+    },
+    "sentiment_strategy_enabled": True,   # auto-change strategy based on sentiment
 }
 
 # ── runtime state ─────────────────────────────────────────────────────────── #
@@ -54,6 +71,10 @@ _state: dict[str, Any] = {
     "last_score_at": None,
     "scores": {},          # { symbol: { score, classification, updated_at } }
     "last_activity": [],   # list of recent log entries (max 20)
+    "market_classification": {
+        "score": 0.0, "classification": "neutral", "bucket": "neutral", "updated_at": None,
+    },
+    "sentiment_groups": {"market": [], "symbol": []},  # symbols by sentiment mode
 }
 
 
@@ -66,6 +87,8 @@ def get_manager_state() -> dict:
         **_state,
         "last_transfer_at": _state["last_transfer_at"].isoformat() if _state["last_transfer_at"] else None,
         "last_score_at": _state["last_score_at"].isoformat() if _state["last_score_at"] else None,
+        "market_classification": _state.get("market_classification"),
+        "sentiment_groups": _state.get("sentiment_groups", {"market": [], "symbol": []}),
         "settings": get_manager_settings(),
     }
 
@@ -83,12 +106,15 @@ async def _load_settings_from_db() -> None:
             _settings["transfer_interval_s"] = row.transfer_interval_s
             _settings["indicator_interval_s"] = row.indicator_interval_s
             _settings["min_position_funds"] = row.min_position_funds
+            _settings["min_position_funds_mode"] = getattr(row, "min_position_funds_mode", "dollar") or "dollar"
+            _settings["min_position_funds_pct"] = float(getattr(row, "min_position_funds_pct", 1.0) or 1.0)
             _settings["deploy_available_funds"] = bool(row.deploy_available_funds)
             _settings["deploy_target"] = row.deploy_target
             _settings["deploy_target_symbol"] = row.deploy_target_symbol or ""
             _settings["reallocation_enabled"] = bool(row.reallocation_enabled) if row.reallocation_enabled is not None else True
             _settings["reallocation_mode"] = row.reallocation_mode or "to_stock"
             _settings["allow_buy_outside_allocation"] = bool(getattr(row, "allow_buy_outside_allocation", False))
+            _settings["sentiment_strategy_enabled"] = bool(getattr(row, "sentiment_strategy_enabled", True))
 
 
 async def _save_settings_to_db() -> None:
@@ -107,19 +133,25 @@ async def _save_settings_to_db() -> None:
         row.transfer_interval_s = _settings["transfer_interval_s"]
         row.indicator_interval_s = _settings["indicator_interval_s"]
         row.min_position_funds = _settings["min_position_funds"]
+        row.min_position_funds_mode = _settings.get("min_position_funds_mode", "dollar")
+        row.min_position_funds_pct = float(_settings.get("min_position_funds_pct", 1.0))
         row.deploy_available_funds = _settings["deploy_available_funds"]
         row.deploy_target = _settings["deploy_target"]
         row.deploy_target_symbol = _settings["deploy_target_symbol"]
         row.reallocation_enabled = _settings["reallocation_enabled"]
         row.reallocation_mode = _settings["reallocation_mode"]
         row.allow_buy_outside_allocation = _settings["allow_buy_outside_allocation"]
+        row.sentiment_strategy_enabled = _settings.get("sentiment_strategy_enabled", True)
         await db.commit()
 
 
 def update_manager_settings(new: dict) -> dict:
     allowed = {"transfer_pct", "transfer_interval_s", "indicator_interval_s", "min_position_funds",
+               "min_position_funds_mode", "min_position_funds_pct",
                "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
-               "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation"}
+               "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation",
+               "market_sentiment_strategies", "symbol_sentiment_strategies",
+               "sentiment_strategy_enabled"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -216,6 +248,85 @@ async def _refresh_scores(symbols: list[str]) -> None:
     _state["last_score_at"] = datetime.now(timezone.utc)
 
 
+# ── sentiment strategy helpers ────────────────────────────────────────────── #
+
+def _score_to_bucket(score: float) -> str:
+    """Map a -1..1 composite score to a 5-label sentiment bucket."""
+    if score >= 0.5:
+        return "euphoric"
+    if score >= 0.1:
+        return "bullish"
+    if score > -0.1:
+        return "neutral"
+    if score > -0.5:
+        return "bearish"
+    return "crash"
+
+
+def _compute_market_classification() -> dict:
+    """Derive overall market sentiment by averaging all tracked symbol scores."""
+    scores = _state.get("scores", {})
+    if not scores:
+        return {"score": 0.0, "classification": "neutral", "bucket": "neutral"}
+    avg_score = sum(v["score"] for v in scores.values()) / len(scores)
+    bucket = _score_to_bucket(avg_score)
+    classification = "bullish" if avg_score > 0.1 else ("bearish" if avg_score < -0.1 else "neutral")
+    return {"score": round(avg_score, 3), "classification": classification, "bucket": bucket}
+
+
+async def _apply_sentiment_strategies() -> None:
+    """For positions with sentiment_mode set, update strategy_name based on current sentiment scores."""
+    if not _settings.get("sentiment_strategy_enabled", True):
+        return
+
+    market = _compute_market_classification()
+    _state["market_classification"] = {
+        **market,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    market_bucket = market["bucket"]
+    market_strats = _settings.get("market_sentiment_strategies", {})
+    symbol_strats = _settings.get("symbol_sentiment_strategies", {})
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        res = await db.execute(
+            sa_select(SandboxPosition).where(
+                SandboxPosition.sentiment_mode.isnot(None),
+                SandboxPosition.strategy_enabled == True,  # noqa: E712
+            )
+        )
+        positions: list[SandboxPosition] = res.scalars().all()
+
+        changed = []
+        market_syms = []
+        symbol_syms = []
+        for pos in positions:
+            mode = pos.sentiment_mode
+            if mode == "market":
+                market_syms.append(pos.symbol)
+                target_strategy = market_strats.get(market_bucket)
+            elif mode == "symbol":
+                symbol_syms.append(pos.symbol)
+                sym_score = _state["scores"].get(pos.symbol, {})
+                sym_bucket = _score_to_bucket(float(sym_score.get("score", 0.0)))
+                target_strategy = symbol_strats.get(sym_bucket)
+            else:
+                continue
+
+            if target_strategy and pos.strategy_name != target_strategy:
+                old = pos.strategy_name or "none"
+                pos.strategy_name = target_strategy
+                changed.append(f"{pos.symbol}: {old}→{target_strategy}")
+
+        _state["sentiment_groups"] = {"market": market_syms, "symbol": symbol_syms}
+
+        if changed:
+            await db.commit()
+            _log_activity(f"Sentiment strategy update: {', '.join(changed)}")
+
+
 # ── transfer logic ────────────────────────────────────────────────────────── #
 
 def _log_activity(msg: str) -> None:
@@ -256,10 +367,29 @@ def _pick_deploy_target(
     return None
 
 
+def _min_funds_floor(account_total_funds: float | None) -> float:
+    mode = _settings.get("min_position_funds_mode", "dollar")
+    if mode == "percent":
+        pct = max(0.0, float(_settings.get("min_position_funds_pct", 1.0) or 0.0))
+        base = max(0.0, float(account_total_funds or 0.0))
+        return (base * pct) / 100.0
+    return max(0.0, float(_settings.get("min_position_funds", 0.0) or 0.0))
+
+
+def _position_max_allocation(position: SandboxPosition, account_total_funds: float | None) -> float:
+    cap_val = float(getattr(position, "max_allocation_value", 0.0) or 0.0)
+    if cap_val <= 0:
+        return float("inf")
+    mode = getattr(position, "max_allocation_mode", "dollar") or "dollar"
+    if mode == "percent":
+        base = max(0.0, float(account_total_funds or 0.0))
+        return (base * cap_val) / 100.0
+    return cap_val
+
+
 async def _do_transfer() -> None:
     """Move funds from bearish positions to bullish positions, and optionally
     deploy unallocated account cash to the most bearish position."""
-    min_funds = _settings["min_position_funds"]
     transfer_pct = _settings["transfer_pct"]
 
     async with AsyncSessionLocal() as db:
@@ -269,6 +399,8 @@ async def _do_transfer() -> None:
         positions: list[SandboxPosition] = result.scalars().all()
         acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
         account = acct_res.scalar_one_or_none()
+
+    min_funds = _min_funds_floor(account.total_funds if account else 0.0)
 
     if not positions:
         return
@@ -310,23 +442,31 @@ async def _do_transfer() -> None:
                     acct_res2 = await db.execute(sa_select(_SandboxAccount).limit(1))
                     acct2 = acct_res2.scalar_one_or_none()
                     if pos and acct2:
-                        pos.allocated_funds += deployable
+                        max_cap = _position_max_allocation(pos, acct2.total_funds)
+                        room = max(0.0, max_cap - pos.allocated_funds) if max_cap != float("inf") else deployable
+                        deploy_amount = min(deployable, room)
+                        deploy_amount = math.floor(deploy_amount * 100) / 100
+                        if deploy_amount <= 0:
+                            deploy_amount = 0.0
+                        else:
+                            pos.allocated_funds += deploy_amount
                         # Do NOT touch total_funds — deploying to a position just
                         # moves cash from the unallocated pool to the position.
                         # Capital is preserved; available = total_funds - allocated - equity.
                         from app.models.sandbox import SandboxAllocationEvent
-                        db.add(SandboxAllocationEvent(
-                            event_type="deploy",
-                            from_symbol=None,
-                            to_symbol=target.symbol,
-                            amount=round(deployable, 4),
-                            note=f"PM deploy [{_settings['deploy_target']}]",
-                        ))
-                        await db.commit()
-                        _state["last_transfer_at"] = datetime.now(timezone.utc)
-                        sc = scores.get(target.symbol, {})
-                        score_str = f" (score {sc['score']:+.3f})" if sc.get("score") is not None else ""
-                        _log_activity(f"Deployed ${deployable:.2f} available funds → {target.symbol}{score_str} [{_settings['deploy_target']}]")
+                        if deploy_amount > 0:
+                            db.add(SandboxAllocationEvent(
+                                event_type="deploy",
+                                from_symbol=None,
+                                to_symbol=target.symbol,
+                                amount=round(deploy_amount, 4),
+                                note=f"PM deploy [{_settings['deploy_target']}]",
+                            ))
+                            await db.commit()
+                            _state["last_transfer_at"] = datetime.now(timezone.utc)
+                            sc = scores.get(target.symbol, {})
+                            score_str = f" (score {sc['score']:+.3f})" if sc.get("score") is not None else ""
+                            _log_activity(f"Deployed ${deploy_amount:.2f} available funds → {target.symbol}{score_str} [{_settings['deploy_target']}]")
 
     # ── fund reallocation ─────────────────────────────────────────── #
     if not _settings.get("reallocation_enabled", True):
@@ -391,29 +531,89 @@ async def _do_transfer() -> None:
         if total_to_move <= 0:
             return
 
-        per_bullish = math.floor((total_to_move / len(bullish_pos)) * 100) / 100
-
         async with AsyncSessionLocal() as db:
             from sqlalchemy import select as sa_select
             from app.models.sandbox import SandboxAllocationEvent
 
-            for src_pos, amount in transfers_from:
+            acct_res2 = await db.execute(sa_select(SandboxAccount).limit(1))
+            account2 = acct_res2.scalar_one_or_none()
+
+            dest_rows: list[SandboxPosition] = []
+            rooms: dict[int, float] = {}
+            for dst_pos in bullish_pos:
+                res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == dst_pos.id))
+                pos = res.scalar_one_or_none()
+                if not pos:
+                    continue
+                cap = _position_max_allocation(pos, account2.total_funds if account2 else 0.0)
+                room = max(0.0, cap - pos.allocated_funds) if cap != float("inf") else total_to_move
+                room = math.floor(room * 100) / 100
+                if room > 0:
+                    dest_rows.append(pos)
+                    rooms[pos.id] = room
+
+            if not dest_rows:
+                return
+
+            total_room = sum(rooms.values())
+            actual_to_move = min(total_to_move, total_room)
+            actual_to_move = math.floor(actual_to_move * 100) / 100
+            if actual_to_move <= 0:
+                return
+
+            source_scale = actual_to_move / total_to_move if total_to_move > 0 else 0.0
+            effective_from: list[tuple[SandboxPosition, float]] = []
+            running_from = 0.0
+            for idx, (src_pos, amount) in enumerate(transfers_from):
+                src_amt = math.floor((amount * source_scale) * 100) / 100
+                if idx == len(transfers_from) - 1:
+                    src_amt = round(max(0.0, actual_to_move - running_from), 2)
+                running_from += src_amt
+                if src_amt > 0:
+                    effective_from.append((src_pos, src_amt))
+
+            to_amounts: dict[int, float] = {}
+            running_to = 0.0
+            for idx, dst in enumerate(dest_rows):
+                room = rooms[dst.id]
+                alloc = math.floor((actual_to_move * (room / total_room)) * 100) / 100 if total_room > 0 else 0.0
+                alloc = min(alloc, room)
+                if idx == len(dest_rows) - 1:
+                    alloc = round(min(room, max(0.0, actual_to_move - running_to)), 2)
+                to_amounts[dst.id] = alloc
+                running_to += alloc
+
+            remainder = round(actual_to_move - running_to, 2)
+            if remainder > 0:
+                for dst in dest_rows:
+                    room_left = round(rooms[dst.id] - to_amounts[dst.id], 2)
+                    if room_left <= 0:
+                        continue
+                    add = min(room_left, remainder)
+                    to_amounts[dst.id] = round(to_amounts[dst.id] + add, 2)
+                    remainder = round(remainder - add, 2)
+                    if remainder <= 0:
+                        break
+
+            for src_pos, amount in effective_from:
                 res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == src_pos.id))
                 pos = res.scalar_one_or_none()
                 if pos:
                     pos.allocated_funds = max(0.0, pos.allocated_funds - amount)
 
-            for dst_pos in bullish_pos:
-                res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.id == dst_pos.id))
-                pos = res.scalar_one_or_none()
-                if pos:
-                    pos.allocated_funds += per_bullish
+            id_to_dest = {d.id: d for d in dest_rows}
+            for dst_id, amount in to_amounts.items():
+                if amount <= 0:
+                    continue
+                id_to_dest[dst_id].allocated_funds += amount
 
             # Log a single reallocate event per (source → destination) pair
-            for src_pos, amount in transfers_from:
-                for dst_pos in bullish_pos:
-                    share = math.floor((amount / len(bullish_pos)) * 100) / 100
+            total_to_amounts = sum(to_amounts.values())
+            for src_pos, amount in effective_from:
+                for dst_id, dst_amount in to_amounts.items():
+                    share = math.floor((amount * (dst_amount / total_to_amounts)) * 100) / 100 if total_to_amounts > 0 else 0
                     if share > 0:
+                        dst_pos = id_to_dest[dst_id]
                         db.add(SandboxAllocationEvent(
                             event_type="reallocate",
                             from_symbol=src_pos.symbol,
@@ -426,9 +626,13 @@ async def _do_transfer() -> None:
 
         _state["last_transfer_at"] = datetime.now(timezone.utc)
 
-        from_desc = ", ".join(f"{p.symbol} (−${a:.2f})" for p, a in transfers_from)
-        to_desc = ", ".join(f"{p.symbol} (+${per_bullish:.2f})" for p in bullish_pos)
-        _log_activity(f"Transferred ${total_to_move:.2f} | from: {from_desc} | to: {to_desc}")
+        from_desc = ", ".join(f"{p.symbol} (−${a:.2f})" for p, a in effective_from)
+        to_desc = ", ".join(
+            f"{p.symbol} (+${to_amounts.get(p.id, 0):.2f})"
+            for p in bullish_pos
+            if to_amounts.get(p.id, 0) > 0
+        )
+        _log_activity(f"Transferred ${actual_to_move:.2f} | from: {from_desc} | to: {to_desc}")
 
 
 # ── main loop ─────────────────────────────────────────────────────────────── #
@@ -463,6 +667,7 @@ async def run_portfolio_manager() -> None:
                     syms = [p.symbol for p in res.scalars().all()]
                 if syms:
                     await _refresh_scores(syms)
+                    await _apply_sentiment_strategies()
             except Exception as exc:
                 logger.warning("PM score refresh error: %s", exc)
             last_score = now

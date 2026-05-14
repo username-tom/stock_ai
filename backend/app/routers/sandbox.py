@@ -53,6 +53,8 @@ def _position_dict(p: SandboxPosition, market_price: float | None = None) -> dic
         "pending_shares": p.pending_shares,
         "pending_avg_cost": p.pending_avg_cost,
         "pending_since": p.pending_since.isoformat() if p.pending_since else None,
+        "max_allocation_mode": p.max_allocation_mode,
+        "max_allocation_value": p.max_allocation_value,
     }
 
 
@@ -140,6 +142,8 @@ class UpdatePositionRequest(BaseModel):
     strategy_name: Optional[str] = None
     allocated_funds: Optional[float] = Field(default=None, ge=0)
     strategy_enabled: Optional[bool] = None
+    max_allocation_mode: Optional[str] = Field(default=None, pattern="^(dollar|percent)$")
+    max_allocation_value: Optional[float] = Field(default=None, ge=0)
 
 
 @router.patch("/positions/{symbol}")
@@ -166,6 +170,12 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
             shortfall = req.allocated_funds - available
             account.total_funds += shortfall
         pos.allocated_funds = req.allocated_funds
+
+    if req.max_allocation_mode is not None:
+        pos.max_allocation_mode = req.max_allocation_mode
+
+    if req.max_allocation_value is not None:
+        pos.max_allocation_value = req.max_allocation_value
 
     await db.commit()
     await db.refresh(pos)
@@ -414,10 +424,14 @@ class PortfolioManagerSettingsRequest(BaseModel):
     transfer_interval_s: Optional[int] = Field(default=None, ge=30)
     indicator_interval_s: Optional[int] = Field(default=None, ge=30)
     min_position_funds: Optional[float] = Field(default=None, ge=0)
+    min_position_funds_mode: Optional[str] = Field(default=None, pattern="^(dollar|percent)$")
+    min_position_funds_pct: Optional[float] = Field(default=None, ge=0, le=100)
     deploy_available_funds: Optional[bool] = None
     deploy_target: Optional[str] = Field(default=None, pattern="^(most_bearish|most_bullish|most_held|least_held|specific)$")
     deploy_target_symbol: Optional[str] = None
     allow_buy_outside_allocation: Optional[bool] = None
+    market_sentiment_strategies: Optional[dict[str, str]] = None
+    symbol_sentiment_strategies: Optional[dict[str, str]] = None
 
 
 @router.get("/manager/state")

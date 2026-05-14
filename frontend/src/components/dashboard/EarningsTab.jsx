@@ -68,6 +68,43 @@ function EarningsCard({ item }) {
   )
 }
 
+function RecentEarningsCard({ item }) {
+  const daysLabel = item.days_since === 0 ? 'Today' : `${item.days_since} day${item.days_since === 1 ? '' : 's'} ago`
+  const statusColor = item.status === 'beat'
+    ? 'text-emerald-300 bg-emerald-500/15 border-emerald-500/40'
+    : item.status === 'miss'
+      ? 'text-red-300 bg-red-500/15 border-red-500/40'
+      : 'text-slate-300 bg-slate-500/15 border-slate-500/40'
+
+  return (
+    <a
+      href={item.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex items-start gap-3 p-3 rounded-xl border border-dark-600 bg-dark-800 hover:bg-dark-700 hover:border-dark-500 transition-colors group"
+    >
+      <BellAlertIcon className="h-5 w-5 shrink-0 text-slate-500 group-hover:text-slate-300" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-slate-200 group-hover:text-amber-300 transition-colors">{item.title}</p>
+        <div className="flex items-center gap-2 mt-1 flex-wrap">
+          <span className="text-xs text-slate-500">{daysLabel}</span>
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${statusColor}`}>
+            {item.status === 'beat' ? 'Beat' : item.status === 'miss' ? 'Miss' : 'In Line'}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {(item.tags ?? []).map(tag => (
+            <span key={`${item.id}-${tag}`} className="text-[11px] text-slate-300 bg-dark-700 border border-dark-600 px-1.5 py-0.5 rounded">
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>
+      <ArrowTopRightOnSquareIcon className="h-3.5 w-3.5 text-slate-600 group-hover:text-amber-400 shrink-0 transition-colors" />
+    </a>
+  )
+}
+
 function SkeletonCard() {
   return (
     <div className="flex items-center gap-3 p-3 rounded-xl border border-dark-700 bg-dark-800">
@@ -109,6 +146,7 @@ export default function EarningsTab({ watchlist }) {
   }
 
   const all      = data?.items ?? []
+  const recent   = data?.recent_items ?? []
   const today    = all.filter(i => i.days_until === 0)
   const upcoming = all.filter(i => i.days_until > 0)
 
@@ -147,8 +185,20 @@ export default function EarningsTab({ watchlist }) {
         </div>
       )}
 
-      {data && all.length > 0 && (
+      {data && (all.length > 0 || recent.length > 0) && (
         <>
+          {recent.length > 0 && (
+            <section>
+              <h3 className="text-xs font-semibold text-sky-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                <BellAlertIcon className="h-3.5 w-3.5" /> Recent Earnings
+                <span className="ml-auto text-slate-600 normal-case font-normal">{recent.length} reports</span>
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                {recent.map(item => <RecentEarningsCard key={item.id} item={item} />)}
+              </div>
+            </section>
+          )}
+
           {today.length > 0 && (
             <section>
               <h3 className="text-xs font-semibold text-red-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">

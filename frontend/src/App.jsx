@@ -1,13 +1,15 @@
 import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { Component } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import Layout from './components/Layout'
-import Dashboard from './components/Dashboard'
-import BacktestPanel from './components/BacktestPanel'
-import ReportsPanel from './components/ReportsPanel'
-import TradingPanel from './components/TradingPanel'
-import ScriptsPanel from './components/ScriptsPanel'
-import SandboxPanel from './components/SandboxPanel'
-import SettingsPanel from './components/SettingsPanel'
+
+const Dashboard = lazy(() => import('./components/Dashboard'))
+const SandboxPanel = lazy(() => import('./components/SandboxPanel'))
+const BacktestPanel = lazy(() => import('./components/BacktestPanel'))
+const ReportsPanel = lazy(() => import('./components/ReportsPanel'))
+const TradingPanel = lazy(() => import('./components/TradingPanel'))
+const ScriptsPanel = lazy(() => import('./components/ScriptsPanel'))
+const SettingsPanel = lazy(() => import('./components/SettingsPanel'))
 
 class PanelErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null } }
@@ -40,12 +42,39 @@ const PANELS = [
 
 function PersistentPanels() {
   const { pathname } = useLocation()
+  const [visitedPaths, setVisitedPaths] = useState(() => new Set(['/']))
+
+  useEffect(() => {
+    setVisitedPaths(prev => {
+      if (prev.has(pathname)) return prev
+      const next = new Set(prev)
+      next.add(pathname)
+      return next
+    })
+  }, [pathname])
+
+  const allowedPaths = useMemo(() => new Set(PANELS.map(p => p.path)), [])
+  const normalizedPath = allowedPaths.has(pathname) ? pathname : '/'
+
+  useEffect(() => {
+    setVisitedPaths(prev => {
+      if (prev.has(normalizedPath)) return prev
+      const next = new Set(prev)
+      next.add(normalizedPath)
+      return next
+    })
+  }, [normalizedPath])
+
   return (
     <>
       {PANELS.map(({ path, Component }) => (
-        <div key={path} className={pathname === path ? '' : 'hidden'}>
+        <div key={path} className={normalizedPath === path ? '' : 'hidden'}>
           <PanelErrorBoundary>
-            <Component />
+            {visitedPaths.has(path) && (
+              <Suspense fallback={<div className="p-8 text-sm text-slate-400">Loading panel...</div>}>
+                <Component />
+              </Suspense>
+            )}
           </PanelErrorBoundary>
         </div>
       ))}

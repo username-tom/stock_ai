@@ -33,6 +33,9 @@ class SandboxPosition(Base):
     engine_error = Column(Text, nullable=True)
     realized_pnl = Column(Float, default=0.0)
     total_invested = Column(Float, default=0.0)    # cumulative cost of all BUY fills
+    max_allocation_mode = Column(String(20), default="dollar", nullable=False)
+    max_allocation_value = Column(Float, nullable=True)
+    sentiment_mode = Column(String(20), nullable=True)  # None | 'market' | 'symbol'
     is_on_watchlist = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
@@ -95,10 +98,13 @@ class PortfolioManagerSettings(Base):
     transfer_interval_s = Column(Integer, default=300, nullable=False)
     indicator_interval_s = Column(Integer, default=120, nullable=False)
     min_position_funds = Column(Float, default=100.0, nullable=False)
+    min_position_funds_mode = Column(String(20), default="dollar", nullable=False)
+    min_position_funds_pct = Column(Float, default=1.0, nullable=False)
     deploy_available_funds = Column(Boolean, default=True, nullable=False)
     deploy_target = Column(String(20), default="most_bearish", nullable=False)
     deploy_target_symbol = Column(String(20), default="", nullable=False)
     reallocation_enabled = Column(Boolean, default=True, nullable=False)
     reallocation_mode = Column(String(20), default="to_stock", nullable=False)
     allow_buy_outside_allocation = Column(Boolean, default=False, nullable=False)
+    sentiment_strategy_enabled = Column(Boolean, default=True, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

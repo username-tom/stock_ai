@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { CheckIcon, PencilSquareIcon, PlusIcon, XMarkIcon, Bars3Icon, ChevronDownIcon } from '@heroicons/react/24/solid'
 import QuoteCard from './QuoteCard'
-import { getBulkQuotes } from '../../api/client'
+import { getBulkQuotes, getSymbolSectors } from '../../api/client'
 import { useMarketOpen } from '../../hooks/useMarketOpen'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { WATCHLIST_SYMBOL_LIMIT } from '../../hooks/useWatchlist'
@@ -50,6 +50,7 @@ export default function WatchlistPanel({
 
   const isWatchlist = selectedList === 'watchlist'
   const presetSymbols = isWatchlist ? watchlist : (PRESET_LISTS[selectedList]?.symbols ?? [])
+  const activeSymbols = presetSymbols
 
   const { data: presetQuotesMap, isLoading: presetLoading } = useQuery({
     queryKey: ['bulk-quotes', presetSymbols],
@@ -59,10 +60,15 @@ export default function WatchlistPanel({
     refetchIntervalInBackground: true,
     enabled: !isWatchlist && presetSymbols.length > 0,
   })
+  const { data: sectorsMap } = useQuery({
+    queryKey: ['watchlist-sectors', activeSymbols],
+    queryFn: () => activeSymbols.length ? getSymbolSectors(activeSymbols) : Promise.resolve({}),
+    enabled: activeSymbols.length > 0,
+    staleTime: 3_600_000,
+  })
 
   const activeQuotesMap = isWatchlist ? quotesMap : presetQuotesMap
   const activeLoading = isWatchlist ? quotesLoading : presetLoading
-  const activeSymbols = presetSymbols
 
   return (
     <div className="flex flex-col h-full">
@@ -194,7 +200,7 @@ export default function WatchlistPanel({
             className={`relative ${isWatchlist && editing ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}`}
           >
             <QuoteCard
-              data={activeQuotesMap?.[sym]}
+              data={activeQuotesMap?.[sym] ? { ...activeQuotesMap[sym], sector: sectorsMap?.[sym] ?? null } : activeQuotesMap?.[sym]}
               isLoading={activeLoading}
               symbol={sym}
               isActive={sym === chartSymbol}

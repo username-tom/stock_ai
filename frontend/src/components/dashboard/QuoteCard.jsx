@@ -27,6 +27,9 @@ function Tooltip({ data, price, changePct, changeAbs, positive, style }) {
         {data.company_name && (
           <p className="text-xs text-slate-400 mt-0.5 leading-snug">{data.company_name}</p>
         )}
+        {data.sector && (
+          <p className="text-[11px] text-sky-300/80 mt-0.5 leading-snug">{data.sector}</p>
+        )}
       </div>
       {/* Stats */}
       <div className="px-3 py-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
@@ -142,6 +145,9 @@ export default function QuoteCard({ data, isLoading, symbol, isActive }) {
         {/* Row 3: company name */}
         {data.company_name && (
           <div className="text-[10px] text-slate-500 mt-0.5 leading-tight truncate">{data.company_name}</div>
+        )}
+        {data.sector && (
+          <div className="text-[10px] text-sky-300/70 mt-0.5 leading-tight truncate">{data.sector}</div>
         )}
       </div>
 

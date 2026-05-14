@@ -6,6 +6,8 @@ const api = axios.create({ baseURL: '/api' })
 export const getQuote = (symbol) => api.get(`/market-data/quote/${symbol}`).then(r => r.data)
 export const getBulkQuotes = (symbols) =>
   api.get('/market-data/bulk-quotes', { params: { symbols: symbols.join(',') } }).then(r => r.data)
+export const getSymbolSectors = (symbols) =>
+  api.get('/market-data/sectors', { params: { symbols: symbols.join(',') } }).then(r => r.data)
 export const getHistory = (symbol, period = '1y', interval = '1d') =>
   api.get(`/market-data/history/${symbol}`, { params: { period, interval } }).then(r => r.data)
 export const getMovers = (topN = 10, force = false) =>
@@ -20,6 +22,7 @@ export const searchSymbols = (q, limit = 8) =>
 // Backtest
 export const getStrategies = () => api.get('/backtest/strategies').then(r => r.data)
 export const runBacktest = (payload) => api.post('/backtest/run', payload).then(r => r.data)
+export const runSentimentBacktest = (payload) => api.post('/backtest/run-sentiment', payload).then(r => r.data)
 export const getReports = () => api.get('/backtest/reports').then(r => r.data)
 export const getReport = (id) => api.get(`/backtest/reports/${id}`).then(r => r.data)
 export const deleteReport = (id) => api.delete(`/backtest/reports/${id}`).then(r => r.data)
