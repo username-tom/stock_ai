@@ -107,4 +107,6 @@ class PortfolioManagerSettings(Base):
     reallocation_mode = Column(String(20), default="to_stock", nullable=False)
     allow_buy_outside_allocation = Column(Boolean, default=False, nullable=False)
     sentiment_strategy_enabled = Column(Boolean, default=True, nullable=False)
+    stop_loss_pct = Column(Float, default=0.0, nullable=False)
+    take_profit_pct = Column(Float, default=0.0, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

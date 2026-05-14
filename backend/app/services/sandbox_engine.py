@@ -197,6 +197,12 @@ async def _process_symbol(
         last_row = df_sig.iloc[-1]
         current_price = float(last_row["Close"])
 
+        # Global risk exits from portfolio-manager settings (0 = disabled).
+        from app.services.portfolio_manager import get_manager_settings
+        manager_settings = get_manager_settings()
+        stop_loss_pct = float(manager_settings.get("stop_loss_pct", 0.0) or 0.0)
+        take_profit_pct = float(manager_settings.get("take_profit_pct", 0.0) or 0.0)
+
         # The raw last-bar signal is used for display (last_signal in DB).
         current_signal = int(last_row.get("signal", 0))
 
@@ -240,11 +246,23 @@ async def _process_symbol(
 
         strat_label = strategy_name.split(':')[0]
 
-        if trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0:
+        if pos.shares > 0 and pos.avg_cost > 0:
+            if stop_loss_pct > 0:
+                stop_price = pos.avg_cost * (1.0 - stop_loss_pct / 100.0)
+                if current_price <= stop_price:
+                    action = "SELL"
+                    reason = f"stop_loss ({stop_loss_pct:.2f}% @ ${stop_price:.2f})"
+            if action is None and take_profit_pct > 0:
+                tp_price = pos.avg_cost * (1.0 + take_profit_pct / 100.0)
+                if current_price >= tp_price:
+                    action = "SELL"
+                    reason = f"take_profit ({take_profit_pct:.2f}% @ ${tp_price:.2f})"
+
+        if action is None and trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0:
             action = "BUY"
             reason = signal_source if signal_source else f"{strat_label} buy @ ${current_price:.2f}"
 
-        elif trade_signal < 0 and pos.shares > 0:
+        elif action is None and trade_signal < 0 and pos.shares > 0:
             action = "SELL"
             reason = signal_source if signal_source else f"{strat_label} sell @ ${current_price:.2f}"
 

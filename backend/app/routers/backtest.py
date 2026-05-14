@@ -54,9 +54,9 @@ class BacktestRequest(BaseModel):
         example="auto",
     )
     day_trade: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When True, fetches intraday data (finest available interval: 1m → 2m → 5m) "
+            "When True, fetches intraday data (IB: 5s when available; Yahoo: 1m → 2m → 5m) "
             "and scales performance metrics accordingly. "
             "Note: Yahoo Finance limits 1m data to the last 7 days."
         ),
@@ -82,7 +82,7 @@ class SentimentBacktestRequest(BaseModel):
     initial_capital: float = Field(default=10000.0, ge=1000)
     commission: float = Field(default=0.001, ge=0, le=0.05)
     data_source: DataSource = Field(default="auto")
-    day_trade: bool = Field(default=False)
+    day_trade: bool = Field(default=True)
     sentiment_strategies: dict[str, str] = Field(
         default_factory=lambda: {
             "crash": "rsi",
@@ -93,6 +93,8 @@ class SentimentBacktestRequest(BaseModel):
         }
     )
     sentiment_warmup: int = Field(default=35, ge=5, le=500)
+    stop_loss_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+    take_profit_pct: float = Field(default=0.0, ge=0.0, le=1000.0)
 
     def validate_strategies(self) -> None:
         aliases = {
@@ -135,6 +137,8 @@ async def run_sentiment_backtest_endpoint(
             day_trade=req.day_trade,
             sentiment_strategies=req.sentiment_strategies,
             sentiment_warmup=req.sentiment_warmup,
+            stop_loss_pct=req.stop_loss_pct,
+            take_profit_pct=req.take_profit_pct,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -155,7 +159,12 @@ async def run_sentiment_backtest_endpoint(
         name=name,
         symbol=req.symbol.upper(),
         strategy_type="sentiment_switching",
-        parameters=req.sentiment_strategies,
+        parameters={
+            "sentiment_strategies": req.sentiment_strategies,
+            "sentiment_warmup": req.sentiment_warmup,
+            "stop_loss_pct": req.stop_loss_pct,
+            "take_profit_pct": req.take_profit_pct,
+        },
         start_date=req.start_date,
         end_date=req.end_date,
         initial_capital=req.initial_capital,

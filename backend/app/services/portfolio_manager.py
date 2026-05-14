@@ -61,6 +61,8 @@ _settings: dict[str, Any] = {
         "euphoric": "rsi",
     },
     "sentiment_strategy_enabled": True,   # auto-change strategy based on sentiment
+    "stop_loss_pct": 0.0,
+    "take_profit_pct": 0.0,
 }
 
 # ── runtime state ─────────────────────────────────────────────────────────── #
@@ -115,6 +117,8 @@ async def _load_settings_from_db() -> None:
             _settings["reallocation_mode"] = row.reallocation_mode or "to_stock"
             _settings["allow_buy_outside_allocation"] = bool(getattr(row, "allow_buy_outside_allocation", False))
             _settings["sentiment_strategy_enabled"] = bool(getattr(row, "sentiment_strategy_enabled", True))
+            _settings["stop_loss_pct"] = float(getattr(row, "stop_loss_pct", 0.0) or 0.0)
+            _settings["take_profit_pct"] = float(getattr(row, "take_profit_pct", 0.0) or 0.0)
 
 
 async def _save_settings_to_db() -> None:
@@ -142,6 +146,8 @@ async def _save_settings_to_db() -> None:
         row.reallocation_mode = _settings["reallocation_mode"]
         row.allow_buy_outside_allocation = _settings["allow_buy_outside_allocation"]
         row.sentiment_strategy_enabled = _settings.get("sentiment_strategy_enabled", True)
+        row.stop_loss_pct = float(_settings.get("stop_loss_pct", 0.0) or 0.0)
+        row.take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
         await db.commit()
 
 
@@ -151,7 +157,7 @@ def update_manager_settings(new: dict) -> dict:
                "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
                "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation",
                "market_sentiment_strategies", "symbol_sentiment_strategies",
-               "sentiment_strategy_enabled"}
+               "sentiment_strategy_enabled", "stop_loss_pct", "take_profit_pct"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v

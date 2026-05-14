@@ -80,6 +80,9 @@ async def _migrate(conn):
         "ALTER TABLE sandbox_positions ADD COLUMN sentiment_mode VARCHAR(20)",
         # portfolio_manager_settings global sentiment strategy toggle
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_strategy_enabled BOOLEAN NOT NULL DEFAULT 1",
+        # portfolio_manager_settings global risk exits (sandbox engine)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_pct REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN take_profit_pct REAL NOT NULL DEFAULT 0.0",
     ]
     for stmt in migrations:
         try:

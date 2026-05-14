@@ -25,6 +25,20 @@ function loadWatchlist() {
   return DEFAULT_WATCHLIST
 }
 
+function formatDateInput(d) {
+  return d.toISOString().slice(0, 10)
+}
+
+function getTodayDateString() {
+  return formatDateInput(new Date())
+}
+
+function getOneWeekAgoDateString(fromDateString) {
+  const base = new Date(`${fromDateString}T00:00:00`)
+  base.setDate(base.getDate() - 7)
+  return formatDateInput(base)
+}
+
 function MetricCard({ label, value, sub, positive }) {
   const colorClass =
     positive === true ? 'text-emerald-400' :
@@ -113,6 +127,7 @@ const REASON_COLORS = {
   macd:          'bg-cyan-900/50 text-cyan-300 border-cyan-700/40',
   macd_exit:     'bg-cyan-900/30 text-cyan-400 border-cyan-700/30',
   stop_loss:     'bg-red-900/60 text-red-300 border-red-700/50',
+  take_profit:   'bg-emerald-900/50 text-emerald-300 border-emerald-700/40',
   fallback_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
   signal:        'bg-emerald-900/40 text-emerald-300 border-emerald-700/30',
   strategy_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
@@ -206,6 +221,9 @@ const DEFAULT_SENT_STRATS = {
 }
 
 export default function BacktestPanel() {
+  const defaultEndDate = getTodayDateString()
+  const defaultStartDate = getOneWeekAgoDateString(defaultEndDate)
+
   const { data: stratData, isLoading: stratLoading } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
@@ -232,11 +250,11 @@ export default function BacktestPanel() {
   const [form, setForm] = useState({
     symbol: 'AAPL',
     strategy_type: 'sma_crossover',
-    start_date: '2022-01-01',
-    end_date: '2023-12-31',
+    start_date: defaultStartDate,
+    end_date: defaultEndDate,
     initial_capital: 10000,
     commission: 0.005,
-    day_trade: false,
+    day_trade: true,
   })
   const [commissionPreset, setCommissionPreset] = useState('0.005')
   const [stratParams, setStratParams] = useState({ fast_period: 10, slow_period: 30, ma_type: 'SMA' })
@@ -261,13 +279,15 @@ export default function BacktestPanel() {
   const [mode, setMode] = useState('standard') // 'standard' | 'sentiment'
   const [sentForm, setSentForm] = useState({
     symbol: 'AAPL',
-    start_date: '2022-01-01',
-    end_date: '2023-12-31',
+    start_date: defaultStartDate,
+    end_date: defaultEndDate,
     initial_capital: 10000,
     commission: 0.005,
-    day_trade: false,
+    day_trade: true,
     sentimentStrategies: { ...DEFAULT_SENT_STRATS },
     sentiment_warmup: 35,
+    stop_loss_pct: 0,
+    take_profit_pct: 0,
   })
   const [sentResult, setSentResult] = useState(null)
   const [sentActiveTab, setSentActiveTab] = useState('equity')
@@ -311,6 +331,8 @@ export default function BacktestPanel() {
       day_trade: sentForm.day_trade,
       sentiment_strategies: sentForm.sentimentStrategies,
       sentiment_warmup: sentForm.sentiment_warmup,
+      stop_loss_pct: sentForm.stop_loss_pct,
+      take_profit_pct: sentForm.take_profit_pct,
     })
   }
 
@@ -663,18 +685,9 @@ export default function BacktestPanel() {
                   onChange={e => {
                     const on = e.target.checked
                     if (on) {
-                      // Auto-set date range to last 7 calendar days → today
-                      // (accounts for weekends: today counts if it's a weekday)
-                      const now = new Date()
-                      const day = now.getDay() // 0=Sun, 6=Sat
-                      // If today is a weekend, roll back to Friday
-                      const endDate = new Date(now)
-                      if (day === 0) endDate.setDate(endDate.getDate() - 2)
-                      else if (day === 6) endDate.setDate(endDate.getDate() - 1)
-                      const startDate = new Date(endDate)
-                      startDate.setDate(startDate.getDate() - 6)
-                      const fmt = d => d.toISOString().slice(0, 10)
-                      setForm(f => ({ ...f, day_trade: true, start_date: fmt(startDate), end_date: fmt(endDate) }))
+                      const today = getTodayDateString()
+                      const weekAgo = getOneWeekAgoDateString(today)
+                      setForm(f => ({ ...f, day_trade: true, start_date: weekAgo, end_date: today }))
                     } else {
                       setForm(f => ({ ...f, day_trade: false }))
                     }
@@ -685,7 +698,7 @@ export default function BacktestPanel() {
               </div>
               <div>
                 <div className="text-sm font-medium text-slate-200">Day Trade Mode</div>
-                <div className="text-xs text-slate-500">Use intraday data (1m → 2m → 5m)</div>
+                <div className="text-xs text-slate-500">Use intraday data (IB: 5s; Yahoo: 1m → 2m → 5m)</div>
               </div>
             </label>
             {form.day_trade && (
@@ -706,7 +719,16 @@ export default function BacktestPanel() {
               />
             </div>
             <div>
-              <label className="label">End Date</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="label mb-0">End Date</label>
+                <button
+                  type="button"
+                  className="text-xs text-emerald-400 hover:text-emerald-300"
+                  onClick={() => setForm(f => ({ ...f, end_date: getTodayDateString() }))}
+                >
+                  Today
+                </button>
+              </div>
               <input
                 className="input"
                 type="date"
@@ -1051,31 +1073,107 @@ export default function BacktestPanel() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="label">Start Date</label>
-                  <input className="input" type="date" value={sentForm.start_date}
-                    onChange={e => setSentForm(f => ({ ...f, start_date: e.target.value }))} />
+                  <input
+                    className="input"
+                    type="date"
+                    value={sentForm.start_date}
+                    onChange={e => setSentForm(f => ({ ...f, start_date: e.target.value }))}
+                  />
                 </div>
                 <div>
-                  <label className="label">End Date</label>
-                  <input className="input" type="date" value={sentForm.end_date}
-                    onChange={e => setSentForm(f => ({ ...f, end_date: e.target.value }))} />
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="label mb-0">End Date</label>
+                    <button
+                      type="button"
+                      className="text-xs text-emerald-400 hover:text-emerald-300"
+                      onClick={() => setSentForm(f => ({ ...f, end_date: getTodayDateString() }))}
+                    >
+                      Today
+                    </button>
+                  </div>
+                  <input
+                    className="input"
+                    type="date"
+                    value={sentForm.end_date}
+                    onChange={e => setSentForm(f => ({ ...f, end_date: e.target.value }))}
+                  />
                 </div>
               </div>
 
               <div>
                 <label className="label">Initial Capital ($)</label>
-                <input className="input" type="number" value={sentForm.initial_capital}
-                  onChange={e => setSentForm(f => ({ ...f, initial_capital: parseFloat(e.target.value) }))} />
+                <input
+                  className="input"
+                  type="number"
+                  value={sentForm.initial_capital}
+                  onChange={e => setSentForm(f => ({ ...f, initial_capital: parseFloat(e.target.value) }))}
+                />
               </div>
 
               <div>
                 <label className="label">Commission</label>
-                <select className="input" value={String(sentForm.commission)}
+                <select
+                  className="input"
+                  value={String(sentForm.commission)}
                   onChange={e => setSentForm(f => ({ ...f, commission: parseFloat(e.target.value) }))}
                 >
                   {COMMISSION_PRESETS.filter(p => p.value !== null).map(p => (
                     <option key={p.label} value={String(p.value)}>{p.label}</option>
                   ))}
                 </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">Stop-Loss % (0=off)</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={sentForm.stop_loss_pct}
+                    onChange={e => setSentForm(f => ({ ...f, stop_loss_pct: parseFloat(e.target.value) || 0 }))}
+                  />
+                </div>
+                <div>
+                  <label className="label">Take-Profit % (0=off)</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={sentForm.take_profit_pct}
+                    onChange={e => setSentForm(f => ({ ...f, take_profit_pct: parseFloat(e.target.value) || 0 }))}
+                  />
+                </div>
+              </div>
+
+              <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30">
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <div className="relative">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={sentForm.day_trade}
+                      onChange={e => {
+                        const on = e.target.checked
+                        if (on) {
+                          const today = getTodayDateString()
+                          const weekAgo = getOneWeekAgoDateString(today)
+                          setSentForm(f => ({ ...f, day_trade: true, start_date: weekAgo, end_date: today }))
+                        } else {
+                          setSentForm(f => ({ ...f, day_trade: false }))
+                        }
+                      }}
+                    />
+                    <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-indigo-500 transition-colors" />
+                    <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-200">Day Trade Mode</div>
+                    <div className="text-xs text-slate-500">Use intraday data (IB: 5s; Yahoo: 1m → 2m → 5m)</div>
+                  </div>
+                </label>
               </div>
 
               {/* Sentiment strategy map */}
@@ -1112,9 +1210,14 @@ export default function BacktestPanel() {
               {/* Warmup bars */}
               <div>
                 <label className="label">Sentiment Warmup Bars</label>
-                <input className="input" type="number" min={5} max={500}
+                <input
+                  className="input"
+                  type="number"
+                  min={5}
+                  max={500}
                   value={sentForm.sentiment_warmup}
-                  onChange={e => setSentForm(f => ({ ...f, sentiment_warmup: parseInt(e.target.value, 10) }))} />
+                  onChange={e => setSentForm(f => ({ ...f, sentiment_warmup: parseInt(e.target.value, 10) }))}
+                />
                 <p className="text-xs text-slate-500 mt-1">
                   Bars before switching begins (indicators need data to warm up). Default 35.
                 </p>

@@ -243,6 +243,7 @@ def _fetch_ib_intraday(symbol: str, start: str, end: str) -> pd.DataFrame:
         raise ValueError("IB is not connected – cannot fetch intraday data from Interactive Brokers.")
 
     interval_map = (
+        ("5s", "5 secs"),
         ("1m", "1 min"),
         ("2m", "2 mins"),
         ("5m", "5 mins"),
@@ -333,10 +334,10 @@ def fetch_ohlcv_intraday(
 ) -> pd.DataFrame:
     """Fetch intraday OHLCV data using the finest available interval.
 
-    Tries intervals in order: ``1m``, ``2m``, ``5m``.  The first interval that
-    returns data is used.  Falls back gracefully when the date range exceeds
-    what yfinance allows for a given interval (e.g. 1m is limited to the last
-    7 days).
+    For Interactive Brokers, tries ``5s`` first and then falls back to
+    ``1m``, ``2m``, ``5m``. For yfinance, tries ``1m``, ``2m``, ``5m``.
+    The first interval that returns data is used. Falls back gracefully when
+    the date range exceeds what yfinance allows for a given interval.
 
     Parameters
     ----------

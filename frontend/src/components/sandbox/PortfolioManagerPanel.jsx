@@ -53,6 +53,8 @@ function buildDraftFromSettings(settings) {
       ...(settings.symbol_sentiment_strategies ?? {}),
     },
     sentiment_strategy_enabled: settings.sentiment_strategy_enabled ?? true,
+    stop_loss_pct: settings.stop_loss_pct ?? 0,
+    take_profit_pct: settings.take_profit_pct ?? 0,
   }
 }
 
@@ -238,6 +240,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
       market_sentiment_strategies: draft.market_sentiment_strategies,
       symbol_sentiment_strategies: draft.symbol_sentiment_strategies,
       sentiment_strategy_enabled: draft.sentiment_strategy_enabled,
+      stop_loss_pct: Number(draft.stop_loss_pct),
+      take_profit_pct: Number(draft.take_profit_pct),
     })
   }
 
@@ -338,6 +342,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
           {settings.deploy_available_funds
             ? `Deploying available funds → ${{ most_bearish: 'most bearish', most_bullish: 'most bullish', most_held: 'most held', least_held: 'least held', specific: settings.deploy_target_symbol || 'specific' }[settings.deploy_target] ?? settings.deploy_target}`
             : 'Available funds deployment off'}
+        </span>
+        <span className="flex items-center gap-1">
+          <ChartBarIcon className="h-3.5 w-3.5" />
+          Risk exits: SL {Number(settings.stop_loss_pct ?? 0).toFixed(1)}% | TP {Number(settings.take_profit_pct ?? 0).toFixed(1)}%
         </span>
       </div>
 
@@ -693,6 +701,36 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                 </div>
                 <span className="text-xs text-slate-300">{draft.allow_buy_outside_allocation ? 'Enabled' : 'Disabled'}</span>
               </label>
+            </SettingRow>
+
+            <SettingRow
+              label="Global Stop-Loss % (0 = off)"
+              hint="Auto-sell when price drops this percent below average entry cost."
+            >
+              <div className="flex items-center gap-1">
+                <input
+                  type="number" min={0} max={100} step={0.1}
+                  value={draft.stop_loss_pct}
+                  onChange={e => updateDraft(d => ({ ...d, stop_loss_pct: e.target.value }))}
+                  className="input w-28 text-sm py-1.5"
+                />
+                <span className="text-slate-400 text-sm">%</span>
+              </div>
+            </SettingRow>
+
+            <SettingRow
+              label="Global Take-Profit % (0 = off)"
+              hint="Auto-sell when price rises this percent above average entry cost."
+            >
+              <div className="flex items-center gap-1">
+                <input
+                  type="number" min={0} max={1000} step={0.1}
+                  value={draft.take_profit_pct}
+                  onChange={e => updateDraft(d => ({ ...d, take_profit_pct: e.target.value }))}
+                  className="input w-28 text-sm py-1.5"
+                />
+                <span className="text-slate-400 text-sm">%</span>
+              </div>
             </SettingRow>
 
             {draft.deploy_available_funds && (

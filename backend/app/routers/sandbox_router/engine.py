@@ -75,11 +75,19 @@ class PortfolioManagerSettingsRequest(BaseModel):
     transfer_interval_s: Optional[int] = Field(default=None, ge=30)
     indicator_interval_s: Optional[int] = Field(default=None, ge=30)
     min_position_funds: Optional[float] = Field(default=None, ge=0)
+    min_position_funds_mode: Optional[str] = Field(default=None, pattern="^(dollar|percent)$")
+    min_position_funds_pct: Optional[float] = Field(default=None, ge=0, le=100)
     deploy_available_funds: Optional[bool] = None
     deploy_target: Optional[str] = Field(default=None, pattern="^(most_bearish|most_bullish|most_held|least_held|specific)$")
     deploy_target_symbol: Optional[str] = None
     reallocation_enabled: Optional[bool] = None
     reallocation_mode: Optional[str] = Field(default=None, pattern="^(to_stock|to_available)$")
+    allow_buy_outside_allocation: Optional[bool] = None
+    market_sentiment_strategies: Optional[dict[str, str]] = None
+    symbol_sentiment_strategies: Optional[dict[str, str]] = None
+    sentiment_strategy_enabled: Optional[bool] = None
+    stop_loss_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    take_profit_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
 
 
 @router.get("/manager/state")

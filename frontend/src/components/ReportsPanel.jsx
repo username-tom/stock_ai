@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getReports, getReport, deleteReport } from '../api/client'
 import EquityChart from './charts/EquityChart'
+import SubplotChart from './charts/SubplotChart'
 import {
   DocumentChartBarIcon,
   TrashIcon,
@@ -33,9 +34,46 @@ const REASON_COLORS = {
   macd:          'bg-cyan-900/50 text-cyan-300 border-cyan-700/40',
   macd_exit:     'bg-cyan-900/30 text-cyan-400 border-cyan-700/30',
   stop_loss:     'bg-red-900/60 text-red-300 border-red-700/50',
+  take_profit:   'bg-emerald-900/50 text-emerald-300 border-emerald-700/40',
   fallback_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
   signal:        'bg-emerald-900/40 text-emerald-300 border-emerald-700/30',
   strategy_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
+}
+
+const SENTIMENT_BUCKETS = [
+  { key: 'crash', label: 'Crash' },
+  { key: 'bearish', label: 'Bearish' },
+  { key: 'neutral', label: 'Neutral' },
+  { key: 'bullish', label: 'Bullish' },
+  { key: 'euphoric', label: 'Euphoric' },
+]
+
+function formatStrategyName(value) {
+  if (!value) return '—'
+  return String(value)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase())
+}
+
+function extractAdvancedSentimentSettings(detail) {
+  if (!detail || detail.strategy_type !== 'sentiment_switching') return null
+  const params = (detail.parameters && typeof detail.parameters === 'object') ? detail.parameters : {}
+  const maybeMap =
+    params.sentiment_strategies && typeof params.sentiment_strategies === 'object'
+      ? params.sentiment_strategies
+      : params
+
+  const strategyMap = {}
+  SENTIMENT_BUCKETS.forEach(({ key }) => {
+    if (maybeMap[key]) strategyMap[key] = maybeMap[key]
+  })
+
+  return {
+    strategyMap,
+    sentimentWarmup: params.sentiment_warmup,
+    stopLossPct: params.stop_loss_pct,
+    takeProfitPct: params.take_profit_pct,
+  }
 }
 
 function ReasonBadge({ value }) {
@@ -47,6 +85,47 @@ function ReasonBadge({ value }) {
       {label}
     </span>
   )
+}
+
+function normalizeTimestamp(value) {
+  if (!value) return ''
+  return String(value)
+    .replace('T', ' ')
+    .replace('_', ' ')
+    .replace(/\.\d+$/, '')
+    .trim()
+}
+
+function mergeTradeSignalsIntoOhlcv(ohlcv = [], trades = []) {
+  if (!Array.isArray(ohlcv) || ohlcv.length === 0) return []
+
+  const merged = ohlcv.map(bar => ({ ...bar, signal: Number(bar.signal) || 0 }))
+  const byExactTime = new Map()
+  const byDay = new Map()
+
+  merged.forEach((bar, idx) => {
+    const key = normalizeTimestamp(bar.date)
+    if (!key) return
+    byExactTime.set(key, idx)
+    const day = key.slice(0, 10)
+    if (day && !byDay.has(day)) byDay.set(day, idx)
+  })
+
+  const markSignal = (timestamp, signal) => {
+    const key = normalizeTimestamp(timestamp)
+    if (!key) return
+    let idx = byExactTime.get(key)
+    if (idx == null) idx = byDay.get(key.slice(0, 10))
+    if (idx == null) return
+    if (!merged[idx].signal) merged[idx].signal = signal
+  }
+
+  trades.forEach((t) => {
+    markSignal(t?.entry_date, 1)
+    markSignal(t?.exit_date, -1)
+  })
+
+  return merged
 }
 
 export default function ReportsPanel() {
@@ -79,6 +158,11 @@ export default function ReportsPanel() {
   const filtered = q
     ? reports.filter(r => r.symbol.includes(q) || r.strategy_type.toUpperCase().includes(q))
     : reports
+  const reportOhlcvWithSignals = mergeTradeSignalsIntoOhlcv(
+    detail?.result_data?.ohlcv ?? [],
+    detail?.result_data?.trades ?? [],
+  )
+  const advancedSettings = extractAdvancedSentimentSettings(detail)
 
   return (
     <div className="p-6 space-y-6">
@@ -234,6 +318,55 @@ export default function ReportsPanel() {
                 </div>
               </div>
 
+              {advancedSettings && (
+                <div className="card space-y-4">
+                  <div>
+                    <h3 className="font-medium text-slate-200">Advanced Backtest Settings</h3>
+                    <p className="text-xs text-slate-500 mt-0.5">Sentiment switching configuration saved with this report.</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    <div className="metric-card">
+                      <div className="metric-label">Sentiment Warmup</div>
+                      <div className="metric-value text-slate-100 text-lg">
+                        {advancedSettings.sentimentWarmup != null ? advancedSettings.sentimentWarmup : '—'}
+                      </div>
+                      <div className="text-xs text-slate-500">bars</div>
+                    </div>
+                    <div className="metric-card">
+                      <div className="metric-label">Stop-Loss</div>
+                      <div className="metric-value text-red-400 text-lg">
+                        {advancedSettings.stopLossPct != null ? `${Number(advancedSettings.stopLossPct).toFixed(2)}%` : '—'}
+                      </div>
+                      <div className="text-xs text-slate-500">0 = disabled</div>
+                    </div>
+                    <div className="metric-card">
+                      <div className="metric-label">Take-Profit</div>
+                      <div className="metric-value text-emerald-400 text-lg">
+                        {advancedSettings.takeProfitPct != null ? `${Number(advancedSettings.takeProfitPct).toFixed(2)}%` : '—'}
+                      </div>
+                      <div className="text-xs text-slate-500">0 = disabled</div>
+                    </div>
+                  </div>
+
+                  {Object.keys(advancedSettings.strategyMap).length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-xs text-slate-500 uppercase tracking-wider">Sentiment to Strategy Map</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {SENTIMENT_BUCKETS.map(({ key, label }) => (
+                          <div key={key} className="bg-dark-900/40 border border-dark-600 rounded-lg p-2">
+                            <div className="text-xs text-slate-500">{label}</div>
+                            <div className="text-sm font-medium text-slate-200 mt-0.5">
+                              {formatStrategyName(advancedSettings.strategyMap[key])}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Equity curve */}
               {detail.result_data?.equity_curve?.length > 0 && (
                 <div className="card">
@@ -243,6 +376,16 @@ export default function ReportsPanel() {
                     initialCapital={detail.initial_capital}
                     height={260}
                   />
+                </div>
+              )}
+
+              {reportOhlcvWithSignals.length > 0 && (
+                <div className="card">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-medium text-slate-200">Price Chart</h3>
+                    <span className="text-xs text-slate-500">Buy/Sell flags from trade log</span>
+                  </div>
+                  <SubplotChart data={reportOhlcvWithSignals} height={240} />
                 </div>
               )}
 
