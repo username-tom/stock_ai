@@ -6,6 +6,9 @@ import { useAppSettings } from '../hooks/useAppSettings'
 
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
 const STORAGE_KEY = 'dashboard_watchlist'
+const DEFAULT_TICKER_SLOT_COUNT = 6
+const STATUS_PILL_WIDTH_PX = 110
+const MIN_SLOT_WIDTH_PX = 135
 
 function readWatchlist() {
   try {
@@ -20,6 +23,8 @@ export default function LivePriceTicker() {
   const [symbols, setSymbols] = useState(readWatchlist)
   const [prices, setPrices] = useState({})
   const [wsOk, setWsOk] = useState(true)
+  const [rotationIndex, setRotationIndex] = useState(0)
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const wsRef = useRef(null)
 
   // Re-sync symbols from localStorage whenever the window gains focus
@@ -32,6 +37,12 @@ export default function LivePriceTicker() {
       window.removeEventListener('focus', sync)
       window.removeEventListener('watchlist-updated', sync)
     }
+  }, [])
+
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
   }, [])
 
   // WebSocket feed
@@ -96,6 +107,27 @@ export default function LivePriceTicker() {
   }, [wsOk, symbols.join(','), appSettings.quotes_refresh_ms])
 
   const items = symbols.map(s => prices[s]).filter(Boolean)
+  const rotateEveryMs = Math.max(1_000, Number(appSettings.ticker_rotate_ms) || 30_000)
+
+  useEffect(() => {
+    setRotationIndex(0)
+  }, [symbols.join(',')])
+
+  useEffect(() => {
+    if (items.length <= 1) return
+    const id = setInterval(() => {
+      setRotationIndex(prev => (prev + 1) % items.length)
+    }, rotateEveryMs)
+    return () => clearInterval(id)
+  }, [items.length, rotateEveryMs])
+
+  const preferredSlotCount = Math.max(1, Math.round(Number(appSettings.ticker_slot_count) || DEFAULT_TICKER_SLOT_COUNT))
+  const maxSlotsByWidth = Math.max(1, Math.floor((viewportWidth - STATUS_PILL_WIDTH_PX) / MIN_SLOT_WIDTH_PX))
+  const slotCount = Math.min(preferredSlotCount, maxSlotsByWidth, items.length)
+  const visibleItems = Array.from({ length: slotCount }, (_, idx) => {
+    return items[(rotationIndex + idx) % items.length]
+  })
+
   const marketState = items[0]?.market_state ?? 'CLOSED'
   // Yahoo's daily-chart endpoint often returns 'CLOSED' even during the
   // session. Trust REGULAR/PRE/POST explicitly; fall back to the clock
@@ -126,21 +158,20 @@ export default function LivePriceTicker() {
         )}
       </div>
       <div className="flex-1 overflow-hidden">
-        <div
-          className="flex gap-6 whitespace-nowrap animate-marquee"
-          style={{ width: 'max-content', animationDuration: `${appSettings.ticker_scroll_speed_s}s` }}
-        >
-          {[...items, ...items].map((p, i) => (
-            <span key={i} className="text-xs font-mono whitespace-nowrap text-slate-300">
-              <span className="text-slate-400 font-semibold">{p.symbol} </span>
-              <span className="font-semibold">${p.price?.toFixed(2) ?? '—'}</span>
-              {p.change_pct != null && (
-                <span className={p.change_pct >= 0 ? ' text-emerald-400' : ' text-red-400'}>
-                  {' '}{p.change_pct >= 0 ? '+' : ''}{p.change_pct.toFixed(2)}%
-                </span>
-              )}
-              {!isLive && <span className="text-slate-600"> ·close</span>}
-            </span>
+        <div className="h-full flex items-stretch">
+          {visibleItems.map((p, i) => (
+            <div key={`${p.symbol}-${i}`} className="flex-1 min-w-0 px-2 flex items-center justify-center border-l border-dark-700 first:border-l-0">
+              <span className="text-xs font-mono whitespace-nowrap text-slate-300 truncate">
+                <span className="text-slate-400 font-semibold">{p.symbol} </span>
+                <span className="font-semibold">${p.price?.toFixed(2) ?? '—'}</span>
+                {p.change_pct != null && (
+                  <span className={p.change_pct >= 0 ? ' text-emerald-400' : ' text-red-400'}>
+                    {' '}{p.change_pct >= 0 ? '+' : ''}{p.change_pct.toFixed(2)}%
+                  </span>
+                )}
+                {!isLive && <span className="text-slate-600"> ·close</span>}
+              </span>
+            </div>
           ))}
         </div>
       </div>

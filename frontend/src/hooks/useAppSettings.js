@@ -27,7 +27,8 @@ export const SETTINGS_DEFAULTS = {
   trading_orders_ms:          5_000,   // IB open orders
 
   // Ticker bar
-  ticker_scroll_speed_s:         30,   // seconds for one full scroll cycle
+  ticker_rotate_ms:          30_000,   // rotate visible ticker symbols
+  ticker_slot_count:              6,   // preferred number of fixed ticker slots
 }
 
 function load() {

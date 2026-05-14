@@ -4,7 +4,7 @@ import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
   ChartBarIcon, CheckCircleIcon, XCircleIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies, updateSandboxPosition } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { fmtMoney } from './sandboxHelpers'
 
@@ -108,6 +108,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   const [editSettings, setEditSettings] = useState(false)
   const [draft, setDraft] = useState(null)
   const [savedStates, setSavedStates] = useState(() => loadSavedStates())
+  const [routingGroups, setRoutingGroups] = useState({ manual: [], market: [], symbol: [] })
+  const [dragPayload, setDragPayload] = useState(null)
+  const [dragOverMode, setDragOverMode] = useState(null)
 
   const { data: managerData, isLoading } = useQuery({
     queryKey: ['portfolio-manager-state'],
@@ -140,6 +143,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
     },
   })
 
+  const routingMut = useMutation({
+    mutationFn: ({ symbol, mode }) => updateSandboxPosition(symbol, { sentiment_mode: mode }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+    },
+  })
+
   useEffect(() => {
     if (isLoading || !managerData) return
     setSavedStates(prev => {
@@ -164,6 +174,26 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProfile, managerData, isLoading])
+
+  useEffect(() => {
+    if (!managerData) return
+    const symbols = Object.keys(managerData.scores ?? {}).sort()
+    const marketRaw = managerData.sentiment_groups?.market ?? []
+    const symbolRaw = managerData.sentiment_groups?.symbol ?? []
+
+    const normalizedMarket = [...new Set(marketRaw)].filter(sym => symbols.includes(sym))
+    const normalizedSymbol = [...new Set(symbolRaw)]
+      .filter(sym => symbols.includes(sym) && !normalizedMarket.includes(sym))
+    const normalizedManual = symbols.filter(
+      sym => !normalizedMarket.includes(sym) && !normalizedSymbol.includes(sym)
+    )
+
+    setRoutingGroups({
+      manual: normalizedManual,
+      market: normalizedMarket,
+      symbol: normalizedSymbol,
+    })
+  }, [managerData])
 
   if (isLoading || !managerData) return null
 
@@ -259,6 +289,47 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   const bullishCount = Object.values(scores).filter(s => s.classification === 'bullish').length
   const bearishCount = Object.values(scores).filter(s => s.classification === 'bearish').length
   const neutralCount = symbolCount - bullishCount - bearishCount
+
+  function moveRoutingSymbol(symbol, targetMode) {
+    setRoutingGroups(prev => {
+      const without = {
+        manual: prev.manual.filter(s => s !== symbol),
+        market: prev.market.filter(s => s !== symbol),
+        symbol: prev.symbol.filter(s => s !== symbol),
+      }
+      return {
+        ...without,
+        [targetMode]: [...without[targetMode], symbol],
+      }
+    })
+  }
+
+  async function applyRoutingMove(symbol, fromMode, targetMode) {
+    if (!symbol || !targetMode || fromMode === targetMode || routingMut.isPending) return
+    moveRoutingSymbol(symbol, targetMode)
+    setDragOverMode(null)
+    setDragPayload(null)
+
+    try {
+      const nextMode = targetMode === 'manual' ? 'none' : targetMode
+      await routingMut.mutateAsync({ symbol, mode: nextMode })
+    } catch {
+      qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+    }
+  }
+
+  function handleDragStart(symbol, fromMode, event) {
+    setDragPayload({ symbol, fromMode })
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', `${symbol}:${fromMode}`)
+  }
+
+  function handleDrop(targetMode, event) {
+    event.preventDefault()
+    const payload = dragPayload
+    if (!payload) return
+    applyRoutingMove(payload.symbol, payload.fromMode, targetMode)
+  }
 
   return (
     <div className="card space-y-4">
@@ -391,33 +462,64 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
             )}
           </div>
           {/* Symbol group lists */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <div className="text-[11px] text-slate-500 mb-1 font-medium uppercase tracking-wide">Market Sentiment</div>
-              {(managerData.sentiment_groups?.market ?? []).length > 0 ? (
-                <div className="flex flex-wrap gap-1">
-                  {(managerData.sentiment_groups.market).map(sym => (
-                    <span key={sym} className="text-[11px] font-mono font-bold bg-blue-900/20 text-blue-300 border border-blue-800/30 px-1.5 py-0.5 rounded">{sym}</span>
-                  ))}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {[
+              {
+                mode: 'manual',
+                title: 'Manual',
+                badge: 'bg-dark-700 text-slate-300 border-dark-500',
+                hint: 'Dropped symbols use manual strategy selection.',
+              },
+              {
+                mode: 'market',
+                title: 'Market Sentiment',
+                badge: 'bg-blue-900/20 text-blue-300 border-blue-800/30',
+                hint: 'Uses overall market bucket routing.',
+              },
+              {
+                mode: 'symbol',
+                title: 'Symbol Sentiment',
+                badge: 'bg-emerald-900/20 text-emerald-300 border-emerald-800/30',
+                hint: 'Uses per-symbol sentiment routing.',
+              },
+            ].map(group => {
+              const syms = routingGroups[group.mode] ?? []
+              const isOver = dragOverMode === group.mode
+              return (
+                <div
+                  key={group.mode}
+                  className={`rounded-md border p-2 min-h-[66px] transition-colors ${
+                    isOver ? 'border-violet-500 bg-violet-500/10' : 'border-dark-600 bg-dark-900/40'
+                  }`}
+                  onDragOver={(e) => {
+                    e.preventDefault()
+                    if (!routingMut.isPending) setDragOverMode(group.mode)
+                  }}
+                  onDragLeave={() => setDragOverMode(prev => (prev === group.mode ? null : prev))}
+                  onDrop={(e) => handleDrop(group.mode, e)}
+                >
+                  <div className="text-[11px] text-slate-500 mb-1 font-medium uppercase tracking-wide">{group.title}</div>
+                  <div className="flex flex-wrap gap-1 min-h-[20px]">
+                    {syms.length > 0 ? syms.map(sym => (
+                      <span
+                        key={`${group.mode}-${sym}`}
+                        draggable={!routingMut.isPending}
+                        onDragStart={(e) => handleDragStart(sym, group.mode, e)}
+                        className={`text-[11px] font-mono font-bold border px-1.5 py-0.5 rounded cursor-grab active:cursor-grabbing ${group.badge}`}
+                        title="Drag to another routing bucket"
+                      >
+                        {sym}
+                      </span>
+                    )) : (
+                      <span className="text-[11px] text-slate-600">Empty</span>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-600 mt-1">{group.hint}</p>
                 </div>
-              ) : (
-                <span className="text-[11px] text-slate-600">None assigned</span>
-              )}
-            </div>
-            <div>
-              <div className="text-[11px] text-slate-500 mb-1 font-medium uppercase tracking-wide">Symbol Sentiment</div>
-              {(managerData.sentiment_groups?.symbol ?? []).length > 0 ? (
-                <div className="flex flex-wrap gap-1">
-                  {(managerData.sentiment_groups.symbol).map(sym => (
-                    <span key={sym} className="text-[11px] font-mono font-bold bg-emerald-900/20 text-emerald-300 border border-emerald-800/30 px-1.5 py-0.5 rounded">{sym}</span>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[11px] text-slate-600">None assigned</span>
-              )}
-            </div>
+              )
+            })}
           </div>
-          <p className="text-[11px] text-slate-600">Assign a Sentiment Mode per symbol in its position settings.</p>
+          <p className="text-[11px] text-slate-600">Drag symbol tags between Manual, Market Sentiment, and Symbol Sentiment to update routing.</p>
         </div>
       )}
 

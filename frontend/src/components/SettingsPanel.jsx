@@ -482,9 +482,13 @@ export default function SettingsPanel() {
               <div>
                 <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Live Ticker Bar</p>
                 <div className="space-y-4">
-                  <Field label="Scroll Speed" hint="Time in seconds for the ticker bar to scroll through all symbols once. Lower = faster.">
-                    <SliderInput value={uiForm.ticker_scroll_speed_s} onChange={v => setUi('ticker_scroll_speed_s', v)}
-                      min={5} max={120} step={5} formatLabel={v => `${v}s`} />
+                  <Field label="Symbol Rotate Interval" hint="How often each fixed ticker slot switches to the next watchlist symbol.">
+                    <SliderInput value={uiForm.ticker_rotate_ms} onChange={v => setUi('ticker_rotate_ms', v)}
+                      min={5_000} max={300_000} step={5_000} formatLabel={fmtMs} />
+                  </Field>
+                  <Field label="Preferred Slot Count" hint="Maximum visible ticker slots; automatically capped by current screen width.">
+                    <SliderInput value={uiForm.ticker_slot_count} onChange={v => setUi('ticker_slot_count', v)}
+                      min={1} max={12} step={1} formatLabel={v => `${v}`} />
                   </Field>
                 </div>
               </div>
