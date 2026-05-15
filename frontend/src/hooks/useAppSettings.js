@@ -22,6 +22,7 @@ export const SETTINGS_DEFAULTS = {
   sandbox_engine_ms:         10_000,   // Sandbox engine state
   portfolio_positions_ms:    10_000,   // Portfolio manager positions
   portfolio_detail_ms:        5_000,   // Position detail panel
+  sentiment_refresh_ms:      30_000,   // Sentiment score recalculation
   trading_status_ms:          5_000,   // IB connection status
   trading_positions_ms:       5_000,   // IB open positions
   trading_orders_ms:          5_000,   // IB open orders

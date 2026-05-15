@@ -111,4 +111,6 @@ class PortfolioManagerSettings(Base):
     take_profit_pct = Column(Float, default=0.0, nullable=False)
     hold_positions_overnight = Column(Boolean, default=True, nullable=False)
     eod_sell_window_minutes = Column(Integer, default=30, nullable=False)
+    sentiment_lookback_days = Column(Integer, default=5, nullable=False)
+    sentiment_interval = Column(String(10), default="1m", nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

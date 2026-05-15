@@ -146,6 +146,7 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
     if not pos:
         raise HTTPException(404, f"Position {symbol} not found.")
 
+    sentiment_mode_changed = False
     if req.strategy_name is not None:
         pos.strategy_name = req.strategy_name
     if req.strategy_enabled is not None:
@@ -156,6 +157,7 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
         pos.max_allocation_value = req.max_allocation_value
     if req.sentiment_mode is not None:
         pos.sentiment_mode = None if req.sentiment_mode == 'none' else req.sentiment_mode
+        sentiment_mode_changed = True
 
     if req.allocated_funds is not None:
         account = await get_account(db)
@@ -188,6 +190,12 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
     await db.commit()
     await db.refresh(pos)
     await offload_simulated_state(db)
+    
+    # Refresh sentiment routing if sentiment_mode changed
+    if sentiment_mode_changed:
+        from app.services.portfolio_manager import refresh_sentiment_routing
+        asyncio.create_task(refresh_sentiment_routing())
+    
     return position_dict(pos)
 
 

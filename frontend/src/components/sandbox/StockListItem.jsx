@@ -1,12 +1,39 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import { PlayIcon, StopCircleIcon } from '@heroicons/react/24/outline'
 import { getScripts } from '../../api/client'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
 
-export default function StockListItem({ pos, quote, sector, isSelected, onClick }) {
+const BULL_COLOR = '#10b981'
+const BEAR_COLOR = '#ef4444'
+const NEUTRAL_COLOR = '#64748b'
+
+function scoreToClassification(score) {
+  if (score >= 0.5) return 'euphoric'
+  if (score >= 0.1) return 'bullish'
+  if (score > -0.1) return 'neutral'
+  if (score > -0.5) return 'bearish'
+  return 'crash'
+}
+
+function pmClassColor(cls) {
+  if (cls === 'bullish' || cls === 'euphoric') return BULL_COLOR
+  if (cls === 'bearish' || cls === 'crash') return BEAR_COLOR
+  return NEUTRAL_COLOR
+}
+
+function pmClassLabel(cls) {
+  if (cls === 'bullish') return '▲'
+  if (cls === 'bearish') return '▼'
+  if (cls === 'euphoric') return '▲▲'
+  if (cls === 'crash') return '▼▼'
+  return '—'
+}
+
+export default function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggleEngineMut }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
   const [tooltipPos, setTooltipPos] = useState(null)
@@ -26,10 +53,30 @@ export default function StockListItem({ pos, quote, sector, isSelected, onClick 
   const totalPnl = pos.realized_pnl + unrealised
   const changePct = quote?.change_pct
   const positive = changePct == null ? null : changePct >= 0
+  const canToggleEngine = !!toggleEngineMut && !!pos.strategy_name
+
+  const handleRowKeyDown = useCallback((event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      onClick?.()
+    }
+  }, [onClick])
+
+  const handleToggleEngine = useCallback((event) => {
+    event.stopPropagation()
+    if (!canToggleEngine || toggleEngineMut.isPending) return
+    toggleEngineMut.mutate(pos.symbol)
+  }, [canToggleEngine, pos.symbol, toggleEngineMut])
 
   return (
     <div ref={wrapperRef} className="relative" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
-      <button onClick={onClick} className={`w-full text-left px-3 py-2.5 rounded-lg border transition-colors ${isSelected ? 'bg-emerald-600/20 border-emerald-600/40' : 'border-transparent hover:bg-dark-700'}`}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onClick}
+        onKeyDown={handleRowKeyDown}
+        className={`w-full cursor-pointer text-left px-3 py-2.5 rounded-lg border transition-colors ${isSelected ? 'bg-emerald-600/20 border-emerald-600/40' : 'border-transparent hover:bg-dark-700'}`}
+      >
         <div className="flex items-center justify-between mb-0.5">
           <span className="font-bold text-slate-100 text-sm">{pos.symbol}</span>
           <div className="flex items-center gap-1.5">
@@ -76,9 +123,22 @@ export default function StockListItem({ pos, quote, sector, isSelected, onClick 
                 return sc ? <span className="text-slate-400"> · {sc.name}</span> : null
               })() : null}
             </span>
-            <span className={`ml-auto text-[10px] font-semibold ${pos.strategy_enabled ? 'text-emerald-400' : 'text-slate-500'}`}>
-              {pos.strategy_enabled ? 'ON' : 'OFF'}
-            </span>
+            <button
+              type="button"
+              onClick={handleToggleEngine}
+              disabled={!canToggleEngine || toggleEngineMut.isPending}
+              className={`ml-auto inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50 ${
+                pos.strategy_enabled
+                  ? 'border border-red-700/40 bg-red-900/25 text-red-300 hover:bg-red-900/40'
+                  : 'border border-emerald-700/40 bg-emerald-900/25 text-emerald-300 hover:bg-emerald-900/40'
+              }`}
+              title={pos.strategy_enabled ? 'Stop engine' : 'Start engine'}
+            >
+              {pos.strategy_enabled
+                ? <><StopCircleIcon className="h-3 w-3" />Stop</>
+                : <><PlayIcon className="h-3 w-3" />Start</>
+              }
+            </button>
           </div>
         )}
         {(() => {
@@ -91,10 +151,22 @@ export default function StockListItem({ pos, quote, sector, isSelected, onClick 
             ? (pos.last_signal === 1 ? 'buy' : pos.last_signal === -1 ? 'sell' : 'hold')
             : null
           const sig = scriptSig ?? quotesignal(quote)
-          if (!s && !sig) return null
+          if (!pmScore && !sig) return null
           return (
             <div className="mt-1 flex flex-wrap gap-1">
-              {s && <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SENTIMENT_COLORS[s]}`}>{SENTIMENT_LABELS[s]}</div>}
+              {pmScore && (
+                <div
+                  className="inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium border-opacity-50"
+                  style={{
+                    borderColor: pmClassColor(pmScore.classification),
+                    backgroundColor: pmClassColor(pmScore.classification) + '15',
+                    color: pmClassColor(pmScore.classification)
+                  }}
+                  title={`PM: ${pmScore.score > 0 ? '+' : ''}${pmScore.score}`}
+                >
+                  {pmClassLabel(pmScore.classification)} PM
+                </div>
+              )}
               {sig && (
                 <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
                   {scriptSig ? '⚡ ' : ''}{SIGNAL_LABELS[sig]}
@@ -103,10 +175,11 @@ export default function StockListItem({ pos, quote, sector, isSelected, onClick 
             </div>
           )
         })()}
-      </button>
+      </div>
 
       {/* Hover tooltip */}
-      {quote && tooltipPos && createPortal(<div
+      {quote && tooltipPos && createPortal(
+        <div
           className="pointer-events-none fixed z-[9999] w-52 rounded-lg bg-dark-600 border border-dark-400 p-3 shadow-xl text-xs space-y-1.5"
           style={{ top: tooltipPos.top, left: tooltipPos.left }}
         >
@@ -119,10 +192,22 @@ export default function StockListItem({ pos, quote, sector, isSelected, onClick 
               ? (pos.last_signal === 1 ? 'buy' : pos.last_signal === -1 ? 'sell' : 'hold')
               : null
             const sig = scriptSig ?? quotesignal(quote)
-            if (!s && !sig) return null
+            if (!pmScore && !sig) return null
             return (
               <div className="flex flex-wrap gap-1">
-                {s && <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SENTIMENT_COLORS[s]}`}>{SENTIMENT_LABELS[s]}</div>}
+                {pmScore && (
+                  <div
+                    className="inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium border-opacity-50"
+                    style={{
+                      borderColor: pmClassColor(pmScore.classification),
+                      backgroundColor: pmClassColor(pmScore.classification) + '15',
+                      color: pmClassColor(pmScore.classification)
+                    }}
+                    title={`PM: ${pmScore.score > 0 ? '+' : ''}${pmScore.score}`}
+                  >
+                    {pmClassLabel(pmScore.classification)} PM
+                  </div>
+                )}
                 {sig && (
                   <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
                     {scriptSig ? '⚡ ' : ''}{SIGNAL_LABELS[sig]}

@@ -432,6 +432,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     allow_buy_outside_allocation: Optional[bool] = None
     market_sentiment_strategies: Optional[dict[str, str]] = None
     symbol_sentiment_strategies: Optional[dict[str, str]] = None
+    sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=365)
+    sentiment_interval: Optional[str] = Field(default=None, pattern="^(1m|5m|15m|30m|1h|daily)$")
 
 
 @router.get("/manager/state")

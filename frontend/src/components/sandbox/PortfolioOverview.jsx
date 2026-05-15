@@ -14,6 +14,32 @@ import { PIE_COLORS } from './sandboxConstants'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import MiniSparkline from '../dashboard/MiniSparkline'
 
+const BULL_COLOR = '#10b981'
+const BEAR_COLOR = '#ef4444'
+const NEUTRAL_COLOR = '#64748b'
+
+function scoreToClassification(score) {
+  if (score >= 0.5) return 'euphoric'
+  if (score >= 0.1) return 'bullish'
+  if (score > -0.1) return 'neutral'
+  if (score > -0.5) return 'bearish'
+  return 'crash'
+}
+
+function classColor(cls) {
+  if (cls === 'bullish' || cls === 'euphoric') return BULL_COLOR
+  if (cls === 'bearish' || cls === 'crash') return BEAR_COLOR
+  return NEUTRAL_COLOR
+}
+
+function classLabel(cls) {
+  if (cls === 'bullish') return '▲ Bullish'
+  if (cls === 'bearish') return '▼ Bearish'
+  if (cls === 'euphoric') return '▲▲ Euphoric'
+  if (cls === 'crash') return '▼▼ Crash'
+  return '— Neutral'
+}
+
 export default function PortfolioOverview({
   ibMode,
   accountData,
@@ -25,6 +51,7 @@ export default function PortfolioOverview({
   pieData,
   analytics,
   allTrades = [],
+  pmScores = {},
   onSelectSymbol,
 }) {
   const appSettings = useAppSettings()
@@ -106,6 +133,7 @@ export default function PortfolioOverview({
                 <thead>
                   <tr className="text-slate-500 border-b border-dark-600">
                     <th className="text-left pb-2 font-medium">Symbol</th>
+                    <th className="text-left pb-2 font-medium">PM Sentiment</th>
                     <th className="text-right pb-2 font-medium">Shares</th>
                     <th className="text-right pb-2 font-medium">Avg Price</th>
                     <th className="text-right pb-2 font-medium">Current</th>
@@ -144,6 +172,18 @@ export default function PortfolioOverview({
                           </div>
                           {q?.company_name && <div className="text-slate-600 truncate max-w-[100px] pl-4">{q.company_name}</div>}
                         </td>
+                        <td className="py-2 pl-2">
+                          {pmScores[pos.symbol] ? (
+                            <div className="flex items-center gap-1.5" title={`Score: ${pmScores[pos.symbol].score} — Updated: ${pmScores[pos.symbol].updated_at ? new Date(pmScores[pos.symbol].updated_at).toLocaleTimeString() : '?'}`}>
+                              <span className="text-xs font-semibold" style={{ color: classColor(pmScores[pos.symbol].classification) }}>
+                                {classLabel(pmScores[pos.symbol].classification)}
+                              </span>
+                              <span className="text-xs text-slate-500">({pmScores[pos.symbol].score > 0 ? '+' : ''}{pmScores[pos.symbol].score})</span>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-slate-600">—</span>
+                          )}
+                        </td>
                         <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? pos.shares.toFixed(3) : '—'}</td>
                         <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? fmtMoney(pos.avg_cost) : '—'}</td>
                         <td className={`text-right py-2 px-3 font-mono rounded transition-colors ${priceColor?.bgColor || ''} ${priceColor?.textColor || 'text-slate-200'}`}>
@@ -171,6 +211,7 @@ export default function PortfolioOverview({
                 <tfoot>
                   <tr className="border-t border-dark-500 text-slate-400 font-semibold">
                     <td className="pt-2">Total</td>
+                    <td />
                     <td />
                     <td />
                     <td />

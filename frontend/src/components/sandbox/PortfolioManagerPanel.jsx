@@ -57,6 +57,8 @@ function buildDraftFromSettings(settings) {
     take_profit_pct: settings.take_profit_pct ?? 0,
     hold_positions_overnight: settings.hold_positions_overnight ?? true,
     eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 30,
+    sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
+    sentiment_interval: settings.sentiment_interval ?? '1m',
   }
 }
 
@@ -276,6 +278,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
       take_profit_pct: Number(draft.take_profit_pct),
       hold_positions_overnight: draft.hold_positions_overnight,
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
+      sentiment_lookback_days: Number(draft.sentiment_lookback_days),
+      sentiment_interval: draft.sentiment_interval,
     })
   }
 
@@ -330,6 +334,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
 
   function handleDrop(targetMode, event) {
     event.preventDefault()
+    event.stopPropagation()
     const payload = dragPayload
     if (!payload) return
     applyRoutingMove(payload.symbol, payload.fromMode, targetMode)
@@ -611,6 +616,43 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                 <span className="text-xs text-slate-300">{draft.reallocation_enabled ? 'Enabled' : 'Disabled'}</span>
               </label>
             </SettingRow>
+
+            {draft.reallocation_enabled && draft.reallocation_mode === 'to_stock' && (
+            <SettingRow
+              label="Sentiment Lookback Period (days)"
+              hint="Number of days of historical data used to calculate position sentiment scores (1-365 days)."
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={1} max={365} step={1}
+                  value={draft.sentiment_lookback_days}
+                  onChange={e => updateDraft(d => ({ ...d, sentiment_lookback_days: e.target.value }))}
+                  className="input w-24 text-sm py-1.5"
+                />
+                <span className="text-xs text-slate-500">{draft.sentiment_lookback_days} day(s)</span>
+              </div>
+            </SettingRow>
+            )}
+
+            {draft.reallocation_enabled && draft.reallocation_mode === 'to_stock' && (
+            <SettingRow
+              label="Sentiment Data Interval"
+              hint="Time interval for historical data used in sentiment calculation (e.g., 1-minute bars, 5-minute bars, daily, etc.)."
+            >
+              <select
+                value={draft.sentiment_interval}
+                onChange={e => updateDraft(d => ({ ...d, sentiment_interval: e.target.value }))}
+                className="input text-sm py-1.5"
+              >
+                <option value="1m">1 minute</option>
+                <option value="5m">5 minutes</option>
+                <option value="15m">15 minutes</option>
+                <option value="30m">30 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="daily">Daily</option>
+              </select>
+            </SettingRow>
+            )}
 
             {draft.reallocation_enabled && (
               <SettingRow

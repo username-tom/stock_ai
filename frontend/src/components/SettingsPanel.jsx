@@ -458,6 +458,10 @@ export default function SettingsPanel() {
                     <SliderInput value={uiForm.portfolio_detail_ms} onChange={v => setUi('portfolio_detail_ms', v)}
                       min={5_000} max={120_000} step={5_000} formatLabel={fmtMs} />
                   </Field>
+                  <Field label="Sentiment Score Refresh" hint="How often sentiment scores are recalculated based on market conditions.">
+                    <SliderInput value={uiForm.sentiment_refresh_ms} onChange={v => setUi('sentiment_refresh_ms', v)}
+                      min={10_000} max={300_000} step={10_000} formatLabel={fmtMs} />
+                  </Field>
                 </div>
               </div>
 

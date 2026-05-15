@@ -65,6 +65,8 @@ _settings: dict[str, Any] = {
     "take_profit_pct": 0.0,
     "hold_positions_overnight": True,     # whether to hold positions between days
     "eod_sell_window_minutes": 30,        # minutes before market close to start sell-only mode
+    "sentiment_lookback_days": 5,         # days of historical data for sentiment calc
+    "sentiment_interval": "1m",           # interval: 1m, 5m, 15m, 1h, daily, etc.
 }
 
 # ── runtime state ─────────────────────────────────────────────────────────── #
@@ -123,6 +125,8 @@ async def _load_settings_from_db() -> None:
             _settings["take_profit_pct"] = float(getattr(row, "take_profit_pct", 0.0) or 0.0)
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", True))
             _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 30) or 30)
+            _settings["sentiment_lookback_days"] = int(getattr(row, "sentiment_lookback_days", 5) or 5)
+            _settings["sentiment_interval"] = getattr(row, "sentiment_interval", "1m") or "1m"
 
 
 async def _save_settings_to_db() -> None:
@@ -154,6 +158,8 @@ async def _save_settings_to_db() -> None:
         row.take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", True)
         row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+        row.sentiment_lookback_days = int(_settings.get("sentiment_lookback_days", 5) or 5)
+        row.sentiment_interval = _settings.get("sentiment_interval", "1m") or "1m"
         await db.commit()
 
 
@@ -163,8 +169,9 @@ def update_manager_settings(new: dict) -> dict:
                "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
                "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation",
                "market_sentiment_strategies", "symbol_sentiment_strategies",
-               "sentiment_strategy_enabled", "stop_loss_pct", "take_profit_pct",
-               "hold_positions_overnight", "eod_sell_window_minutes"}
+              "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_interval",
+              "stop_loss_pct", "take_profit_pct",
+              "hold_positions_overnight", "eod_sell_window_minutes"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -177,7 +184,10 @@ def update_manager_settings(new: dict) -> dict:
 async def _fetch_bars(symbol: str) -> pd.DataFrame:
     """Fetch recent intraday bars for scoring (re-uses the shared market_service helper)."""
     from app.services.market_service import get_intraday_df
-    df = await get_intraday_df(symbol, range_="5d", interval="1m", include_pre_post=False)
+    lookback_days = _settings.get("sentiment_lookback_days", 5)
+    interval = _settings.get("sentiment_interval", "1m")
+    range_str = f"{lookback_days}d"
+    df = await get_intraday_df(symbol, range_=range_str, interval=interval, include_pre_post=False)
     return df[["Close", "Volume"]]
 
 
@@ -650,10 +660,22 @@ async def _do_transfer() -> None:
 
 # ── main loop ─────────────────────────────────────────────────────────────── #
 
+async def refresh_sentiment_routing() -> None:
+    """Refresh sentiment_groups from current position routing data."""
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.sentiment_mode.isnot(None)))
+        positions: list[SandboxPosition] = res.scalars().all()
+        market_syms = [p.symbol for p in positions if p.sentiment_mode == "market"]
+        symbol_syms = [p.symbol for p in positions if p.sentiment_mode == "symbol"]
+        _state["sentiment_groups"] = {"market": market_syms, "symbol": symbol_syms}
+
+
 async def run_portfolio_manager() -> None:
     """Long-running coroutine – start as an asyncio task from app lifespan."""
     _state["running"] = True
     await _load_settings_from_db()
+    await refresh_sentiment_routing()
     logger.info("Portfolio Manager task started (enabled=%s).", _settings["enabled"])
 
     last_transfer = 0.0

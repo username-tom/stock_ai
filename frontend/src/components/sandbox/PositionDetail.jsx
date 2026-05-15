@@ -430,7 +430,7 @@ export default function PositionDetail({
             )}
           </div>
           <div className="flex items-center gap-2">
-            {selectedPos.strategy_name && !editingStrategy && (
+            {selectedPos.strategy_name && (
               <button
                 className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 font-semibold transition-colors disabled:opacity-50 ${
                   selectedPos.strategy_enabled

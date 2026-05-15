@@ -581,6 +581,8 @@ export default function SandboxPanel() {
         quotes={quotes}
         sectors={sectors}
         selectedSymbol={selectedSymbol}
+        pmScores={managerState?.scores ?? {}}
+        toggleEngineMut={toggleEngineMut}
         onSelectSymbol={handleSelectSymbol}
         onShowOverview={() => handleSelectSymbol(null)}
         onAddIbWatchlistSymbol={handleIbWatchlistAdd}
@@ -879,6 +881,7 @@ export default function SandboxPanel() {
               pieData={pieData}
               analytics={analytics}
               allTrades={allTrades}
+              pmScores={managerState?.scores ?? {}}
               onSelectSymbol={handleSelectSymbol}
             />
           ) : !selectedPos ? (

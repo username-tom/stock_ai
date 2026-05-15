@@ -22,6 +22,8 @@ export default function SandboxSidebar({
   quotes,
   sectors,
   selectedSymbol,
+  pmScores = {},
+  toggleEngineMut,
   onSelectSymbol,
   onShowOverview,
   onAddIbWatchlistSymbol,
@@ -291,7 +293,9 @@ export default function SandboxSidebar({
           {positions.map(pos => (
             <StockListItem key={pos.symbol} pos={pos} quote={quotes[pos.symbol]}
               sector={sectors?.[pos.symbol]}
+              pmScore={pmScores[pos.symbol]}
               isSelected={selectedSymbol === pos.symbol}
+              toggleEngineMut={toggleEngineMut}
               onClick={() => onSelectSymbol(pos.symbol)} />
           ))}
           {positions.length === 0 && (
