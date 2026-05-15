@@ -88,6 +88,24 @@ def _regular_session_is_open() -> bool:
     t = now_et.time()
     return _MARKET_OPEN <= t < _MARKET_CLOSE
 
+
+def _is_in_eod_sell_window(eod_sell_window_minutes: int) -> bool:
+    """Return True if currently within the end-of-day sell window.
+
+    The sell window runs from (16:00 - window_duration) to 16:00 ET.
+    """
+    now_et = datetime.now(tz=_ET)
+    if now_et.weekday() >= 5:
+        return False
+    
+    eod_start_minutes = _MARKET_CLOSE.hour * 60 + _MARKET_CLOSE.minute - eod_sell_window_minutes
+    eod_start_hour = eod_start_minutes // 60
+    eod_start_min = eod_start_minutes % 60
+    eod_start_time = dt_time(eod_start_hour, eod_start_min)
+    
+    t = now_et.time()
+    return eod_start_time <= t < _MARKET_CLOSE
+
 # ── shared state ──────────────────────────────────────────────────────────── #
 _running = False
 _last_tick: datetime | None = None
@@ -246,7 +264,20 @@ async def _process_symbol(
 
         strat_label = strategy_name.split(':')[0]
 
+        # End-of-day sell override: force liquidation if EOD window is active
+        # and hold_positions_overnight is disabled
         if pos.shares > 0 and pos.avg_cost > 0:
+            from app.services.portfolio_manager import get_manager_settings
+            manager_settings = get_manager_settings()
+            hold_overnight = manager_settings.get("hold_positions_overnight", True)
+            eod_window_mins = manager_settings.get("eod_sell_window_minutes", 30)
+            
+            if not hold_overnight and _is_in_eod_sell_window(eod_window_mins):
+                action = "SELL"
+                reason = f"end_of_day_liquidation (window: {eod_window_mins}min)"
+
+        # Standard risk exits: stop loss and take profit
+        if action is None and pos.shares > 0 and pos.avg_cost > 0:
             if stop_loss_pct > 0:
                 stop_price = pos.avg_cost * (1.0 - stop_loss_pct / 100.0)
                 if current_price <= stop_price:

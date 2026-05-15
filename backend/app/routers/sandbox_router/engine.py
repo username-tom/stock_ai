@@ -88,6 +88,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     sentiment_strategy_enabled: Optional[bool] = None
     stop_loss_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     take_profit_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    hold_positions_overnight: Optional[bool] = None
+    eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
 
 
 @router.get("/manager/state")

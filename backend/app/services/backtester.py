@@ -101,6 +101,8 @@ def run_backtest(
     script_code: str | None = None,
     data_source: DataSource = "yfinance",
     day_trade: bool = False,
+    hold_positions_overnight: bool = True,
+    eod_sell_window_minutes: int = 30,
     **strategy_params,
 ) -> dict[str, Any]:
     """
@@ -118,6 +120,9 @@ def run_backtest(
     finest available interval (IB: 5s when available; Yahoo: 1m → 2m → 5m)
     and scales all annualisation calculations accordingly. Note that Yahoo
     Finance limits 1m data to the last 7 days and 2m/5m to the last 60 days.
+
+    When *hold_positions_overnight* is ``False`` and *eod_sell_window_minutes* is set,
+    positions are force-liquidated during the end-of-day sell window.
 
     Returns a dict with:
       - metrics (performance summary)
@@ -153,21 +158,40 @@ def run_backtest(
     else:
         bars_per_year = _interval_bars.get(interval, 252)
 
-    # Pre-compute the last regular-session bar index for each calendar date so
-    # the engine can force-close open positions at the end of each trading day.
+    # Pre-compute bar indices for end-of-day sell window logic.
+    # If hold_positions_overnight is False, force-close during the EOD window.
+    # Otherwise, use the existing logic (force-close at last regular bar if day_trade).
+    eod_sell_bars: set = set()
     last_regular_bar: set = set()
+    
     if day_trade and "session" in df.columns:
         regular_mask = df["session"] == "regular"
         regular_df = df[regular_mask]
         if not regular_df.empty:
-            # Group by calendar date (in ET) and take the last bar of each day
-            et_dates = regular_df.index.tz_convert("America/New_York").date
-            for _date in set(et_dates):
+            # Group by calendar date (in ET) and identify bars in EOD window
+            et_dates = regular_df.index.tz_convert("America/New_York")
+            et_times = et_dates.time
+            
+            for _date in set(et_dates.date):
                 day_bars = regular_df[
                     [d == _date for d in regular_df.index.tz_convert("America/New_York").date]
                 ]
                 if not day_bars.empty:
-                    last_regular_bar.add(day_bars.index[-1])
+                    # Last bar of the day
+                    last_bar_idx = day_bars.index[-1]
+                    last_regular_bar.add(last_bar_idx)
+                    
+                    # EOD sell window: bars within eod_sell_window_minutes of 16:00 ET
+                    if not hold_positions_overnight:
+                        eod_start_hour = (16 * 60 - eod_sell_window_minutes) // 60
+                        eod_start_min = (16 * 60 - eod_sell_window_minutes) % 60
+                        from datetime import time as dt_time
+                        eod_cutoff = dt_time(eod_start_hour, eod_start_min)
+                        
+                        for idx in day_bars.index:
+                            bar_time = idx.tz_convert("America/New_York").time()
+                            if bar_time >= eod_cutoff:
+                                eod_sell_bars.add(idx)
 
     # stop_loss_pct is a universal safeguard param (0 = disabled)
     _raw_slp = strategy_params.pop("stop_loss_pct", 0.0)
@@ -211,8 +235,21 @@ def run_backtest(
         session = str(row.get("session", "regular")) if day_trade else "regular"
         is_regular = session == "regular"
 
-        # ── Day-trade: force-close at end of last regular bar of the day ──── #
-        if day_trade and date in last_regular_bar and shares > 0:
+        # ── Intraday: force-close positions when needed ──────────────────────── #
+        # If hold_positions_overnight is False, close during EOD window.
+        # Otherwise (hold=True), close at end of day only if day_trade mode.
+        should_force_close = False
+        close_reason = None
+        
+        if day_trade:
+            if not hold_positions_overnight and date in eod_sell_bars:
+                should_force_close = True
+                close_reason = "eod_liquidation"
+            elif hold_positions_overnight and date in last_regular_bar:
+                should_force_close = True
+                close_reason = "eod_close"
+        
+        if should_force_close and shares > 0:
             proceeds = shares * price - shares * commission
             pnl = proceeds - (shares * entry_price + shares * commission)
             trades.append(
@@ -225,7 +262,7 @@ def run_backtest(
                     "quantity": shares,
                     "pnl": round(pnl, 2),
                     "entry_reason": entry_reason or "signal",
-                    "exit_reason": "eod_close",
+                    "exit_reason": close_reason,
                 }
             )
             cash += proceeds
@@ -466,12 +503,17 @@ def run_sentiment_backtest(
     sentiment_warmup: int = 35,
     stop_loss_pct: float = 0.0,
     take_profit_pct: float = 0.0,
+    hold_positions_overnight: bool = True,
+    eod_sell_window_minutes: int = 30,
 ) -> "dict[str, Any]":
     """Backtest where the active strategy auto-switches based on rolling sentiment.
 
     Sentiment is derived from RSI + MACD + SMA computed on the OHLCV data.
     Open positions are force-closed whenever the active strategy changes.
     The first ``sentiment_warmup`` bars use the *neutral* bucket's strategy.
+
+    When *hold_positions_overnight* is False, positions are force-liquidated
+    during the end-of-day sell window (last eod_sell_window_minutes before market close).
 
     ``sentiment_strategies`` maps bucket labels to strategy type strings::
 
@@ -505,6 +547,24 @@ def run_sentiment_backtest(
         "1h": 252 * 6.5, "1d": 252,
     }
     bars_per_year = _interval_bars.get(interval, 252)
+
+    # Pre-compute bar indices for end-of-day sell window logic
+    eod_sell_bars: set = set()
+    if day_trade and "session" in df.columns:
+        regular_mask = df["session"] == "regular"
+        regular_df = df[regular_mask]
+        if not regular_df.empty and not hold_positions_overnight:
+            # Identify bars in EOD window
+            et_dates = regular_df.index.tz_convert("America/New_York")
+            eod_start_hour = (16 * 60 - eod_sell_window_minutes) // 60
+            eod_start_min = (16 * 60 - eod_sell_window_minutes) % 60
+            from datetime import time as dt_time
+            eod_cutoff = dt_time(eod_start_hour, eod_start_min)
+            
+            for idx in regular_df.index:
+                bar_time = idx.tz_convert("America/New_York").time()
+                if bar_time >= eod_cutoff:
+                    eod_sell_bars.add(idx)
 
     # Sentiment buckets; force neutral during warmup to avoid indicator noise
     buckets = _compute_sentiment_buckets(df["Close"])
@@ -543,6 +603,34 @@ def run_sentiment_backtest(
         price = float(row["Close"])
         bucket = str(buckets.iloc[i])
         active_strat = strat_map[bucket]
+
+        # End-of-day liquidation: force-close positions during EOD window
+        if day_trade and date in eod_sell_bars and shares > 0 and entry_price is not None:
+            proceeds = shares * price - shares * commission
+            pnl = proceeds - (shares * entry_price + shares * commission)
+            trades.append({
+                "entry_date": entry_date,
+                "exit_date": _fmt_ts(date),
+                "side": "BUY",
+                "entry_price": round(entry_price, 4),
+                "exit_price": round(price, 4),
+                "quantity": shares,
+                "pnl": round(pnl, 2),
+                "entry_reason": entry_strategy or "signal",
+                "exit_reason": "eod_liquidation",
+                "entry_strategy": entry_strategy,
+                "exit_strategy": active_strat,
+                "entry_bucket": entry_bucket_str,
+                "exit_bucket": bucket,
+            })
+            cash += proceeds
+            shares = 0.0
+            entry_price = None
+            entry_date = None
+            entry_strategy = None
+            entry_bucket_str = None
+            equity_values.append(cash)
+            continue
 
         # Universal risk exits (optional): checked before strategy signals.
         if shares > 0 and entry_price is not None:

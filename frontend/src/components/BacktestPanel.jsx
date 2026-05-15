@@ -255,6 +255,8 @@ export default function BacktestPanel() {
     initial_capital: 10000,
     commission: 0.005,
     day_trade: true,
+    hold_positions_overnight: true,
+    eod_sell_window_minutes: 30,
   })
   const [commissionPreset, setCommissionPreset] = useState('0.005')
   const [stratParams, setStratParams] = useState({ fast_period: 10, slow_period: 30, ma_type: 'SMA' })
@@ -288,6 +290,8 @@ export default function BacktestPanel() {
     sentiment_warmup: 35,
     stop_loss_pct: 0,
     take_profit_pct: 0,
+    hold_positions_overnight: true,
+    eod_sell_window_minutes: 30,
   })
   const [sentResult, setSentResult] = useState(null)
   const [sentActiveTab, setSentActiveTab] = useState('equity')
@@ -333,6 +337,8 @@ export default function BacktestPanel() {
       sentiment_warmup: sentForm.sentiment_warmup,
       stop_loss_pct: sentForm.stop_loss_pct,
       take_profit_pct: sentForm.take_profit_pct,
+      hold_positions_overnight: sentForm.hold_positions_overnight,
+      eod_sell_window_minutes: sentForm.eod_sell_window_minutes,
     })
   }
 
@@ -706,6 +712,48 @@ export default function BacktestPanel() {
                 ⚠ Yahoo Finance limits: 1m data to last 7 days, 2m/5m to last 60 days.
               </div>
             )}
+
+          {/* End-of-Day Settings */}
+          <div className="space-y-3 border-t border-dark-600 pt-4">
+            <label className="flex items-center gap-3 cursor-pointer select-none">
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  checked={form.hold_positions_overnight}
+                  onChange={e => setForm(f => ({ ...f, hold_positions_overnight: e.target.checked }))}
+                />
+                <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-emerald-600 transition-colors" />
+                <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+              </div>
+              <div>
+                <div className="text-sm font-medium text-slate-200">
+                  {form.hold_positions_overnight ? 'Hold Overnight' : 'Liquidate at EOD'}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {form.hold_positions_overnight ? 'Keep positions open overnight' : 'Force-close positions before market close'}
+                </div>
+              </div>
+            </label>
+            
+            {!form.hold_positions_overnight && (
+              <div>
+                <label className="label">End-of-Day Sell Window (minutes)</label>
+                <div className="flex items-center gap-3">
+                  <input
+                    className="flex-1 input"
+                    type="range"
+                    min="1"
+                    max="240"
+                    value={form.eod_sell_window_minutes}
+                    onChange={e => setForm(f => ({ ...f, eod_sell_window_minutes: Number(e.target.value) }))}
+                  />
+                  <span className="text-sm font-medium text-orange-400 w-12 text-right">{form.eod_sell_window_minutes}m</span>
+                </div>
+                <p className="text-xs text-slate-400 mt-1">Duration before market close (16:00 ET) to start EOD liquidation</p>
+              </div>
+            )}
+          </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -1174,6 +1222,48 @@ export default function BacktestPanel() {
                     <div className="text-xs text-slate-500">Use intraday data (IB: 5s; Yahoo: 1m → 2m → 5m)</div>
                   </div>
                 </label>
+              </div>
+
+              {/* End-of-Day Settings */}
+              <div className="space-y-3 border-t border-dark-600 pt-4">
+                <label className="flex items-center gap-3 cursor-pointer select-none">
+                  <div className="relative">
+                    <input
+                      type="checkbox"
+                      className="sr-only peer"
+                      checked={sentForm.hold_positions_overnight}
+                      onChange={e => setSentForm(f => ({ ...f, hold_positions_overnight: e.target.checked }))}
+                    />
+                    <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-emerald-600 transition-colors" />
+                    <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-200">
+                      {sentForm.hold_positions_overnight ? 'Hold Overnight' : 'Liquidate at EOD'}
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {sentForm.hold_positions_overnight ? 'Keep positions open overnight' : 'Force-close positions before market close'}
+                    </div>
+                  </div>
+                </label>
+                
+                {!sentForm.hold_positions_overnight && (
+                  <div>
+                    <label className="label">End-of-Day Sell Window (minutes)</label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        className="flex-1 input"
+                        type="range"
+                        min="1"
+                        max="240"
+                        value={sentForm.eod_sell_window_minutes}
+                        onChange={e => setSentForm(f => ({ ...f, eod_sell_window_minutes: Number(e.target.value) }))}
+                      />
+                      <span className="text-sm font-medium text-orange-400 w-12 text-right">{sentForm.eod_sell_window_minutes}m</span>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1">Duration before market close (16:00 ET) to start EOD liquidation</p>
+                  </div>
+                )}
               </div>
 
               {/* Sentiment strategy map */}

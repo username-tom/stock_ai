@@ -55,6 +55,8 @@ function buildDraftFromSettings(settings) {
     sentiment_strategy_enabled: settings.sentiment_strategy_enabled ?? true,
     stop_loss_pct: settings.stop_loss_pct ?? 0,
     take_profit_pct: settings.take_profit_pct ?? 0,
+    hold_positions_overnight: settings.hold_positions_overnight ?? true,
+    eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 30,
   }
 }
 
@@ -272,6 +274,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
       sentiment_strategy_enabled: draft.sentiment_strategy_enabled,
       stop_loss_pct: Number(draft.stop_loss_pct),
       take_profit_pct: Number(draft.take_profit_pct),
+      hold_positions_overnight: draft.hold_positions_overnight,
+      eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
     })
   }
 
@@ -417,6 +421,12 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
           Risk exits: SL {Number(settings.stop_loss_pct ?? 0).toFixed(1)}% | TP {Number(settings.take_profit_pct ?? 0).toFixed(1)}%
+        </span>
+        <span className={`flex items-center gap-1 ${settings.hold_positions_overnight ? 'text-slate-600' : 'text-orange-400'}`}>
+          <ClockIcon className="h-3.5 w-3.5" />
+          {settings.hold_positions_overnight
+            ? 'Hold positions overnight'
+            : `EOD liquidation window: ${settings.eod_sell_window_minutes}min before close`}
         </span>
       </div>
 
@@ -945,6 +955,43 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                 ))}
               </div>
             </SettingRow>
+
+            <hr className="border-dark-600 my-4" />
+
+            <SettingRow
+              label="Hold Positions Overnight"
+              hint="When enabled, positions are held between days. When disabled, an end-of-day sell window forces liquidation."
+            >
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.hold_positions_overnight ? 'bg-violet-600' : 'bg-dark-600'}`}
+                  onClick={() => {
+                    if (!editSettings) return
+                    updateDraft(d => ({ ...d, hold_positions_overnight: !d.hold_positions_overnight }))
+                  }}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.hold_positions_overnight ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs text-slate-300">{draft.hold_positions_overnight ? 'Hold Overnight' : 'Liquidate at EOD'}</span>
+              </label>
+            </SettingRow>
+
+            {!draft.hold_positions_overnight && (
+              <SettingRow
+                label="End-of-Day Sell Window (minutes)"
+                hint="Duration in minutes before market close (16:00 ET) when positions are force-liquidated. The engine will only sell during this window, regardless of TP/SL."
+              >
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number" min={1} max={240} step={1}
+                    value={draft.eod_sell_window_minutes}
+                    onChange={e => updateDraft(d => ({ ...d, eod_sell_window_minutes: e.target.value }))}
+                    className="input w-32 text-sm py-1.5"
+                  />
+                  <span className="text-slate-400 text-sm">minutes before 16:00 ET</span>
+                </div>
+              </SettingRow>
+            )}
 
           </fieldset>
         </div>

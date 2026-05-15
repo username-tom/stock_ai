@@ -61,6 +61,16 @@ class BacktestRequest(BaseModel):
             "Note: Yahoo Finance limits 1m data to the last 7 days."
         ),
     )
+    hold_positions_overnight: bool = Field(
+        default=True,
+        description="When False, forces liquidation at end of day during eod_sell_window."
+    )
+    eod_sell_window_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=240,
+        description="Duration in minutes before market close (16:00 ET) for EOD liquidation."
+    )
 
 
 @router.get("/strategies")
@@ -95,6 +105,16 @@ class SentimentBacktestRequest(BaseModel):
     sentiment_warmup: int = Field(default=35, ge=5, le=500)
     stop_loss_pct: float = Field(default=0.0, ge=0.0, le=100.0)
     take_profit_pct: float = Field(default=0.0, ge=0.0, le=1000.0)
+    hold_positions_overnight: bool = Field(
+        default=True,
+        description="When False, forces liquidation at end of day during eod_sell_window."
+    )
+    eod_sell_window_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=240,
+        description="Duration in minutes before market close (16:00 ET) for EOD liquidation."
+    )
 
     def validate_strategies(self) -> None:
         aliases = {
@@ -139,6 +159,8 @@ async def run_sentiment_backtest_endpoint(
             sentiment_warmup=req.sentiment_warmup,
             stop_loss_pct=req.stop_loss_pct,
             take_profit_pct=req.take_profit_pct,
+            hold_positions_overnight=req.hold_positions_overnight,
+            eod_sell_window_minutes=req.eod_sell_window_minutes,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -233,6 +255,8 @@ async def run_backtest_endpoint(
             script_code=script_code,
             data_source=req.data_source,
             day_trade=req.day_trade,
+            hold_positions_overnight=req.hold_positions_overnight,
+            eod_sell_window_minutes=req.eod_sell_window_minutes,
             **req.strategy_params,
         )
     except ValueError as exc:
