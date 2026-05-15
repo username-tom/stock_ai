@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import math
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -13,6 +14,7 @@ from typing import Optional, List
 
 from app.database import get_db
 from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade
+from app.services.market_calendar import count_nyse_trading_days
 
 router = APIRouter(prefix="/api/sandbox", tags=["sandbox"])
 
@@ -354,6 +356,90 @@ async def get_analytics(db: AsyncSession = Depends(get_db)):
         "symbol_pnl": symbol_pnl,
         "win_loss": {"wins": wins, "losses": losses, "breakeven": breakeven},
         "total_trades": len(trades),
+    }
+
+
+@router.get("/realized-metrics")
+async def get_realized_metrics(db: AsyncSession = Depends(get_db)):
+    """Return realized-performance metrics computed from full sandbox trade log."""
+    trades_res = await db.execute(
+        select(SandboxTrade)
+        .where(SandboxTrade.pnl.isnot(None))
+        .order_by(SandboxTrade.created_at)
+    )
+    realized_trades = trades_res.scalars().all()
+
+    account = await _get_account(db)
+    total_deposited = float(account.total_deposited or 0.0)
+    def _to_utc(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    realized_points = [
+        (_to_utc(t.created_at), float(t.pnl or 0.0))
+        for t in realized_trades
+        if _to_utc(t.created_at) is not None
+    ]
+
+    realized_pnl_sum = float(sum(pnl for _, pnl in realized_points))
+
+    first_realized_at = None
+    elapsed_calendar_days = None
+    elapsed_trading_days = None
+    if realized_points:
+        first_realized_at = realized_points[0][0]
+        now_utc = datetime.now(timezone.utc)
+        elapsed_calendar_days = max(1, (now_utc - first_realized_at).days)
+        elapsed_trading_days = max(1, count_nyse_trading_days(first_realized_at, now_utc))
+
+    trade_days = {dt.date().isoformat() for dt, _ in realized_points}
+    realized_trade_days = len(trade_days)
+
+    now_utc = datetime.now(timezone.utc)
+    today_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start_utc = today_start_utc - timedelta(days=today_start_utc.weekday())
+    month_start_utc = today_start_utc.replace(day=1)
+
+    daily_realized_pnl = sum(pnl for dt, pnl in realized_points if dt >= today_start_utc)
+    weekly_realized_pnl = sum(pnl for dt, pnl in realized_points if dt >= week_start_utc)
+    monthly_realized_pnl = sum(pnl for dt, pnl in realized_points if dt >= month_start_utc)
+
+    daily_realized_pnl_pct = (daily_realized_pnl / total_deposited) * 100 if total_deposited > 0 else None
+    weekly_realized_pnl_pct = (weekly_realized_pnl / total_deposited) * 100 if total_deposited > 0 else None
+    monthly_realized_pnl_pct = (monthly_realized_pnl / total_deposited) * 100 if total_deposited > 0 else None
+
+    avg_daily_realized_pnl = (
+        round(realized_pnl_sum / realized_trade_days, 4)
+        if realized_trade_days > 0
+        else None
+    )
+
+    annualized_return_pct = None
+    if elapsed_trading_days is not None and total_deposited > 0:
+        realized_return_decimal = realized_pnl_sum / total_deposited
+        if realized_return_decimal > -1:
+            annualized_return_pct = (math.pow(1 + realized_return_decimal, 252 / elapsed_trading_days) - 1) * 100
+            annualized_return_pct = round(annualized_return_pct, 4)
+
+    return {
+        "realized_pnl_sum": round(realized_pnl_sum, 4),
+        "total_deposited": round(total_deposited, 4),
+        "first_realized_at": first_realized_at.isoformat() if first_realized_at else None,
+        "elapsed_days": elapsed_trading_days,
+        "elapsed_trading_days": elapsed_trading_days,
+        "elapsed_calendar_days": elapsed_calendar_days,
+        "realized_trade_days": realized_trade_days,
+        "daily_realized_pnl": round(daily_realized_pnl, 4),
+        "weekly_realized_pnl": round(weekly_realized_pnl, 4),
+        "monthly_realized_pnl": round(monthly_realized_pnl, 4),
+        "daily_realized_pnl_pct": round(daily_realized_pnl_pct, 4) if daily_realized_pnl_pct is not None else None,
+        "weekly_realized_pnl_pct": round(weekly_realized_pnl_pct, 4) if weekly_realized_pnl_pct is not None else None,
+        "monthly_realized_pnl_pct": round(monthly_realized_pnl_pct, 4) if monthly_realized_pnl_pct is not None else None,
+        "avg_daily_realized_pnl": avg_daily_realized_pnl,
+        "annualized_return_pct": annualized_return_pct,
     }
 
 

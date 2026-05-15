@@ -24,6 +24,7 @@ import httpx
 
 from app.services import symbol_registry
 from app.services.ib_service import IB_AVAILABLE, ib_service
+from app.services.market_calendar import is_nyse_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ async def _yf_chart(symbol: str, range_: str = "5d", interval: str = "1d", inclu
 def _market_state_now() -> str:
     """Return the current US equity session in America/New_York."""
     now_et = datetime.now(tz=_ET)
-    if now_et.weekday() >= 5:
+    if not is_nyse_trading_day(now_et.date()):
         return "CLOSED"
 
     current_time = now_et.time()

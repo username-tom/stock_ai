@@ -14,7 +14,7 @@ import {
   resetIBPaperPortfolio,
   getIBPositions, getIBOrders,
   getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
-  getSandboxAnalytics,
+  getSandboxAnalytics, getSandboxRealizedMetrics,
   getPortfolioManagerState, togglePortfolioManager,
   bulkUpdateSandboxStrategy,
 } from '../api/client'
@@ -212,12 +212,13 @@ export default function SandboxPanel() {
   // engine state & analytics
   const { data: engineState } = useQuery({ queryKey: ['sandbox-engine-state'], queryFn: getSandboxEngineState, refetchInterval: appSettings.sandbox_engine_ms })
   const { data: analytics } = useQuery({ queryKey: ['sandbox-analytics'], queryFn: getSandboxAnalytics, refetchInterval: appSettings.sandbox_quotes_ms })
+  const { data: realizedMetrics } = useQuery({ queryKey: ['sandbox-realized-metrics'], queryFn: getSandboxRealizedMetrics, refetchInterval: appSettings.sandbox_trades_ms })
   const { data: managerState } = useQuery({ queryKey: ['portfolio-manager-state'], queryFn: getPortfolioManagerState, refetchInterval: appSettings.sandbox_engine_ms })
 
   // all recent trades (for notification + activity log)
   const { data: allTradesData } = useQuery({
     queryKey: ['sandbox-trades-all'],
-    queryFn: () => getSandboxTrades(undefined, 50),
+    queryFn: () => getSandboxTrades(undefined, 200),
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const allTrades = allTradesData?.trades ?? []
@@ -850,6 +851,7 @@ export default function SandboxPanel() {
               totalRealizedPnl={totalRealizedPnl}
               pieData={pieData}
               analytics={analytics}
+              realizedMetrics={realizedMetrics}
               allTrades={allTrades}
               pmScores={managerState?.scores ?? {}}
               managerSettings={managerState?.settings ?? null}

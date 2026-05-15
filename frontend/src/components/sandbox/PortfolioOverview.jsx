@@ -59,6 +59,7 @@ export default function PortfolioOverview({
   totalRealizedPnl,
   pieData,
   analytics,
+  realizedMetrics,
   allTrades = [],
   pmScores = {},
   managerSettings = null,
@@ -85,7 +86,6 @@ export default function PortfolioOverview({
     : null
   const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : null
 
-  // Use analytics cumulative series for period P&L to avoid truncation from recent-trades limits.
   const cumulativeSeries = analytics?.cumulative_pnl ?? []
   const parsePointDate = (value) => {
     if (!value || typeof value !== 'string') return null
@@ -106,21 +106,134 @@ export default function PortfolioOverview({
   const latestCumulative = cumulativeSeries.length > 0
     ? Number(cumulativeSeries[cumulativeSeries.length - 1]?.value ?? 0)
     : 0
+  const numOrNull = (value) => {
+    const n = Number(value)
+    return Number.isFinite(n) ? n : null
+  }
 
-  // Daily P&L: change in cumulative P&L since local midnight.
-  const todayStart = new Date()
-  todayStart.setHours(0, 0, 0, 0)
-  const dailyBase = cumulativeBefore(new Date(todayStart.getTime() - 1))
-  const dailyPnl = latestCumulative - dailyBase
-  const dailyPnlPct = totalDeposited > 0 ? (dailyPnl / totalDeposited) * 100 : null
+  // Fallback period metrics from cumulative curve if backend metrics are temporarily unavailable.
+  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+  const weekStart = new Date(todayStart); weekStart.setDate(weekStart.getDate() - (weekStart.getDay() === 0 ? 6 : weekStart.getDay() - 1))
+  const monthStart = new Date(todayStart); monthStart.setDate(1)
+  const dailyPnlFallback = latestCumulative - cumulativeBefore(new Date(todayStart.getTime() - 1))
+  const weeklyPnlFallback = latestCumulative - cumulativeBefore(new Date(weekStart.getTime() - 1))
+  const monthlyPnlFallback = latestCumulative - cumulativeBefore(new Date(monthStart.getTime() - 1))
 
-  // Weekly P&L: change in cumulative P&L since Monday 00:00 (week-to-date).
-  const weekStart = new Date(todayStart)
-  const dow = weekStart.getDay()
-  weekStart.setDate(weekStart.getDate() - (dow === 0 ? 6 : dow - 1))
-  const weeklyBase = cumulativeBefore(new Date(weekStart.getTime() - 1))
-  const weeklyPnl = latestCumulative - weeklyBase
-  const weeklyPnlPct = totalDeposited > 0 ? (weeklyPnl / totalDeposited) * 100 : null
+  const dailyPnl = numOrNull(realizedMetrics?.daily_realized_pnl) ?? (cumulativeSeries.length > 0 ? dailyPnlFallback : null)
+  const dailyPnlPct = numOrNull(realizedMetrics?.daily_realized_pnl_pct)
+    ?? ((totalDeposited > 0 && dailyPnl != null) ? (dailyPnl / totalDeposited) * 100 : null)
+  const weeklyPnl = numOrNull(realizedMetrics?.weekly_realized_pnl) ?? (cumulativeSeries.length > 0 ? weeklyPnlFallback : null)
+  const weeklyPnlPct = numOrNull(realizedMetrics?.weekly_realized_pnl_pct)
+    ?? ((totalDeposited > 0 && weeklyPnl != null) ? (weeklyPnl / totalDeposited) * 100 : null)
+  const monthlyPnl = numOrNull(realizedMetrics?.monthly_realized_pnl) ?? (cumulativeSeries.length > 0 ? monthlyPnlFallback : null)
+  const monthlyPnlPct = numOrNull(realizedMetrics?.monthly_realized_pnl_pct)
+    ?? ((totalDeposited > 0 && monthlyPnl != null) ? (monthlyPnl / totalDeposited) * 100 : null)
+
+  const annualizedReturnPctServer = numOrNull(realizedMetrics?.annualized_return_pct)
+  const avgDailyRealizedPnlServer = numOrNull(realizedMetrics?.avg_daily_realized_pnl)
+  const realizedTradeDaysServer = numOrNull(realizedMetrics?.realized_trade_days)
+  const elapsedDaysServer = numOrNull(realizedMetrics?.elapsed_days)
+
+  const realizedTradeLog = allTrades
+    .map(t => ({ pnl: numOrNull(t.pnl), date: parsePointDate(t.created_at) }))
+    .filter(t => t.pnl != null && t.date)
+    .sort((a, b) => a.date - b.date)
+  const realizedTradeDaysFallback = new Set(realizedTradeLog.map(t => t.date.toISOString().slice(0, 10))).size
+  const realizedPnlSumFallback = realizedTradeLog.reduce((sum, t) => sum + t.pnl, 0)
+  const firstRealizedDateFallback = realizedTradeLog.length > 0 ? realizedTradeLog[0].date : null
+  const nthWeekdayOfMonth = (year, month, weekday, n) => {
+    const d = new Date(year, month - 1, 1)
+    while (d.getDay() !== weekday) d.setDate(d.getDate() + 1)
+    d.setDate(d.getDate() + (n - 1) * 7)
+    return d
+  }
+  const lastWeekdayOfMonth = (year, month, weekday) => {
+    const d = new Date(year, month, 0)
+    while (d.getDay() !== weekday) d.setDate(d.getDate() - 1)
+    return d
+  }
+  const observedHoliday = (d) => {
+    const x = new Date(d)
+    const day = x.getDay()
+    if (day === 6) x.setDate(x.getDate() - 1)
+    else if (day === 0) x.setDate(x.getDate() + 1)
+    return x
+  }
+  const easterSunday = (year) => {
+    const a = year % 19
+    const b = Math.floor(year / 100)
+    const c = year % 100
+    const d = Math.floor(b / 4)
+    const e = b % 4
+    const f = Math.floor((b + 8) / 25)
+    const g = Math.floor((b - f + 1) / 3)
+    const h = (19 * a + b - d - g + 15) % 30
+    const i = Math.floor(c / 4)
+    const k = c % 4
+    const l = (32 + 2 * e + 2 * i - h - k) % 7
+    const m = Math.floor((a + 11 * h + 22 * l) / 451)
+    const month = Math.floor((h + l - 7 * m + 114) / 31)
+    const day = ((h + l - 7 * m + 114) % 31) + 1
+    return new Date(year, month - 1, day)
+  }
+  const dateKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const nyseHolidays = (year) => {
+    const set = new Set()
+    const addObserved = (d) => {
+      const o = observedHoliday(d)
+      if (o.getFullYear() === year) set.add(dateKey(o))
+    }
+    addObserved(new Date(year, 0, 1))
+    addObserved(new Date(year + 1, 0, 1))
+    set.add(dateKey(nthWeekdayOfMonth(year, 1, 1, 3)))
+    set.add(dateKey(nthWeekdayOfMonth(year, 2, 1, 3)))
+    const goodFriday = easterSunday(year)
+    goodFriday.setDate(goodFriday.getDate() - 2)
+    set.add(dateKey(goodFriday))
+    set.add(dateKey(lastWeekdayOfMonth(year, 5, 1)))
+    if (year >= 2022) addObserved(new Date(year, 5, 19))
+    addObserved(new Date(year, 6, 4))
+    set.add(dateKey(nthWeekdayOfMonth(year, 9, 1, 1)))
+    set.add(dateKey(nthWeekdayOfMonth(year, 11, 4, 4)))
+    addObserved(new Date(year, 11, 25))
+    return set
+  }
+  const isNyseTradingDay = (d) => {
+    const day = d.getDay()
+    if (day === 0 || day === 6) return false
+    return !nyseHolidays(d.getFullYear()).has(dateKey(d))
+  }
+  const countNyseTradingDays = (startDate, endDate) => {
+    if (!startDate || !endDate) return 0
+    const start = new Date(startDate)
+    const end = new Date(endDate)
+    start.setHours(0, 0, 0, 0)
+    end.setHours(0, 0, 0, 0)
+    if (end < start) return 0
+    let days = 0
+    const cursor = new Date(start)
+    while (cursor <= end) {
+      if (isNyseTradingDay(cursor)) days += 1
+      cursor.setDate(cursor.getDate() + 1)
+    }
+    return days
+  }
+  const elapsedTradingDaysFallback = firstRealizedDateFallback
+    ? Math.max(1, countNyseTradingDays(firstRealizedDateFallback, new Date()))
+    : null
+  const annualizedReturnPctFallback = (
+    elapsedTradingDaysFallback != null
+    && totalDeposited > 0
+    && (realizedPnlSumFallback / totalDeposited) > -1
+  )
+    ? ((Math.pow(1 + (realizedPnlSumFallback / totalDeposited), 252 / elapsedTradingDaysFallback) - 1) * 100)
+    : null
+  const avgDailyRealizedPnlFallback = realizedTradeDaysFallback > 0 ? (realizedPnlSumFallback / realizedTradeDaysFallback) : null
+
+  const annualizedReturnPct = annualizedReturnPctServer ?? annualizedReturnPctFallback
+  const avgDailyRealizedPnl = avgDailyRealizedPnlServer ?? avgDailyRealizedPnlFallback
+  const realizedTradeDays = realizedTradeDaysServer ?? realizedTradeDaysFallback
+  const elapsedDays = elapsedDaysServer ?? elapsedTradingDaysFallback
 
   // Max gain & max drawdown from cumulative P&L curve
   let maxGain = 0
@@ -197,22 +310,56 @@ export default function PortfolioOverview({
           <div className={`text-xl font-bold ${maxDrawdown > 0 ? 'text-red-400' : 'text-slate-400'}`}>{maxDrawdown > 0 ? fmt(-maxDrawdown) : '—'}</div>
           <div className="text-xs text-slate-500 mt-0.5">{maxDrawdownPct != null && maxDrawdown > 0 ? `${maxDrawdownPct.toFixed(2)}% peak-to-trough` : 'No drawdown recorded'}</div>
         </div>
-        <div className={`card ${dailyPnl !== 0 ? (dailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+        <div className={`card ${dailyPnl != null && dailyPnl !== 0 ? (dailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Today&apos;s P&amp;L</div>
-          <div className={`text-xl font-bold ${dailyPnl > 0 ? 'text-emerald-400' : dailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-            {cumulativeSeries.length === 0 ? '—' : fmt(dailyPnl)}
+          <div className={`text-xl font-bold ${dailyPnl == null ? 'text-slate-400' : dailyPnl > 0 ? 'text-emerald-400' : dailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+            {dailyPnl == null ? '—' : fmt(dailyPnl)}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {dailyPnlPct != null && cumulativeSeries.length > 0 ? `${dailyPnlPct >= 0 ? '+' : ''}${dailyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+            {dailyPnlPct != null ? `${dailyPnlPct >= 0 ? '+' : ''}${dailyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
           </div>
         </div>
-        <div className={`card ${weeklyPnl !== 0 ? (weeklyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+        <div className={`card ${weeklyPnl != null && weeklyPnl !== 0 ? (weeklyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
           <div className="text-xs text-slate-500 mb-1">This Week&apos;s P&amp;L</div>
-          <div className={`text-xl font-bold ${weeklyPnl > 0 ? 'text-emerald-400' : weeklyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-            {cumulativeSeries.length === 0 ? '—' : fmt(weeklyPnl)}
+          <div className={`text-xl font-bold ${weeklyPnl == null ? 'text-slate-400' : weeklyPnl > 0 ? 'text-emerald-400' : weeklyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+            {weeklyPnl == null ? '—' : fmt(weeklyPnl)}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {weeklyPnlPct != null && cumulativeSeries.length > 0 ? `${weeklyPnlPct >= 0 ? '+' : ''}${weeklyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+            {weeklyPnlPct != null ? `${weeklyPnlPct >= 0 ? '+' : ''}${weeklyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+          </div>
+        </div>
+      </div>
+
+      {/* Tertiary stat cards: long-horizon performance */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+
+        <div className={`card ${monthlyPnl != null && monthlyPnl !== 0 ? (monthlyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Month-to-Date P&amp;L</div>
+          <div className={`text-xl font-bold ${monthlyPnl == null ? 'text-slate-400' : monthlyPnl > 0 ? 'text-emerald-400' : monthlyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+            {monthlyPnl == null ? '—' : fmt(monthlyPnl)}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {monthlyPnlPct != null ? `${monthlyPnlPct >= 0 ? '+' : ''}${monthlyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+          </div>
+        </div>
+
+        <div className={`card ${annualizedReturnPct != null ? (annualizedReturnPct >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Annualized Return</div>
+          <div className={`text-xl font-bold ${annualizedReturnPct == null ? 'text-slate-400' : annualizedReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {annualizedReturnPct == null ? '—' : `${annualizedReturnPct >= 0 ? '+' : ''}${annualizedReturnPct.toFixed(2)}%`}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {elapsedDays == null ? 'No realised history yet' : `${elapsedDays} trading day${elapsedDays !== 1 ? 's' : ''} from trade log`}
+          </div>
+        </div>
+
+        <div className={`card ${avgDailyRealizedPnl != null ? (avgDailyRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Avg Daily Realised</div>
+          <div className={`text-xl font-bold ${avgDailyRealizedPnl == null ? 'text-slate-400' : avgDailyRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {avgDailyRealizedPnl == null ? '—' : fmt(avgDailyRealizedPnl)}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {realizedTradeDays > 0 ? `${realizedTradeDays} realised trade day${realizedTradeDays !== 1 ? 's' : ''}` : 'No realised history yet'}
           </div>
         </div>
       </div>
