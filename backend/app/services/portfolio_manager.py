@@ -18,6 +18,7 @@ Settings (persisted in-memory, reset on server restart unless saved to DB):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from datetime import datetime, timezone
@@ -49,14 +50,14 @@ _settings: dict[str, Any] = {
     "market_sentiment_strategies": {
         "crash": "rsi",
         "bearish": "macd",
-        "neutral": "bollinger",
+        "neutral": "bollinger_bands",
         "bullish": "sma_crossover",
         "euphoric": "rsi",
     },
     "symbol_sentiment_strategies": {
         "crash": "rsi",
         "bearish": "macd",
-        "neutral": "bollinger",
+        "neutral": "bollinger_bands",
         "bullish": "sma_crossover",
         "euphoric": "rsi",
     },
@@ -99,6 +100,33 @@ def get_manager_state() -> dict:
     }
 
 
+# Legacy strategy name aliases – renamed in a previous refactor.
+_LEGACY_STRATEGY_NAMES: dict[str, str] = {"bollinger": "bollinger_bands"}
+
+
+def _load_strategy_map(raw_value: Any, fallback: dict[str, str]) -> dict[str, str]:
+    """Return a safe strategy-map dict from DB text, dict, or fallback defaults.
+
+    Automatically migrates legacy strategy names (e.g. ``bollinger`` →
+    ``bollinger_bands``) so that old persisted settings keep working.
+    """
+    if isinstance(raw_value, dict):
+        merged = {**fallback, **raw_value}
+    elif isinstance(raw_value, str) and raw_value.strip():
+        try:
+            parsed = json.loads(raw_value)
+            if isinstance(parsed, dict):
+                merged = {**fallback, **parsed}
+            else:
+                merged = dict(fallback)
+        except Exception:
+            merged = dict(fallback)
+    else:
+        merged = dict(fallback)
+    # Migrate any legacy names stored in the DB.
+    return {k: _LEGACY_STRATEGY_NAMES.get(v, v) for k, v in merged.items()}
+
+
 async def _load_settings_from_db() -> None:
     """Overwrite in-memory _settings from the DB row on startup."""
     async with AsyncSessionLocal() as db:
@@ -120,6 +148,14 @@ async def _load_settings_from_db() -> None:
             _settings["reallocation_enabled"] = bool(row.reallocation_enabled) if row.reallocation_enabled is not None else True
             _settings["reallocation_mode"] = row.reallocation_mode or "to_stock"
             _settings["allow_buy_outside_allocation"] = bool(getattr(row, "allow_buy_outside_allocation", False))
+            _settings["market_sentiment_strategies"] = _load_strategy_map(
+                getattr(row, "market_sentiment_strategies", None),
+                _settings["market_sentiment_strategies"],
+            )
+            _settings["symbol_sentiment_strategies"] = _load_strategy_map(
+                getattr(row, "symbol_sentiment_strategies", None),
+                _settings["symbol_sentiment_strategies"],
+            )
             _settings["sentiment_strategy_enabled"] = bool(getattr(row, "sentiment_strategy_enabled", True))
             _settings["stop_loss_pct"] = float(getattr(row, "stop_loss_pct", 0.0) or 0.0)
             _settings["take_profit_pct"] = float(getattr(row, "take_profit_pct", 0.0) or 0.0)
@@ -153,6 +189,8 @@ async def _save_settings_to_db() -> None:
         row.reallocation_enabled = _settings["reallocation_enabled"]
         row.reallocation_mode = _settings["reallocation_mode"]
         row.allow_buy_outside_allocation = _settings["allow_buy_outside_allocation"]
+        row.market_sentiment_strategies = json.dumps(_settings.get("market_sentiment_strategies", {}), sort_keys=True)
+        row.symbol_sentiment_strategies = json.dumps(_settings.get("symbol_sentiment_strategies", {}), sort_keys=True)
         row.sentiment_strategy_enabled = _settings.get("sentiment_strategy_enabled", True)
         row.stop_loss_pct = float(_settings.get("stop_loss_pct", 0.0) or 0.0)
         row.take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
@@ -175,7 +213,28 @@ def update_manager_settings(new: dict) -> dict:
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
-    asyncio.get_event_loop().create_task(_save_settings_to_db())
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        loop.create_task(_save_settings_to_db())
+        if any(key in new for key in ("market_sentiment_strategies", "symbol_sentiment_strategies", "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_interval")):
+            async def _refresh_and_apply() -> None:
+                # Refresh scores for every position that is in sentiment-routing
+                # mode so that the strategy update uses current data, not stale
+                # or empty scores (the latter would silently skip the update).
+                async with AsyncSessionLocal() as _db:
+                    from sqlalchemy import select as _sa_select
+                    _res = await _db.execute(
+                        _sa_select(SandboxPosition).where(SandboxPosition.sentiment_mode.isnot(None))
+                    )
+                    syms = list({p.symbol for p in _res.scalars().all()})
+                if syms:
+                    await _refresh_scores(syms)
+                await _apply_sentiment_strategies()
+            loop.create_task(_refresh_and_apply())
     return get_manager_settings()
 
 
@@ -283,13 +342,13 @@ async def _refresh_scores(symbols: list[str]) -> None:
 
 def _score_to_bucket(score: float) -> str:
     """Map a -1..1 composite score to a 5-label sentiment bucket."""
-    if score >= 0.5:
+    if score >= 0.8:
         return "euphoric"
-    if score >= 0.1:
+    if score >= 0.2:
         return "bullish"
-    if score > -0.1:
+    if score > -0.2:
         return "neutral"
-    if score > -0.5:
+    if score > -0.8:
         return "bearish"
     return "crash"
 
@@ -309,6 +368,13 @@ async def _apply_sentiment_strategies() -> None:
     """For positions with sentiment_mode set, update strategy_name based on current sentiment scores."""
     if not _settings.get("sentiment_strategy_enabled", True):
         return
+    if not _state.get("scores"):
+        # Scores have not been loaded yet (e.g. PM never ran or server just
+        # restarted).  Applying strategies now would classify every position as
+        # "neutral" and set an incorrect default.  Wait until the normal PM
+        # loop has populated scores via _refresh_scores().
+        logger.debug("Skipping sentiment strategy update – no scores available yet.")
+        return
 
     market = _compute_market_classification()
     _state["market_classification"] = {
@@ -325,7 +391,6 @@ async def _apply_sentiment_strategies() -> None:
         res = await db.execute(
             sa_select(SandboxPosition).where(
                 SandboxPosition.sentiment_mode.isnot(None),
-                SandboxPosition.strategy_enabled == True,  # noqa: E712
             )
         )
         positions: list[SandboxPosition] = res.scalars().all()

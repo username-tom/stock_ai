@@ -147,16 +147,25 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
         raise HTTPException(404, f"Position {symbol} not found.")
 
     sentiment_mode_changed = False
-    if req.strategy_name is not None:
+    strategy_name_provided = "strategy_name" in req.model_fields_set
+    sentiment_mode_provided = "sentiment_mode" in req.model_fields_set
+
+    if strategy_name_provided:
         pos.strategy_name = req.strategy_name
+        # Manual strategy edits should take precedence over PM sentiment routing.
+        # Clear routing unless the caller explicitly sets sentiment_mode as part
+        # of the same request.
+        if not sentiment_mode_provided and pos.sentiment_mode is not None:
+            pos.sentiment_mode = None
+            sentiment_mode_changed = True
     if req.strategy_enabled is not None:
         pos.strategy_enabled = req.strategy_enabled
     if req.max_allocation_mode is not None:
         pos.max_allocation_mode = req.max_allocation_mode
     if req.max_allocation_value is not None:
         pos.max_allocation_value = req.max_allocation_value
-    if req.sentiment_mode is not None:
-        pos.sentiment_mode = None if req.sentiment_mode == 'none' else req.sentiment_mode
+    if sentiment_mode_provided:
+        pos.sentiment_mode = None if req.sentiment_mode in (None, 'none') else req.sentiment_mode
         sentiment_mode_changed = True
 
     if req.allocated_funds is not None:
@@ -223,8 +232,17 @@ async def bulk_update_strategy(req: BulkStrategyRequest, db: AsyncSession = Depe
     ensure_sandbox_write_allowed()
     result = await db.execute(select(SandboxPosition))
     positions = result.scalars().all()
+    sentiment_mode_changed = False
     for pos in positions:
         pos.strategy_name = req.strategy_name
+        if pos.sentiment_mode is not None:
+            pos.sentiment_mode = None
+            sentiment_mode_changed = True
     await db.commit()
     await offload_simulated_state(db)
+
+    if sentiment_mode_changed:
+        from app.services.portfolio_manager import refresh_sentiment_routing
+        asyncio.create_task(refresh_sentiment_routing())
+
     return {"updated": len(positions), "strategy_name": req.strategy_name}

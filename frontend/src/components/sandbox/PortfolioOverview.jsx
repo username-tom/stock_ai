@@ -168,7 +168,7 @@ export default function PortfolioOverview({
                           <div className="flex items-center gap-2">
                             <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
                             <span className="font-bold text-slate-200 font-mono">{pos.symbol}</span>
-                            <MiniSparkline symbol={pos.symbol} positive={(q?.change_pct ?? 0) >= 0 || unreal >= 0} />
+                            <MiniSparkline symbol={pos.symbol} />
                           </div>
                           {q?.company_name && <div className="text-slate-600 truncate max-w-[100px] pl-4">{q.company_name}</div>}
                         </td>

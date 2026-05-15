@@ -27,7 +27,7 @@ const SENTIMENT_LABELS = {
 const DEFAULT_SENTIMENT_STRATEGIES = {
   crash: 'rsi',
   bearish: 'macd',
-  neutral: 'bollinger',
+  neutral: 'bollinger_bands',
   bullish: 'sma_crossover',
   euphoric: 'rsi',
 }
@@ -137,6 +137,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
     mutationFn: updatePortfolioManagerSettings,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+      // Sentiment strategy changes update strategy_name on positions asynchronously;
+      // delay the positions refetch to let the backend task finish.
+      setTimeout(() => qc.invalidateQueries({ queryKey: ['sandbox-positions'] }), 600)
       setSavedStates(prev => {
         const next = {
           ...prev,
@@ -995,7 +998,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                     <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
                     <select
                       className="input text-xs py-1.5"
-                      value={draft.symbol_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]}
+                      value={draft.symbol_sentiment_strategies[sentiment]} // ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]}
                       onChange={e => updateDraft(d => ({
                         ...d,
                         symbol_sentiment_strategies: {

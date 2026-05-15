@@ -90,6 +90,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     take_profit_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
     hold_positions_overnight: Optional[bool] = None
     eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
+    sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=30)
+    sentiment_interval: Optional[str] = None
 
 
 @router.get("/manager/state")

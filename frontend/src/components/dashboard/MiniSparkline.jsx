@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getHistory } from '../../api/client'
 
-export default function MiniSparkline({ symbol, positive }) {
+export default function MiniSparkline({ symbol }) {
   const { data, isLoading } = useQuery({
     queryKey: ['history', symbol, '1d'],
     queryFn: () => getHistory(symbol, '1d'),
@@ -42,6 +42,8 @@ export default function MiniSparkline({ symbol, positive }) {
   const lastX = toX(prices.length - 1)
   const firstX = toX(0)
 
+  const prevClose = data?.prev_close ?? prices[0]
+  const positive = prices[prices.length - 1] >= prevClose
   const color = positive ? '#34d399' : '#f87171'
   const gradId = `spark-${symbol}`
 

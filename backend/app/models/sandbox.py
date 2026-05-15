@@ -1,5 +1,5 @@
 """Sandbox portfolio models – simulated paper trading environment."""
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, text
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -106,6 +106,8 @@ class PortfolioManagerSettings(Base):
     reallocation_enabled = Column(Boolean, default=True, nullable=False)
     reallocation_mode = Column(String(20), default="to_stock", nullable=False)
     allow_buy_outside_allocation = Column(Boolean, default=False, nullable=False)
+    market_sentiment_strategies = Column(Text, nullable=False, server_default=text("'{}'"))
+    symbol_sentiment_strategies = Column(Text, nullable=False, server_default=text("'{}'"))
     sentiment_strategy_enabled = Column(Boolean, default=True, nullable=False)
     stop_loss_pct = Column(Float, default=0.0, nullable=False)
     take_profit_pct = Column(Float, default=0.0, nullable=False)

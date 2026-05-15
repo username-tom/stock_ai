@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { PlayIcon, StopCircleIcon } from '@heroicons/react/24/outline'
 import { getScripts } from '../../api/client'
@@ -33,11 +33,25 @@ function pmClassLabel(cls) {
   return '—'
 }
 
-export default function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggleEngineMut }) {
+function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggleEngineMut }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
   const [tooltipPos, setTooltipPos] = useState(null)
   const wrapperRef = useRef(null)
+
+  // Memoize calculations to ensure they update on quote/pos changes
+  const calculations = useMemo(() => {
+    const mp = quote?.last_price ?? pos.avg_cost
+    const equity = mp * pos.shares
+    const unrealised = equity - pos.avg_cost * pos.shares
+    const totalPnl = pos.realized_pnl + unrealised
+    const changePct = quote?.change_pct
+    const positive = changePct == null ? null : changePct >= 0
+    return { mp, equity, unrealised, totalPnl, changePct, positive }
+  }, [quote, pos.avg_cost, pos.shares, pos.realized_pnl])
+
+  const { mp, equity, unrealised, totalPnl, changePct, positive } = calculations
+  const canToggleEngine = !!toggleEngineMut && !!pos.strategy_name
 
   const handleMouseEnter = useCallback(() => {
     if (!wrapperRef.current) return
@@ -46,14 +60,6 @@ export default function StockListItem({ pos, quote, sector, pmScore, isSelected,
   }, [])
 
   const handleMouseLeave = useCallback(() => setTooltipPos(null), [])
-
-  const mp = quote?.last_price ?? pos.avg_cost
-  const equity = mp * pos.shares
-  const unrealised = equity - pos.avg_cost * pos.shares
-  const totalPnl = pos.realized_pnl + unrealised
-  const changePct = quote?.change_pct
-  const positive = changePct == null ? null : changePct >= 0
-  const canToggleEngine = !!toggleEngineMut && !!pos.strategy_name
 
   const handleRowKeyDown = useCallback((event) => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -289,3 +295,5 @@ export default function StockListItem({ pos, quote, sector, pmScore, isSelected,
     </div>
   )
 }
+
+export default memo(StockListItem)
