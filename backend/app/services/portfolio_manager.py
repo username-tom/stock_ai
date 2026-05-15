@@ -194,10 +194,10 @@ async def _fetch_bars(symbol: str) -> pd.DataFrame:
 def _score_symbol(df: pd.DataFrame) -> tuple[float, str]:
     """
     Return (score, classification) where score is −1..+1 and classification
-    is one of 'bullish', 'neutral', 'bearish'.
+    is one of 'crash', 'bearish', 'neutral', 'bullish', 'euphoric'.
 
     Composite of three sub-signals, each contributing ±1/3:
-      1. RSI  – < 40 bearish, > 60 bullish
+      1. RSI  – < 30 crash, < 40 bearish, > 70 euphoric, > 60 bullish
       2. MACD histogram sign (12/26/9 EMA)
       3. Close vs 20-bar SMA trend
     """
@@ -212,8 +212,12 @@ def _score_symbol(df: pd.DataFrame) -> tuple[float, str]:
         last_loss = loss.iloc[-1]
         rs = gain.iloc[-1] / last_loss if last_loss and last_loss != 0 else float("inf")
         rsi = 100 - 100 / (1 + rs)
-        if rsi < 40:
+        if rsi < 30:
+            score -= 2 / 3
+        elif rsi < 40:
             score -= 1 / 3
+        elif rsi > 70:
+            score += 2 / 3
         elif rsi > 60:
             score += 1 / 3
 
@@ -238,12 +242,16 @@ def _score_symbol(df: pd.DataFrame) -> tuple[float, str]:
             score -= 1 / 3
 
     score = max(-1.0, min(1.0, score))
-    if score > 0.1:
+    if score >= 0.5:
+        classification = "euphoric"
+    elif score >= 0.1:
         classification = "bullish"
-    elif score < -0.1:
+    elif score > -0.1:
+        classification = "neutral"
+    elif score > -0.5:
         classification = "bearish"
     else:
-        classification = "neutral"
+        classification = "crash"
 
     return round(score, 3), classification
 
@@ -293,7 +301,7 @@ def _compute_market_classification() -> dict:
         return {"score": 0.0, "classification": "neutral", "bucket": "neutral"}
     avg_score = sum(v["score"] for v in scores.values()) / len(scores)
     bucket = _score_to_bucket(avg_score)
-    classification = "bullish" if avg_score > 0.1 else ("bearish" if avg_score < -0.1 else "neutral")
+    classification = bucket
     return {"score": round(avg_score, 3), "classification": classification, "bucket": bucket}
 
 
@@ -444,9 +452,9 @@ async def _do_transfer() -> None:
         pending_cost = p.pending_avg_cost * p.pending_shares
         idle_cash = p.allocated_funds - settled_cost
         has_pending = p.pending_shares > 0
-        if cls == "bearish" and idle_cash > min_funds and not has_pending:
+        if cls in {"bearish", "crash"} and idle_cash > min_funds and not has_pending:
             bearish_pos.append((p, idle_cash))
-        elif cls == "bullish":
+        elif cls in {"bullish", "euphoric"}:
             bullish_pos.append(p)
 
     # ── deploy unallocated account funds to target position ─────── #

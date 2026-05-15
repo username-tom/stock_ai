@@ -14,6 +14,8 @@ const PROFILE_ORDER = ['simulated', 'paper', 'live']
 const BULL_COLOR = '#10b981'
 const BEAR_COLOR = '#ef4444'
 const NEUTRAL_COLOR = '#64748b'
+const EUPHORIC_COLOR = '#a855f7'
+const CRASH_COLOR = '#f97316'
 const SENTIMENT_BUCKETS = ['crash', 'bearish', 'neutral', 'bullish', 'euphoric']
 const SENTIMENT_LABELS = {
   crash: 'Crash',
@@ -84,12 +86,16 @@ function saveSavedStates(states) {
 }
 
 function classColor(cls) {
+  if (cls === 'euphoric') return EUPHORIC_COLOR
+  if (cls === 'crash') return CRASH_COLOR
   if (cls === 'bullish') return BULL_COLOR
   if (cls === 'bearish') return BEAR_COLOR
   return NEUTRAL_COLOR
 }
 
 function classLabel(cls) {
+  if (cls === 'euphoric') return '▲▲ Euphoric'
+  if (cls === 'crash') return '▼▼ Crash'
   if (cls === 'bullish') return '▲ Bullish'
   if (cls === 'bearish') return '▼ Bearish'
   return '— Neutral'
@@ -294,9 +300,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   }
 
   const symbolCount = Object.keys(scores).length
-  const bullishCount = Object.values(scores).filter(s => s.classification === 'bullish').length
-  const bearishCount = Object.values(scores).filter(s => s.classification === 'bearish').length
-  const neutralCount = symbolCount - bullishCount - bearishCount
+  const sentimentCounts = SENTIMENT_BUCKETS.reduce((acc, bucket) => {
+    acc[bucket] = Object.values(scores).filter(s => s.classification === bucket).length
+    return acc
+  }, {})
 
   function moveRoutingSymbol(symbol, targetMode) {
     setRoutingGroups(prev => {
@@ -543,9 +550,15 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
         <div>
           <div className="flex items-center gap-3 mb-2">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Stock Signals</span>
-            <span className="text-xs text-emerald-400 font-medium">{bullishCount} bullish</span>
-            <span className="text-xs text-red-400 font-medium">{bearishCount} bearish</span>
-            {neutralCount > 0 && <span className="text-xs text-slate-500 font-medium">{neutralCount} neutral</span>}
+            {SENTIMENT_BUCKETS.map(bucket => {
+              const count = sentimentCounts[bucket] ?? 0
+              if (!count) return null
+              return (
+                <span key={bucket} className="text-xs font-medium" style={{ color: classColor(bucket) }}>
+                  {count} {SENTIMENT_LABELS[bucket].toLowerCase()}
+                </span>
+              )
+            })}
           </div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(scores).map(([sym, sc]) => (
