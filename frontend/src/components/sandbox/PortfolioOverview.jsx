@@ -40,6 +40,15 @@ function classLabel(cls) {
   return '— Neutral'
 }
 
+function stratLabel(strategy_name) {
+  if (!strategy_name) return '—'
+  if (strategy_name.startsWith('template:')) {
+    return strategy_name.slice(9).replace(/\.py$/, '').split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+  }
+  if (strategy_name.startsWith('custom:')) return 'Custom Script'
+  return strategy_name.split(':')[0]
+}
+
 export default function PortfolioOverview({
   ibMode,
   accountData,
@@ -134,6 +143,7 @@ export default function PortfolioOverview({
                   <tr className="text-slate-500 border-b border-dark-600">
                     <th className="text-left pb-2 font-medium">Symbol</th>
                     <th className="text-left pb-2 font-medium">PM Sentiment</th>
+                    <th className="text-left pb-2 font-medium">Strategy</th>
                     <th className="text-right pb-2 font-medium">Shares</th>
                     <th className="text-right pb-2 font-medium">Avg Price</th>
                     <th className="text-right pb-2 font-medium">Current</th>
@@ -174,12 +184,21 @@ export default function PortfolioOverview({
                         </td>
                         <td className="py-2 pl-2">
                           {pmScores[pos.symbol] ? (
-                            <div className="flex items-center gap-1.5" title={`Score: ${pmScores[pos.symbol].score} — Updated: ${pmScores[pos.symbol].updated_at ? new Date(pmScores[pos.symbol].updated_at).toLocaleTimeString() : '?'}`}>
+                            <div title={`Score: ${pmScores[pos.symbol].score} — Updated: ${pmScores[pos.symbol].updated_at ? new Date(pmScores[pos.symbol].updated_at).toLocaleTimeString() : '?'}`}>
                               <span className="text-xs font-semibold" style={{ color: classColor(pmScores[pos.symbol].classification) }}>
                                 {classLabel(pmScores[pos.symbol].classification)}
                               </span>
-                              <span className="text-xs text-slate-500">({pmScores[pos.symbol].score > 0 ? '+' : ''}{pmScores[pos.symbol].score})</span>
+                              <div className="text-xs text-slate-500 mt-0.5">
+                                ({pmScores[pos.symbol].score > 0 ? '+' : ''}{pmScores[pos.symbol].score})
+                              </div>
                             </div>
+                          ) : (
+                            <span className="text-xs text-slate-600">—</span>
+                          )}
+                        </td>
+                        <td className="py-2 pl-2">
+                          {pos.strategy_name ? (
+                            <span className="text-xs text-blue-400/80">{stratLabel(pos.strategy_name)}</span>
                           ) : (
                             <span className="text-xs text-slate-600">—</span>
                           )}
@@ -211,6 +230,7 @@ export default function PortfolioOverview({
                 <tfoot>
                   <tr className="border-t border-dark-500 text-slate-400 font-semibold">
                     <td className="pt-2">Total</td>
+                    <td />
                     <td />
                     <td />
                     <td />

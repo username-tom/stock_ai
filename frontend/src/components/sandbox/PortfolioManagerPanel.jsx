@@ -156,6 +156,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   const [routingGroups, setRoutingGroups] = useState({ manual: [], market: [], symbol: [] })
   const [dragPayload, setDragPayload] = useState(null)
   const [dragOverMode, setDragOverMode] = useState(null)
+  const [sentimentError, setSentimentError] = useState(null)
 
   const { data: managerData, isLoading } = useQuery({
     queryKey: ['portfolio-manager-state'],
@@ -262,7 +263,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   const activity = managerData.last_activity ?? []
 
   function openEdit() {
-    const nextDraft = savedStates[activeProfile]?.draft ?? buildDraftFromSettings(settings)
+    // Always build from current backend settings to avoid showing stale localStorage drafts
+    const nextDraft = buildDraftFromSettings(settings)
     setDraft(nextDraft)
     setEditSettings(true)
     const next = {
@@ -278,7 +280,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   }
 
   function doneEditing() {
-    const nextDraft = savedStates[activeProfile]?.draft ?? buildDraftFromSettings(settings)
+    // Revert to current backend settings when cancelling edits
+    const nextDraft = buildDraftFromSettings(settings)
     setEditSettings(false)
     setDraft(nextDraft)
     const next = {
@@ -294,6 +297,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
   }
 
   function updateDraft(updater) {
+    setSentimentError(null)
     setDraft(prev => {
       const nextDraft = typeof updater === 'function' ? updater(prev) : updater
       setSavedStates(prevStates => {
@@ -314,6 +318,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
 
   function handleSave() {
     if (!draft) return
+    const hasIncomplete = (map) =>
+      Object.values(map).some(v => v === CUSTOM_SCRIPT_KEY || v === TEMPLATE_SCRIPT_KEY)
+    if (hasIncomplete(draft.market_sentiment_strategies) || hasIncomplete(draft.symbol_sentiment_strategies)) {
+      setSentimentError('Select a specific script or template for every sentiment bucket before saving.')
+      return
+    }
+    setSentimentError(null)
     updateMut.mutate({
       transfer_pct: draft.transfer_pct / 100,
       transfer_interval_s: Number(draft.transfer_interval_s),
@@ -433,6 +444,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
           </button>
         </div>
       </div>
+      {sentimentError && (
+        <p className="text-xs text-red-400 -mt-2">{sentimentError}</p>
+      )}
 
       {/* Summary stats */}
       <div className="grid grid-cols-2 gap-3">

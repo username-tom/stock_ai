@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useState, useRef, useCallback, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { PlayIcon, StopCircleIcon } from '@heroicons/react/24/outline'
-import { getScripts } from '../../api/client'
+import { getScripts, getBuiltinTemplates } from '../../api/client'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
@@ -36,6 +36,8 @@ function pmClassLabel(cls) {
 function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggleEngineMut }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
+  const { data: templatesData } = useQuery({ queryKey: ['builtin-templates'], queryFn: getBuiltinTemplates, staleTime: 300000 })
+  const templates = templatesData?.templates ?? []
   const [tooltipPos, setTooltipPos] = useState(null)
   const wrapperRef = useRef(null)
 
@@ -127,6 +129,11 @@ function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggl
                 const scriptId = parseInt(pos.strategy_name.split(':')[1], 10)
                 const sc = scripts.find(s => s.id === scriptId)
                 return sc ? <span className="text-slate-400"> · {sc.name}</span> : null
+              })() : pos.strategy_name.startsWith('template:') ? (() => {
+                const filename = pos.strategy_name.slice(9)
+                const tmpl = templates.find(t => t.filename === filename)
+                const name = tmpl?.name ?? filename.replace(/\.py$/, '').split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+                return <span className="text-slate-400"> · {name}</span>
               })() : null}
             </span>
             <button
