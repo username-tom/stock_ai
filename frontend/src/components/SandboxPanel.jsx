@@ -837,36 +837,6 @@ export default function SandboxPanel() {
         )}
 
         <div className="p-6 space-y-6">
-          {activeMainTab === 'summary' && (
-            <div className="card border border-violet-800/30 bg-violet-950/10">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-violet-300">Portfolio Manager Summary</h3>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Automatically rebalances idle capital, refreshes sentiment scores, and can deploy available cash based on your manager rules.
-                  </p>
-                  <div className="flex flex-wrap gap-2 mt-3 text-[11px] text-slate-300">
-                    <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
-                      Status: {(managerState?.settings?.enabled ?? false) ? 'Enabled' : 'Disabled'}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
-                      Reallocation: {(managerState?.settings?.reallocation_enabled ?? true) ? 'On' : 'Off'}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
-                      Interval: {managerState?.settings?.transfer_interval_s ?? 300}s
-                    </span>
-                  </div>
-                </div>
-                <button
-                  className="text-xs border border-violet-700/50 text-violet-300 hover:bg-violet-900/20 rounded-lg px-3 py-1.5 transition-colors"
-                  onClick={() => setActiveMainTab('manager')}
-                >
-                  Open Manager
-                </button>
-              </div>
-            </div>
-          )}
-
           {activeMainTab === 'manager' ? (
             <PortfolioManagerPanel profile={activeProfile} />
           ) : !selectedSymbol ? (
@@ -882,6 +852,8 @@ export default function SandboxPanel() {
               analytics={analytics}
               allTrades={allTrades}
               pmScores={managerState?.scores ?? {}}
+              managerSettings={managerState?.settings ?? null}
+              onOpenManager={activeMainTab === 'summary' ? () => setActiveMainTab('manager') : null}
               onSelectSymbol={handleSelectSymbol}
             />
           ) : !selectedPos ? (

@@ -61,6 +61,8 @@ export default function PortfolioOverview({
   analytics,
   allTrades = [],
   pmScores = {},
+  managerSettings = null,
+  onOpenManager = null,
   onSelectSymbol,
 }) {
   const appSettings = useAppSettings()
@@ -82,6 +84,59 @@ export default function PortfolioOverview({
     ? (accountData?.total_deposited ?? netDepositedFromEvents)
     : null
   const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : null
+
+  // Use analytics cumulative series for period P&L to avoid truncation from recent-trades limits.
+  const cumulativeSeries = analytics?.cumulative_pnl ?? []
+  const parsePointDate = (value) => {
+    if (!value || typeof value !== 'string') return null
+    const normalized = value.includes('T') ? value : value.replace(' ', 'T')
+    const dt = new Date(normalized)
+    return Number.isNaN(dt.getTime()) ? null : dt
+  }
+  const cumulativeBefore = (cutoff) => {
+    let value = 0
+    for (const pt of cumulativeSeries) {
+      const dt = parsePointDate(pt.date)
+      if (!dt) continue
+      if (dt <= cutoff) value = Number(pt.value ?? 0)
+      else break
+    }
+    return value
+  }
+  const latestCumulative = cumulativeSeries.length > 0
+    ? Number(cumulativeSeries[cumulativeSeries.length - 1]?.value ?? 0)
+    : 0
+
+  // Daily P&L: change in cumulative P&L since local midnight.
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+  const dailyBase = cumulativeBefore(new Date(todayStart.getTime() - 1))
+  const dailyPnl = latestCumulative - dailyBase
+  const dailyPnlPct = totalDeposited > 0 ? (dailyPnl / totalDeposited) * 100 : null
+
+  // Weekly P&L: change in cumulative P&L since Monday 00:00 (week-to-date).
+  const weekStart = new Date(todayStart)
+  const dow = weekStart.getDay()
+  weekStart.setDate(weekStart.getDate() - (dow === 0 ? 6 : dow - 1))
+  const weeklyBase = cumulativeBefore(new Date(weekStart.getTime() - 1))
+  const weeklyPnl = latestCumulative - weeklyBase
+  const weeklyPnlPct = totalDeposited > 0 ? (weeklyPnl / totalDeposited) * 100 : null
+
+  // Max gain & max drawdown from cumulative P&L curve
+  let maxGain = 0
+  let maxDrawdown = 0
+  if (analytics?.cumulative_pnl?.length > 0) {
+    let peak = analytics.cumulative_pnl[0].value
+    for (const pt of analytics.cumulative_pnl) {
+      if (pt.value > maxGain) maxGain = pt.value
+      if (pt.value > peak) peak = pt.value
+      const dd = peak - pt.value
+      if (dd > maxDrawdown) maxDrawdown = dd
+    }
+  }
+  const maxGainPct = totalDeposited > 0 ? (maxGain / totalDeposited) * 100 : null
+  const maxDrawdownPct = totalDeposited > 0 ? (maxDrawdown / totalDeposited) * 100 : null
+
   const marketShareData = pieData.map((entry, i) => ({
     ...entry,
     fill: PIE_COLORS[i % PIE_COLORS.length],
@@ -100,7 +155,7 @@ export default function PortfolioOverview({
       </div>
 
       {/* Top stat cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Total Funds</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(accountData?.total_funds)}</div>
@@ -127,6 +182,38 @@ export default function PortfolioOverview({
           <div className="text-xs text-slate-500 mb-1">Realised P&amp;L</div>
           <div className={`text-xl font-bold ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</div>
           <div className="text-xs text-slate-500 mt-0.5">{realizedPnlPct == null ? '—' : `${realizedPnlPct.toFixed(2)}% of deposited funds`}</div>
+        </div>
+      </div>
+
+      {/* Secondary stat cards: performance metrics */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className={`card ${maxGain > 0 ? 'border-emerald-700/20' : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Max Gain</div>
+          <div className={`text-xl font-bold ${maxGain > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{maxGain > 0 ? fmt(maxGain) : '—'}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{maxGainPct != null && maxGain > 0 ? `${maxGainPct.toFixed(2)}% of deposited` : 'No closed trades yet'}</div>
+        </div>
+        <div className={`card ${maxDrawdown > 0 ? 'border-red-700/20' : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Max Drawdown</div>
+          <div className={`text-xl font-bold ${maxDrawdown > 0 ? 'text-red-400' : 'text-slate-400'}`}>{maxDrawdown > 0 ? fmt(-maxDrawdown) : '—'}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{maxDrawdownPct != null && maxDrawdown > 0 ? `${maxDrawdownPct.toFixed(2)}% peak-to-trough` : 'No drawdown recorded'}</div>
+        </div>
+        <div className={`card ${dailyPnl !== 0 ? (dailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Today&apos;s P&amp;L</div>
+          <div className={`text-xl font-bold ${dailyPnl > 0 ? 'text-emerald-400' : dailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+            {cumulativeSeries.length === 0 ? '—' : fmt(dailyPnl)}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {dailyPnlPct != null && cumulativeSeries.length > 0 ? `${dailyPnlPct >= 0 ? '+' : ''}${dailyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+          </div>
+        </div>
+        <div className={`card ${weeklyPnl !== 0 ? (weeklyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">This Week&apos;s P&amp;L</div>
+          <div className={`text-xl font-bold ${weeklyPnl > 0 ? 'text-emerald-400' : weeklyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+            {cumulativeSeries.length === 0 ? '—' : fmt(weeklyPnl)}
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {weeklyPnlPct != null && cumulativeSeries.length > 0 ? `${weeklyPnlPct >= 0 ? '+' : ''}${weeklyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+          </div>
         </div>
       </div>
 
@@ -255,6 +342,39 @@ export default function PortfolioOverview({
         <div className="flex flex-col items-center justify-center h-48 text-slate-600 text-sm gap-2">
           <ChartPieIcon className="h-10 w-10 text-slate-700" />
           Add stocks and purchase shares to see your portfolio breakdown.
+        </div>
+      )}
+
+      {/* Portfolio Manager Summary */}
+      {managerSettings && (
+        <div className="card border border-violet-800/30 bg-violet-950/10">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-violet-300">Portfolio Manager Summary</h3>
+              <p className="text-xs text-slate-400 mt-1">
+                Automatically rebalances idle capital, refreshes sentiment scores, and can deploy available cash based on your manager rules.
+              </p>
+              <div className="flex flex-wrap gap-2 mt-3 text-[11px] text-slate-300">
+                <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
+                  Status: {(managerSettings.enabled ?? false) ? 'Enabled' : 'Disabled'}
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
+                  Reallocation: {(managerSettings.reallocation_enabled ?? true) ? 'On' : 'Off'}
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-dark-700 border border-dark-600">
+                  Interval: {managerSettings.transfer_interval_s ?? 300}s
+                </span>
+              </div>
+            </div>
+            {onOpenManager && (
+              <button
+                className="text-xs border border-violet-700/50 text-violet-300 hover:bg-violet-900/20 rounded-lg px-3 py-1.5 transition-colors shrink-0"
+                onClick={onOpenManager}
+              >
+                Open Manager
+              </button>
+            )}
+          </div>
         </div>
       )}
 
