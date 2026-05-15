@@ -326,6 +326,13 @@ export default function BacktestPanel() {
       setSentProgress(Math.min(cur, 99))
       if (cur >= 99) clearInterval(sentProgressRef.current)
     }, tickMs)
+    // Sanitize: drop any CUSTOM_SCRIPT_KEY/TEMPLATE_SCRIPT_KEY placeholders (no item picked yet)
+    const sanitizedStrategies = Object.fromEntries(
+      Object.entries(sentForm.sentimentStrategies).map(([k, v]) => [
+        k,
+        (v === CUSTOM_SCRIPT_KEY || v === TEMPLATE_SCRIPT_KEY) ? (DEFAULT_SENT_STRATS[k] ?? 'rsi') : v,
+      ])
+    )
     sentMutation.mutate({
       symbol: sentForm.symbol,
       start_date: sentForm.start_date,
@@ -333,7 +340,7 @@ export default function BacktestPanel() {
       initial_capital: sentForm.initial_capital,
       commission: sentForm.commission,
       day_trade: sentForm.day_trade,
-      sentiment_strategies: sentForm.sentimentStrategies,
+      sentiment_strategies: sanitizedStrategies,
       sentiment_warmup: sentForm.sentiment_warmup,
       stop_loss_pct: sentForm.stop_loss_pct,
       take_profit_pct: sentForm.take_profit_pct,
@@ -1270,27 +1277,91 @@ export default function BacktestPanel() {
               <div className="border border-dark-500 rounded-lg p-3 space-y-3 bg-dark-900/30">
                 <div className="text-xs text-slate-500 uppercase tracking-wider">Sentiment → Strategy Map</div>
                 <div className="space-y-2">
-                  {BUCKETS.map(b => (
-                    <div key={b.key} className="flex items-center gap-2">
-                      <span className={`shrink-0 inline-block w-16 text-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${b.cls}`}>
-                        {b.label}
-                      </span>
-                      <select
-                        className="input flex-1 text-xs py-1"
-                        value={sentForm.sentimentStrategies[b.key] ?? 'rsi'}
-                        onChange={e => setSentForm(f => ({
-                          ...f,
-                          sentimentStrategies: { ...f.sentimentStrategies, [b.key]: e.target.value },
-                        }))}
-                      >
-                        {(stratData?.strategies || []).map(s => (
-                          <option key={s.type} value={s.type}>
-                            {s.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
+                  {BUCKETS.map(b => {
+                    const current = sentForm.sentimentStrategies[b.key] ?? 'rsi'
+                    const isCustom = current === CUSTOM_SCRIPT_KEY || current.startsWith('custom:')
+                    const isTemplate = current === TEMPLATE_SCRIPT_KEY || current.startsWith('template:')
+                    const scriptId = current.startsWith('custom:') ? parseInt(current.slice(7)) : null
+                    const templateFn = current.startsWith('template:') ? current.slice(9) : null
+                    return (
+                      <div key={b.key} className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className={`shrink-0 inline-block w-16 text-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${b.cls}`}>
+                            {b.label}
+                          </span>
+                          <select
+                            className="input flex-1 text-xs py-1"
+                            value={isCustom ? CUSTOM_SCRIPT_KEY : isTemplate ? TEMPLATE_SCRIPT_KEY : current}
+                            onChange={e => {
+                              const val = e.target.value
+                              setSentForm(f => ({
+                                ...f,
+                                sentimentStrategies: { ...f.sentimentStrategies, [b.key]: val },
+                              }))
+                            }}
+                          >
+                            {(stratData?.strategies || []).map(s => (
+                              <option key={s.type} value={s.type}>
+                                {s.type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                              </option>
+                            ))}
+                            <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
+                            <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
+                          </select>
+                        </div>
+                        {isCustom && (
+                          <div className="pl-[72px]">
+                            {scripts.length === 0 ? (
+                              <div className="text-xs text-amber-400/80">No scripts saved yet.</div>
+                            ) : (
+                              <select
+                                className="input w-full text-xs py-1"
+                                value={scriptId ?? ''}
+                                onChange={e => {
+                                  const sid = e.target.value
+                                  setSentForm(f => ({
+                                    ...f,
+                                    sentimentStrategies: {
+                                      ...f.sentimentStrategies,
+                                      [b.key]: sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY,
+                                    },
+                                  }))
+                                }}
+                              >
+                                <option value="">— select script —</option>
+                                {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                              </select>
+                            )}
+                          </div>
+                        )}
+                        {isTemplate && (
+                          <div className="pl-[72px]">
+                            {templates.length === 0 ? (
+                              <div className="text-xs text-amber-400/80">No templates found.</div>
+                            ) : (
+                              <select
+                                className="input w-full text-xs py-1"
+                                value={templateFn ?? ''}
+                                onChange={e => {
+                                  const fn = e.target.value
+                                  setSentForm(f => ({
+                                    ...f,
+                                    sentimentStrategies: {
+                                      ...f.sentimentStrategies,
+                                      [b.key]: fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY,
+                                    },
+                                  }))
+                                }}
+                              >
+                                <option value="">— select template —</option>
+                                {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
+                              </select>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
                 <p className="text-xs text-slate-600 border-t border-dark-600 pt-2">
                   Sentiment scored per bar via RSI-14, MACD, &amp; SMA-20. Positions close on switch.

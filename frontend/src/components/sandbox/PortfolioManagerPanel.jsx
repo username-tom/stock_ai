@@ -4,8 +4,9 @@ import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
   ChartBarIcon, CheckCircleIcon, XCircleIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies, updateSandboxPosition } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
+import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandboxConstants'
 import { fmtMoney } from './sandboxHelpers'
 
 const STORAGE_KEY = 'portfolio_manager_savestates_v1'
@@ -101,6 +102,40 @@ function classLabel(cls) {
   return '— Neutral'
 }
 
+function parseStrategyValue(val) {
+  if (val?.startsWith('custom:')) {
+    return { type: CUSTOM_SCRIPT_KEY, scriptId: parseInt(val.slice(7)) || null, templateFilename: null }
+  }
+  if (val?.startsWith('template:')) {
+    return { type: TEMPLATE_SCRIPT_KEY, scriptId: null, templateFilename: val.slice(9) }
+  }
+  return { type: val ?? '', scriptId: null, templateFilename: null }
+}
+
+function stratDisplayName(val, scripts, templates) {
+  if (!val) return '—'
+  if (val.startsWith('custom:')) {
+    const id = parseInt(val.slice(7))
+    const script = scripts.find(s => s.id === id)
+    return script ? `⚙ ${script.name}` : `⚙ custom:${id}`
+  }
+  if (val.startsWith('template:')) {
+    const fn = val.slice(9)
+    const tmpl = templates.find(t => t.filename === fn)
+    return tmpl ? `📄 ${tmpl.name ?? fn}` : `📄 ${fn}`
+  }
+  return val
+}
+
+function sanitizeSentimentMap(map) {
+  return Object.fromEntries(
+    Object.entries(map).map(([k, v]) => [
+      k,
+      (v === CUSTOM_SCRIPT_KEY || v === TEMPLATE_SCRIPT_KEY) ? (DEFAULT_SENTIMENT_STRATEGIES[k] ?? 'rsi') : v,
+    ])
+  )
+}
+
 function SettingRow({ label, hint, children }) {
   return (
     <div className="flex flex-col gap-1">
@@ -132,6 +167,18 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
     queryFn: getStrategies,
     staleTime: 60_000,
   })
+  const { data: scriptsData } = useQuery({
+    queryKey: ['scripts'],
+    queryFn: getScripts,
+    staleTime: 60_000,
+  })
+  const scripts = scriptsData?.scripts ?? []
+  const { data: templatesData } = useQuery({
+    queryKey: ['builtin-templates'],
+    queryFn: getBuiltinTemplates,
+    staleTime: 300_000,
+  })
+  const templates = (templatesData?.templates ?? []).filter(t => !t.filename.startsWith('_'))
 
   const updateMut = useMutation({
     mutationFn: updatePortfolioManagerSettings,
@@ -280,8 +327,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
       reallocation_enabled: draft.reallocation_enabled,
       reallocation_mode: draft.reallocation_mode,
       allow_buy_outside_allocation: draft.allow_buy_outside_allocation,
-      market_sentiment_strategies: draft.market_sentiment_strategies,
-      symbol_sentiment_strategies: draft.symbol_sentiment_strategies,
+      market_sentiment_strategies: sanitizeSentimentMap(draft.market_sentiment_strategies),
+      symbol_sentiment_strategies: sanitizeSentimentMap(draft.symbol_sentiment_strategies),
       sentiment_strategy_enabled: draft.sentiment_strategy_enabled,
       stop_loss_pct: Number(draft.stop_loss_pct),
       take_profit_pct: Number(draft.take_profit_pct),
@@ -451,7 +498,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
           <div className="flex flex-wrap gap-1.5">
             {SENTIMENT_BUCKETS.map(sentiment => (
               <span key={`market-${sentiment}`} className="text-[11px] text-slate-400 bg-dark-700 px-2 py-0.5 rounded-md">
-                {SENTIMENT_LABELS[sentiment]}: {marketSentimentStrategies[sentiment]}
+                {SENTIMENT_LABELS[sentiment]}: {stratDisplayName(marketSentimentStrategies[sentiment], scripts, templates)}
               </span>
             ))}
           </div>
@@ -461,7 +508,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
           <div className="flex flex-wrap gap-1.5">
             {SENTIMENT_BUCKETS.map(sentiment => (
               <span key={`symbol-${sentiment}`} className="text-[11px] text-slate-400 bg-dark-700 px-2 py-0.5 rounded-md">
-                {SENTIMENT_LABELS[sentiment]}: {symbolSentimentStrategies[sentiment]}
+                {SENTIMENT_LABELS[sentiment]}: {stratDisplayName(symbolSentimentStrategies[sentiment], scripts, templates)}
               </span>
             ))}
           </div>
@@ -967,24 +1014,71 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
               hint="Choose the default strategy to use under each overall market sentiment."
             >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {SENTIMENT_BUCKETS.map(sentiment => (
-                  <div key={`market-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
-                    <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
-                    <select
-                      className="input text-xs py-1.5"
-                      value={draft.market_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]}
-                      onChange={e => updateDraft(d => ({
-                        ...d,
-                        market_sentiment_strategies: {
-                          ...d.market_sentiment_strategies,
-                          [sentiment]: e.target.value,
-                        },
-                      }))}
-                    >
-                      {strategyOptions.map(s => <option key={`market-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
-                    </select>
-                  </div>
-                ))}
+                {SENTIMENT_BUCKETS.map(sentiment => {
+                  const current = draft.market_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]
+                  const { type: currentType, scriptId: currentScriptId, templateFilename: currentTemplateFn } = parseStrategyValue(current)
+                  return (
+                    <div key={`market-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
+                      <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
+                      <select
+                        className="input text-xs py-1.5"
+                        value={currentType}
+                        onChange={e => {
+                          const newType = e.target.value
+                          updateDraft(d => ({
+                            ...d,
+                            market_sentiment_strategies: {
+                              ...d.market_sentiment_strategies,
+                              [sentiment]: newType,
+                            },
+                          }))
+                        }}
+                      >
+                        {strategyOptions.map(s => <option key={`market-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
+                        <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
+                        <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
+                      </select>
+                      {currentType === CUSTOM_SCRIPT_KEY && (
+                        <select
+                          className="input text-xs py-1.5"
+                          value={currentScriptId ?? ''}
+                          onChange={e => {
+                            const sid = e.target.value
+                            updateDraft(d => ({
+                              ...d,
+                              market_sentiment_strategies: {
+                                ...d.market_sentiment_strategies,
+                                [sentiment]: sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY,
+                              },
+                            }))
+                          }}
+                        >
+                          <option value="">— select script —</option>
+                          {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      )}
+                      {currentType === TEMPLATE_SCRIPT_KEY && (
+                        <select
+                          className="input text-xs py-1.5"
+                          value={currentTemplateFn ?? ''}
+                          onChange={e => {
+                            const fn = e.target.value
+                            updateDraft(d => ({
+                              ...d,
+                              market_sentiment_strategies: {
+                                ...d.market_sentiment_strategies,
+                                [sentiment]: fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY,
+                              },
+                            }))
+                          }}
+                        >
+                          <option value="">— select template —</option>
+                          {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </SettingRow>
 
@@ -993,24 +1087,71 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
               hint="Choose the default strategy to use under each individual symbol sentiment."
             >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {SENTIMENT_BUCKETS.map(sentiment => (
-                  <div key={`symbol-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
-                    <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
-                    <select
-                      className="input text-xs py-1.5"
-                      value={draft.symbol_sentiment_strategies[sentiment]} // ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]}
-                      onChange={e => updateDraft(d => ({
-                        ...d,
-                        symbol_sentiment_strategies: {
-                          ...d.symbol_sentiment_strategies,
-                          [sentiment]: e.target.value,
-                        },
-                      }))}
-                    >
-                      {strategyOptions.map(s => <option key={`symbol-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
-                    </select>
-                  </div>
-                ))}
+                {SENTIMENT_BUCKETS.map(sentiment => {
+                  const current = draft.symbol_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]
+                  const { type: currentType, scriptId: currentScriptId, templateFilename: currentTemplateFn } = parseStrategyValue(current)
+                  return (
+                    <div key={`symbol-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
+                      <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
+                      <select
+                        className="input text-xs py-1.5"
+                        value={currentType}
+                        onChange={e => {
+                          const newType = e.target.value
+                          updateDraft(d => ({
+                            ...d,
+                            symbol_sentiment_strategies: {
+                              ...d.symbol_sentiment_strategies,
+                              [sentiment]: newType,
+                            },
+                          }))
+                        }}
+                      >
+                        {strategyOptions.map(s => <option key={`symbol-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
+                        <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
+                        <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
+                      </select>
+                      {currentType === CUSTOM_SCRIPT_KEY && (
+                        <select
+                          className="input text-xs py-1.5"
+                          value={currentScriptId ?? ''}
+                          onChange={e => {
+                            const sid = e.target.value
+                            updateDraft(d => ({
+                              ...d,
+                              symbol_sentiment_strategies: {
+                                ...d.symbol_sentiment_strategies,
+                                [sentiment]: sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY,
+                              },
+                            }))
+                          }}
+                        >
+                          <option value="">— select script —</option>
+                          {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      )}
+                      {currentType === TEMPLATE_SCRIPT_KEY && (
+                        <select
+                          className="input text-xs py-1.5"
+                          value={currentTemplateFn ?? ''}
+                          onChange={e => {
+                            const fn = e.target.value
+                            updateDraft(d => ({
+                              ...d,
+                              symbol_sentiment_strategies: {
+                                ...d.symbol_sentiment_strategies,
+                                [sentiment]: fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY,
+                              },
+                            }))
+                          }}
+                        >
+                          <option value="">— select template —</option>
+                          {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </SettingRow>
 

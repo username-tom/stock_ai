@@ -505,6 +505,7 @@ def run_sentiment_backtest(
     take_profit_pct: float = 0.0,
     hold_positions_overnight: bool = True,
     eod_sell_window_minutes: int = 30,
+    custom_scripts: "dict[int, str] | None" = None,
 ) -> "dict[str, Any]":
     """Backtest where the active strategy auto-switches based on rolling sentiment.
 
@@ -573,9 +574,28 @@ def run_sentiment_backtest(
     # Pre-generate signals for all unique strategies used in the map
     needed = set(strat_map.values())
     signals_by_strat: dict[str, pd.Series] = {}
+    _scripts: dict[int, str] = custom_scripts or {}
     for stype in needed:
         try:
-            strat_df = get_strategy(stype).generate_signals(df.copy())
+            if stype.startswith("custom:"):
+                script_id = int(stype[7:])
+                code = _scripts.get(script_id)
+                if not code:
+                    raise ValueError(f"Custom script {script_id} not found.")
+                from app.services.script_executor import execute_script
+                strat_df = execute_script(code, df.copy())
+            elif stype.startswith("template:"):
+                filename = stype[9:]
+                if "/" in filename or "\\" in filename or ".." in filename:
+                    raise ValueError(f"Invalid template filename: {filename}")
+                from pathlib import Path
+                tmpl_path = Path(__file__).resolve().parents[1] / "templates" / filename
+                if not tmpl_path.exists():
+                    raise ValueError(f"Template file not found: {filename}")
+                from app.services.script_executor import execute_script
+                strat_df = execute_script(tmpl_path.read_text(encoding="utf-8"), df.copy())
+            else:
+                strat_df = get_strategy(stype).generate_signals(df.copy())
             pos_col = (
                 strat_df["position"]
                 if "position" in strat_df.columns

@@ -125,6 +125,17 @@ class SentimentBacktestRequest(BaseModel):
         }
         valid_strategy_types = {s["type"] for s in list_strategies()}
         for bucket, stype in self.sentiment_strategies.items():
+            if stype.startswith("custom:"):
+                try:
+                    int(stype[7:])
+                except ValueError:
+                    raise ValueError(f"Invalid custom script reference '{stype}' for bucket '{bucket}'.")
+                continue
+            if stype.startswith("template:"):
+                filename = stype[9:]
+                if not filename or "/" in filename or "\\" in filename or ".." in filename:
+                    raise ValueError(f"Invalid template filename '{filename}' for bucket '{bucket}'.")
+                continue
             resolved = aliases.get(stype, stype)
             if resolved not in valid_strategy_types:
                 raise ValueError(
@@ -145,6 +156,23 @@ async def run_sentiment_backtest_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Load code for any custom:{id} scripts referenced in the strategy map.
+    custom_script_ids = {
+        int(stype[7:])
+        for stype in req.sentiment_strategies.values()
+        if stype.startswith("custom:")
+    }
+    custom_scripts: dict[int, str] = {}
+    if custom_script_ids:
+        from app.models.custom_script import CustomScript
+        from sqlalchemy import select as _sa_select
+        res = await db.execute(_sa_select(CustomScript).where(CustomScript.id.in_(custom_script_ids)))
+        for row in res.scalars().all():
+            custom_scripts[row.id] = row.script_code
+        missing = custom_script_ids - custom_scripts.keys()
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Custom script(s) not found: {sorted(missing)}")
+
     try:
         result = await asyncio.to_thread(
             _run_sent,
@@ -161,6 +189,7 @@ async def run_sentiment_backtest_endpoint(
             take_profit_pct=req.take_profit_pct,
             hold_positions_overnight=req.hold_positions_overnight,
             eod_sell_window_minutes=req.eod_sell_window_minutes,
+            custom_scripts=custom_scripts or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
