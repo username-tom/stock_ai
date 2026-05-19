@@ -91,6 +91,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     hold_positions_overnight: Optional[bool] = None
     eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=30)
+    sentiment_data_points: Optional[int] = Field(default=None, ge=10, le=5000)
     sentiment_interval: Optional[str] = None
 
 

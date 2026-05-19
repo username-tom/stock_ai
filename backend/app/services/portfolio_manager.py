@@ -67,6 +67,7 @@ _settings: dict[str, Any] = {
     "hold_positions_overnight": True,     # whether to hold positions between days
     "eod_sell_window_minutes": 30,        # minutes before market close to start sell-only mode
     "sentiment_lookback_days": 5,         # days of historical data for sentiment calc
+    "sentiment_data_points": 10,          # number of recent bars used for sentiment calc
     "sentiment_interval": "1m",           # interval: 1m, 5m, 15m, 1h, daily, etc.
 }
 
@@ -162,6 +163,7 @@ async def _load_settings_from_db() -> None:
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", True))
             _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 30) or 30)
             _settings["sentiment_lookback_days"] = int(getattr(row, "sentiment_lookback_days", 5) or 5)
+            _settings["sentiment_data_points"] = int(getattr(row, "sentiment_data_points", 10) or 10)
             _settings["sentiment_interval"] = getattr(row, "sentiment_interval", "1m") or "1m"
 
 
@@ -197,6 +199,7 @@ async def _save_settings_to_db() -> None:
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", True)
         row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 30) or 30)
         row.sentiment_lookback_days = int(_settings.get("sentiment_lookback_days", 5) or 5)
+        row.sentiment_data_points = int(_settings.get("sentiment_data_points", 10) or 10)
         row.sentiment_interval = _settings.get("sentiment_interval", "1m") or "1m"
         await db.commit()
 
@@ -207,7 +210,7 @@ def update_manager_settings(new: dict) -> dict:
                "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
                "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation",
                "market_sentiment_strategies", "symbol_sentiment_strategies",
-              "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_interval",
+              "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval",
               "stop_loss_pct", "take_profit_pct",
               "hold_positions_overnight", "eod_sell_window_minutes"}
     for k, v in new.items():
@@ -220,7 +223,7 @@ def update_manager_settings(new: dict) -> dict:
         loop = None
     if loop is not None:
         loop.create_task(_save_settings_to_db())
-        if any(key in new for key in ("market_sentiment_strategies", "symbol_sentiment_strategies", "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_interval")):
+        if any(key in new for key in ("market_sentiment_strategies", "symbol_sentiment_strategies", "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval")):
             async def _refresh_and_apply() -> None:
                 # Refresh scores for every position that is in sentiment-routing
                 # mode so that the strategy update uses current data, not stale
@@ -244,10 +247,12 @@ async def _fetch_bars(symbol: str) -> pd.DataFrame:
     """Fetch recent intraday bars for scoring (re-uses the shared market_service helper)."""
     from app.services.market_service import get_intraday_df
     lookback_days = _settings.get("sentiment_lookback_days", 5)
+    data_points = max(1, int(_settings.get("sentiment_data_points", 10) or 10))
     interval = _settings.get("sentiment_interval", "1m")
     range_str = f"{lookback_days}d"
     df = await get_intraday_df(symbol, range_=range_str, interval=interval, include_pre_post=False)
-    return df[["Close", "Volume"]]
+    bars = df[["Close", "Volume"]]
+    return bars.tail(data_points)
 
 
 def _score_symbol(df: pd.DataFrame) -> tuple[float, str]:

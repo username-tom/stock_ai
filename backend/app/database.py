@@ -48,6 +48,7 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN hold_positions_overnight BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN eod_sell_window_minutes INTEGER NOT NULL DEFAULT 30",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_lookback_days INTEGER NOT NULL DEFAULT 5",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_data_points INTEGER NOT NULL DEFAULT 10",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_interval VARCHAR(10) NOT NULL DEFAULT '1m'",
         # sandbox_account total_deposited column (added to track cumulative deposits for repair logic)
         "ALTER TABLE sandbox_account ADD COLUMN total_deposited REAL NOT NULL DEFAULT 0.0",

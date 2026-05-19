@@ -4,7 +4,7 @@ import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
   ChartBarIcon, CheckCircleIcon, XCircleIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandboxConstants'
 import { fmtMoney } from './sandboxHelpers'
@@ -61,6 +61,7 @@ function buildDraftFromSettings(settings) {
     hold_positions_overnight: settings.hold_positions_overnight ?? true,
     eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 30,
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
+    sentiment_data_points: settings.sentiment_data_points ?? 10,
     sentiment_interval: settings.sentiment_interval ?? '1m',
   }
 }
@@ -163,6 +164,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
     queryFn: getPortfolioManagerState,
     refetchInterval: appSettings.portfolio_positions_ms,
   })
+  const { data: ibStatus } = useQuery({
+    queryKey: ['ib-status'],
+    queryFn: getIBStatus,
+    refetchInterval: appSettings.trading_status_ms,
+  })
+  const ibConnected = ibStatus?.connected === true
+
   const { data: strategyData } = useQuery({
     queryKey: ['strategies'],
     queryFn: getStrategies,
@@ -346,6 +354,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
       hold_positions_overnight: draft.hold_positions_overnight,
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
       sentiment_lookback_days: Number(draft.sentiment_lookback_days),
+      sentiment_data_points: Number(draft.sentiment_data_points),
       sentiment_interval: draft.sentiment_interval,
     })
   }
@@ -503,6 +512,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
           {settings.hold_positions_overnight
             ? 'Hold positions overnight'
             : `EOD liquidation window: ${settings.eod_sell_window_minutes}min before close`}
+        </span>
+        <span className="flex items-center gap-1">
+          <ChartBarIcon className="h-3.5 w-3.5" />
+          Sentiment window: last {settings.sentiment_data_points ?? 10} bars ({settings.sentiment_interval}, {settings.sentiment_lookback_days}d range)
         </span>
       </div>
 
@@ -694,7 +707,6 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
               </label>
             </SettingRow>
 
-            {draft.reallocation_enabled && draft.reallocation_mode === 'to_stock' && (
             <SettingRow
               label="Sentiment Lookback Period (days)"
               hint="Number of days of historical data used to calculate position sentiment scores (1-365 days)."
@@ -709,9 +721,22 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                 <span className="text-xs text-slate-500">{draft.sentiment_lookback_days} day(s)</span>
               </div>
             </SettingRow>
-            )}
 
-            {draft.reallocation_enabled && draft.reallocation_mode === 'to_stock' && (
+            <SettingRow
+              label="Sentiment Data Points"
+              hint="Number of most recent bars used to determine sentiment (10-5000)."
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={10} max={5000} step={1}
+                  value={draft.sentiment_data_points}
+                  onChange={e => updateDraft(d => ({ ...d, sentiment_data_points: e.target.value }))}
+                  className="input w-28 text-sm py-1.5"
+                />
+                <span className="text-xs text-slate-500">last {draft.sentiment_data_points} bars</span>
+              </div>
+            </SettingRow>
+
             <SettingRow
               label="Sentiment Data Interval"
               hint="Time interval for historical data used in sentiment calculation (e.g., 1-minute bars, 5-minute bars, daily, etc.)."
@@ -721,6 +746,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                 onChange={e => updateDraft(d => ({ ...d, sentiment_interval: e.target.value }))}
                 className="input text-sm py-1.5"
               >
+                {ibConnected && <option value="5s">5 seconds (IB only)</option>}
+                {!ibConnected && draft.sentiment_interval === '5s' && (
+                  <option value="5s">5 seconds (requires IB connection)</option>
+                )}
                 <option value="1m">1 minute</option>
                 <option value="5m">5 minutes</option>
                 <option value="15m">15 minutes</option>
@@ -729,7 +758,6 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                 <option value="daily">Daily</option>
               </select>
             </SettingRow>
-            )}
 
             {draft.reallocation_enabled && (
               <SettingRow

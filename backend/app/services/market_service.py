@@ -1126,7 +1126,13 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
 
     sym = symbol.upper()
     source = "ib" if _ib_connected() else "yf"
-    cache_key = f"intraday_df:{source}:{sym}:{range_}:{interval}:{'pre' if include_pre_post else 'reg'}"
+    # Yahoo does not support second-level bars; gracefully degrade to 1m when
+    # callers persist an IB-only interval like "5s".
+    resolved_interval = interval
+    if source == "yf" and interval.endswith("s"):
+        resolved_interval = "1m"
+
+    cache_key = f"intraday_df:{source}:{sym}:{range_}:{resolved_interval}:{'pre' if include_pre_post else 'reg'}"
     ttl = IB_INTRADAY_DF_TTL if source == "ib" else INTRADAY_DF_TTL
     cached = await _cache.get(cache_key, ttl)
     if cached is not None:
@@ -1144,6 +1150,7 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
             "3mo": "4 M",
         }
         bar_size_map = {
+            "5s": "5 secs",
             "1m": "1 min",
             "2m": "2 mins",
             "5m": "5 mins",
@@ -1155,7 +1162,7 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
             symbol=sym,
             end_datetime="",
             duration=duration_map.get(range_, "7 D"),
-            bar_size=bar_size_map.get(interval, "1 min"),
+            bar_size=bar_size_map.get(resolved_interval, "1 min"),
             what_to_show="TRADES",
             use_rth=not include_pre_post,
         )
@@ -1178,7 +1185,7 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
         df.index = pd.RangeIndex(len(df))
         return df
 
-    chart = await _yf_chart(sym, range_=range_, interval=interval,
+    chart = await _yf_chart(sym, range_=range_, interval=resolved_interval,
                             include_pre_post=include_pre_post)
     timestamps = chart.get("timestamp", [])
     quotes = chart.get("indicators", {}).get("quote", [{}])[0]
