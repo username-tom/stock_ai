@@ -29,41 +29,58 @@ router = APIRouter()
 async def get_positions(db: AsyncSession = Depends(get_db)):
     if ib_service.is_connected:
         raw_positions = await ib_service.get_positions()
+        local_rows = (await db.execute(select(SandboxPosition))).scalars().all()
+        local_by_symbol = {p.symbol: p for p in local_rows if p.symbol}
 
-        async def _ib_to_position(item: dict) -> dict:
-            symbol = str(item.get("symbol") or "").upper()
-            quantity = float(item.get("quantity") or 0.0)
-            avg_cost = float(item.get("avg_cost") or 0.0)
-            quote = await ib_service.get_market_data(symbol)
+        ib_filtered = [p for p in raw_positions if abs(float(p.get("quantity") or 0.0)) > 0]
+        ib_by_symbol = {
+            str(p.get("symbol") or "").upper(): p
+            for p in ib_filtered
+            if str(p.get("symbol") or "").strip()
+        }
+
+        async def _to_position(symbol: str, ib_item: dict | None) -> dict:
+            local = local_by_symbol.get(symbol)
+
+            quantity = float((ib_item or {}).get("quantity") or 0.0)
+            avg_cost = float((ib_item or {}).get("avg_cost") or 0.0)
             market_price = avg_cost
-            if isinstance(quote, dict) and "error" not in quote:
-                market_price = float(quote.get("last") or quote.get("close") or avg_cost or 0.0)
+            if ib_item is not None:
+                quote = await ib_service.get_market_data(symbol)
+                if isinstance(quote, dict) and "error" not in quote:
+                    market_price = float(quote.get("last") or quote.get("close") or avg_cost or 0.0)
+
             market_value = quantity * market_price
             unrealized = (market_price - avg_cost) * quantity
+            local_created_at = local.created_at.astimezone().isoformat() if local and local.created_at else None
+
             return {
-                "id": None,
+                "id": local.id if local else None,
                 "symbol": symbol,
                 "allocated_funds": round(max(0.0, market_value), 4),
                 "shares": quantity,
                 "avg_cost": round(avg_cost, 4),
-                "strategy_name": None,
-                "strategy_enabled": False,
-                "last_signal": None,
-                "last_run_at": None,
-                "engine_error": None,
-                "realized_pnl": 0.0,
+                "strategy_name": local.strategy_name if local else None,
+                "strategy_enabled": bool(local.strategy_enabled) if local else False,
+                "last_signal": local.last_signal if local else None,
+                "last_run_at": local.last_run_at.isoformat() if local and local.last_run_at else None,
+                "engine_error": local.engine_error if local else None,
+                "realized_pnl": float(local.realized_pnl or 0.0) if local else 0.0,
                 "total_invested": round(max(0.0, avg_cost * quantity), 4),
                 "unrealized_pnl": round(unrealized, 4),
                 "market_value": round(market_value, 4),
-                "is_on_watchlist": True,
-                "created_at": None,
-                "pending_shares": 0.0,
-                "pending_avg_cost": 0.0,
-                "pending_since": None,
+                "is_on_watchlist": bool(local.is_on_watchlist) if local else True,
+                "created_at": local_created_at,
+                "pending_shares": float(local.pending_shares or 0.0) if local else 0.0,
+                "pending_avg_cost": float(local.pending_avg_cost or 0.0) if local else 0.0,
+                "pending_since": local.pending_since.isoformat() if local and local.pending_since else None,
             }
 
-        filtered = [p for p in raw_positions if abs(float(p.get("quantity") or 0.0)) > 0]
-        enriched = await asyncio.gather(*[_ib_to_position(p) for p in filtered], return_exceptions=False)
+        symbols = sorted(set(local_by_symbol.keys()) | set(ib_by_symbol.keys()))
+        enriched = await asyncio.gather(
+            *[_to_position(symbol, ib_by_symbol.get(symbol)) for symbol in symbols],
+            return_exceptions=False,
+        )
         enriched.sort(key=lambda p: p["symbol"])
 
         mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"

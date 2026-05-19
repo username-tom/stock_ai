@@ -110,6 +110,12 @@ export default function PortfolioOverview({
     const n = Number(value)
     return Number.isFinite(n) ? n : null
   }
+  const ibBuyingPower = numOrNull(accountData?.buying_power)
+  const ibCashValue = numOrNull(accountData?.cash_value)
+  const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
+  const ibRealizedPnl = numOrNull(accountData?.realized_pnl)
+  const headlineUnrealized = isSimulated ? totalUnrealizedPnl : (ibUnrealizedPnl ?? totalUnrealizedPnl)
+  const headlineRealized = isSimulated ? totalRealizedPnl : ibRealizedPnl
 
   // Fallback period metrics from cumulative curve if backend metrics are temporarily unavailable.
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
@@ -270,35 +276,36 @@ export default function PortfolioOverview({
       {/* Top stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         <div className="card">
-          <div className="text-xs text-slate-500 mb-1">Total Funds</div>
+          <div className="text-xs text-slate-500 mb-1">{isSimulated ? 'Total Funds' : 'Net Liquidation'}</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(accountData?.total_funds)}</div>
           <div className="text-xs text-slate-500 mt-0.5">Available: <span className="text-emerald-400">{fmtMoney(accountData?.available_funds)}</span></div>
         </div>
         <div className="card">
-          <div className="text-xs text-slate-500 mb-1">Total Deposited</div>
-          <div className="text-xl font-bold text-slate-100">{fmtMoney(totalDeposited)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{isSimulated ? 'Net deposits less withdrawals' : 'Simulated only'}</div>
+          <div className="text-xs text-slate-500 mb-1">{isSimulated ? 'Total Deposited' : 'Buying Power'}</div>
+          <div className="text-xl font-bold text-slate-100">{fmtMoney(isSimulated ? totalDeposited : ibBuyingPower)}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{isSimulated ? 'Net deposits less withdrawals' : `Cash Value: ${fmtMoney(ibCashValue)}`}</div>
         </div>
         <div className="card">
-          <div className="text-xs text-slate-500 mb-1">Portfolio Equity</div>
+          <div className="text-xs text-slate-500 mb-1">{isSimulated ? 'Portfolio Equity' : 'Gross Position Value'}</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(totalEquity)}</div>
           <div className="text-xs text-slate-500 mt-0.5">{positions.filter(p => p.shares > 0).length} positions held</div>
         </div>
-        <div className={`card ${totalUnrealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
+        <div className={`card ${headlineUnrealized >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
           <div className="text-xs text-slate-500 mb-1">Unrealised P&amp;L</div>
-          <div className={`text-xl font-bold ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalUnrealizedPnl)}</div>
+          <div className={`text-xl font-bold ${headlineUnrealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(headlineUnrealized)}</div>
           {totalEquity > 0 && (
-            <div className="text-xs text-slate-500 mt-0.5">{((totalUnrealizedPnl / totalEquity) * 100).toFixed(2)}% of equity</div>
+            <div className="text-xs text-slate-500 mt-0.5">{((headlineUnrealized / totalEquity) * 100).toFixed(2)}% of equity</div>
           )}
         </div>
-        <div className={`card ${totalRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
+        <div className={`card ${headlineRealized != null && headlineRealized >= 0 ? 'border-emerald-700/20' : headlineRealized != null ? 'border-red-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Realised P&amp;L</div>
-          <div className={`text-xl font-bold ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{realizedPnlPct == null ? '—' : `${realizedPnlPct.toFixed(2)}% of deposited funds`}</div>
+          <div className={`text-xl font-bold ${headlineRealized == null ? 'text-slate-400' : headlineRealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{headlineRealized == null ? '—' : fmt(headlineRealized)}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{isSimulated ? (realizedPnlPct == null ? '—' : `${realizedPnlPct.toFixed(2)}% of deposited funds`) : (headlineRealized == null ? 'Not provided by IB summary' : 'From IB account summary')}</div>
         </div>
       </div>
 
       {/* Secondary stat cards: performance metrics */}
+      {isSimulated && (
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className={`card ${maxGain > 0 ? 'border-emerald-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Max Gain</div>
@@ -329,8 +336,10 @@ export default function PortfolioOverview({
           </div>
         </div>
       </div>
+      )}
 
       {/* Tertiary stat cards: long-horizon performance */}
+      {isSimulated && (
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
 
         <div className={`card ${monthlyPnl != null && monthlyPnl !== 0 ? (monthlyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
@@ -363,6 +372,7 @@ export default function PortfolioOverview({
           </div>
         </div>
       </div>
+      )}
 
       {/* Per-position breakdown table */}
       {pieData.length > 0 ? (

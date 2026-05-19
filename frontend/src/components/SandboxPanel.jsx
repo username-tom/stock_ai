@@ -217,9 +217,26 @@ export default function SandboxPanel() {
   const selectedPrice = quotes[selectedSymbol]?.last_price ?? selectedPos?.avg_cost ?? 0
 
   // portfolio calcs
-  const totalEquity = useMemo(() => rawPositions.reduce((s, p) => s + (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares, 0), [rawPositions, quotes])
-  const totalRealizedPnl = rawPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
-  const totalUnrealizedPnl = rawPositions.reduce((s, p) => s + ((quotes[p.symbol]?.last_price ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
+  const totalEquity = useMemo(() => {
+    if (ibConnected && Number.isFinite(Number(accountData?.equity))) {
+      return Number(accountData.equity)
+    }
+    return rawPositions.reduce((s, p) => s + (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares, 0)
+  }, [ibConnected, accountData?.equity, rawPositions, quotes])
+
+  const totalRealizedPnl = useMemo(() => {
+    if (ibConnected && Number.isFinite(Number(accountData?.realized_pnl))) {
+      return Number(accountData.realized_pnl)
+    }
+    return rawPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
+  }, [ibConnected, accountData?.realized_pnl, rawPositions])
+
+  const totalUnrealizedPnl = useMemo(() => {
+    if (ibConnected && Number.isFinite(Number(accountData?.unrealized_pnl))) {
+      return Number(accountData.unrealized_pnl)
+    }
+    return rawPositions.reduce((s, p) => s + ((quotes[p.symbol]?.last_price ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
+  }, [ibConnected, accountData?.unrealized_pnl, rawPositions, quotes])
   const pieData = useMemo(() => {
     const active = rawPositions.filter(p => p.shares > 0 || p.allocated_funds > 0)
     const total = active.reduce((s, p) => {

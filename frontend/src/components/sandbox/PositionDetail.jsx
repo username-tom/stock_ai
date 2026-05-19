@@ -290,8 +290,13 @@ export default function PositionDetail({
           {/* Summary cards */}
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mt-4">
             <div className="card">
-          <div className="text-xs text-slate-500 mb-1">Allocated Funds</div>
-          {editingAlloc ? (
+              <div className="text-xs text-slate-500 mb-1">{ibMode ? 'IB Position Value' : 'Allocated Funds'}</div>
+              {ibMode ? (
+                <div>
+                  <div className="text-xl font-bold text-slate-100">{fmtMoney(selectedMarketValue)}</div>
+                  <div className="text-xs text-slate-500 mt-1">Managed by Interactive Brokers</div>
+                </div>
+              ) : editingAlloc ? (
             <div className="flex items-center gap-1 mt-1">
               <input className="input text-sm py-1 px-2 w-24" type="number" value={allocInput} onChange={e => setAllocInput(e.target.value)} />
               <button className="text-emerald-400 hover:text-emerald-300" onClick={() => { updatePosMut.mutate({ symbol: selectedSymbol, payload: { allocated_funds: parseFloat(allocInput) } }); setEditingAlloc(false) }}>
@@ -309,9 +314,11 @@ export default function PositionDetail({
               </button>
             </div>
           )}
-          <div className="text-xs text-slate-500 mt-1">
-            Cash left: <span className={`font-semibold ${positionCashRemaining > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{fmtMoney(positionCashRemaining)}</span>
-          </div>
+          {!ibMode && (
+            <div className="text-xs text-slate-500 mt-1">
+              Cash left: <span className={`font-semibold ${positionCashRemaining > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{fmtMoney(positionCashRemaining)}</span>
+            </div>
+          )}
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Shares Held</div>
@@ -348,12 +355,18 @@ export default function PositionDetail({
           <div className="text-xs text-slate-500 mb-1">Total P&amp;L</div>
           <div className={`text-xl font-bold ${(selectedPos.realized_pnl + selectedUnrealised) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(selectedPos.realized_pnl + selectedUnrealised)}</div>
           <div className="text-xs text-slate-500 mt-0.5">
-            Realised: {fmt(selectedPos.realized_pnl)}
-            {selectedPos.allocated_funds > 0 && (
-              <span className={selectedPos.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                {' '}({((selectedPos.realized_pnl / selectedPos.allocated_funds) * 100).toFixed(2)}%)
-              </span>
-            )}
+            {ibMode
+              ? 'Realised: — (not provided per-position by IB endpoint)'
+              : (
+                <>
+                  Realised: {fmt(selectedPos.realized_pnl)}
+                  {selectedPos.allocated_funds > 0 && (
+                    <span className={selectedPos.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {' '}({((selectedPos.realized_pnl / selectedPos.allocated_funds) * 100).toFixed(2)}%)
+                    </span>
+                  )}
+                </>
+              )}
           </div>
         </div>
       </div>

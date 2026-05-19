@@ -335,7 +335,12 @@ class IBService:
             self._app.account_summary_events[req_id] = evt
 
         try:
-            self._app.reqAccountSummary(req_id, "All", "$LEDGER:ALL,NetLiquidation,BuyingPower,AvailableFunds,TotalCashValue")
+            self._app.reqAccountSummary(
+                req_id,
+                "All",
+                "$LEDGER:ALL,NetLiquidation,BuyingPower,AvailableFunds,TotalCashValue,"
+                "GrossPositionValue,UnrealizedPnL,RealizedPnL",
+            )
             done = await self._wait_event(evt, timeout=10)
             self._app.cancelAccountSummary(req_id)
             if not done:

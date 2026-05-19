@@ -29,6 +29,12 @@ export default function SandboxSidebar({
   onAddIbWatchlistSymbol,
 }) {
   const qc = useQueryClient()
+  const ibUnrealizedPnl = ibMode && Number.isFinite(Number(accountData?.unrealized_pnl))
+    ? Number(accountData.unrealized_pnl)
+    : totalUnrealizedPnl
+  const ibRealizedPnl = ibMode && Number.isFinite(Number(accountData?.realized_pnl))
+    ? Number(accountData.realized_pnl)
+    : totalRealizedPnl
 
   const [showAddFunds, setShowAddFunds] = useState(false)
   const [fundsInput, setFundsInput] = useState('')
@@ -227,21 +233,21 @@ export default function SandboxSidebar({
         )}
 
         <div className="space-y-1.5 text-sm">
-          <div className="flex justify-between"><span className="text-slate-500">Total Funds</span><span className="text-slate-200 font-semibold">{fmtMoney(accountData?.total_funds)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">{ibMode ? 'Net Liquidation' : 'Total Funds'}</span><span className="text-slate-200 font-semibold">{fmtMoney(accountData?.total_funds)}</span></div>
           <div className="flex justify-between items-center">
-            <span className="text-slate-500">Available</span>
+            <span className="text-slate-500">{ibMode ? 'Available Funds' : 'Available'}</span>
             <span className={`font-semibold ${(accountData?.available_funds ?? 0) < 0 ? 'text-red-400' : 'text-emerald-400'}`}>{fmtMoney(accountData?.available_funds)}</span>
           </div>
-          <div className="flex justify-between"><span className="text-slate-500">Portfolio Equity</span><span className="text-slate-200 font-semibold">{fmtMoney(totalEquity)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">{ibMode ? 'Gross Position Value' : 'Portfolio Equity'}</span><span className="text-slate-200 font-semibold">{fmtMoney(totalEquity)}</span></div>
         </div>
         <div className="mt-3 grid grid-cols-2 gap-2">
-          <div className={`rounded-lg p-2 text-center ${totalUnrealizedPnl >= 0 ? 'bg-emerald-900/20' : 'bg-red-900/20'}`}>
+          <div className={`rounded-lg p-2 text-center ${ibUnrealizedPnl >= 0 ? 'bg-emerald-900/20' : 'bg-red-900/20'}`}>
             <div className="text-xs text-slate-500 mb-0.5">Unrealised</div>
-            <div className={`text-sm font-semibold ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalUnrealizedPnl)}</div>
+            <div className={`text-sm font-semibold ${ibUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(ibUnrealizedPnl)}</div>
           </div>
-          <div className={`rounded-lg p-2 text-center ${totalRealizedPnl >= 0 ? 'bg-emerald-900/20' : 'bg-red-900/20'}`}>
+          <div className={`rounded-lg p-2 text-center ${ibRealizedPnl >= 0 ? 'bg-emerald-900/20' : 'bg-red-900/20'}`}>
             <div className="text-xs text-slate-500 mb-0.5">Realised</div>
-            <div className={`text-sm font-semibold ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</div>
+            <div className={`text-sm font-semibold ${ibRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(ibRealizedPnl)}</div>
           </div>
         </div>
       </button>

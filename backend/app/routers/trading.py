@@ -109,19 +109,11 @@ async def connect_ib():
                 await offload_simulated_state(db)
                 await _snapshot_simulated_automation_state()
 
-                res = await db.execute(select(SandboxPosition))
-                positions = res.scalars().all()
-                for pos in positions:
-                    pos.strategy_enabled = False
-                await db.commit()
-
-            from app.services.portfolio_manager import update_manager_settings
-            update_manager_settings({"enabled": False})
             await _snapshot_ib_state(mode)
             result["handoff"] = {
                 "simulated_saved": True,
-                "engines_stopped": True,
-                "portfolio_manager_stopped": True,
+                "engines_stopped": False,
+                "portfolio_manager_stopped": False,
                 "active_profile": mode,
             }
         except Exception as exc:

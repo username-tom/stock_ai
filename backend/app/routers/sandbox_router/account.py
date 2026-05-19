@@ -47,11 +47,17 @@ async def get_account_info(db: AsyncSession = Depends(get_db)):
                     continue
             return None
 
-        # Strict IB-backed values only; do not substitute with buying power or local estimates.
+        # Strict IB-backed values only; do not substitute with local estimates.
         total_funds = _to_float("NetLiquidation")
         available_funds = _to_float("AvailableFunds")
-        equity = None
-        if total_funds is not None and available_funds is not None:
+        buying_power = _to_float("BuyingPower")
+        cash_value = _to_float("TotalCashValue")
+        equity = _to_float("GrossPositionValue")
+        unrealized_pnl = _to_float("UnrealizedPnL")
+        realized_pnl = _to_float("RealizedPnL")
+
+        # Fallback only when GrossPositionValue is unavailable.
+        if equity is None and total_funds is not None and available_funds is not None:
             equity = max(0.0, total_funds - available_funds)
 
         mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
@@ -67,6 +73,10 @@ async def get_account_info(db: AsyncSession = Depends(get_db)):
             "allocated_funds": round(equity, 4) if equity is not None else None,
             "equity": round(equity, 4) if equity is not None else None,
             "available_funds": round(available_funds, 4) if available_funds is not None else None,
+            "buying_power": round(buying_power, 4) if buying_power is not None else None,
+            "cash_value": round(cash_value, 4) if cash_value is not None else None,
+            "unrealized_pnl": round(unrealized_pnl, 4) if unrealized_pnl is not None else None,
+            "realized_pnl": round(realized_pnl, 4) if realized_pnl is not None else None,
             "updated_at": None,
             "source": "ib",
             "profile": mode,
