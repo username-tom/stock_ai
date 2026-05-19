@@ -14,6 +14,22 @@ from app.routers.sandbox_router._helpers import position_dict, ensure_sandbox_wr
 router = APIRouter()
 
 
+def _should_force_engine_off_for_position(pos: SandboxPosition) -> bool:
+    from app.services.portfolio_manager import get_manager_settings
+    from app.services.sandbox_engine import should_force_engine_off_without_position
+
+    manager_settings = get_manager_settings()
+    return should_force_engine_off_without_position(
+        shares=pos.shares,
+        pending_shares=pos.pending_shares,
+        hold_overnight=bool(manager_settings.get("hold_positions_overnight", True)),
+        eod_sell_window_minutes=int(manager_settings.get("eod_sell_window_minutes", 30) or 30),
+        eod_engine_shutoff_minutes_before_sell=int(
+            manager_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120
+        ),
+    )
+
+
 @router.get("/engine/state")
 async def engine_state():
     from app.services.sandbox_engine import get_engine_state
@@ -30,9 +46,14 @@ async def engine_toggle_all(db: AsyncSession = Depends(get_db)):
     any_stopped = any(not p.strategy_enabled for p in positions)
     for pos in positions:
         pos.strategy_enabled = any_stopped
+        if pos.strategy_enabled and _should_force_engine_off_for_position(pos):
+            pos.strategy_enabled = False
     await db.commit()
     await offload_simulated_state(db)
-    return {"enabled": any_stopped, "count": len(positions)}
+    return {
+        "enabled": any(p.strategy_enabled for p in positions),
+        "count": len(positions),
+    }
 
 
 @router.post("/engine/toggle/{symbol}")
@@ -46,6 +67,8 @@ async def engine_toggle(symbol: str, db: AsyncSession = Depends(get_db)):
     if not pos.strategy_name:
         raise HTTPException(400, "Assign a strategy before enabling the engine.")
     pos.strategy_enabled = not pos.strategy_enabled
+    if pos.strategy_enabled and _should_force_engine_off_for_position(pos):
+        pos.strategy_enabled = False
     await db.commit()
     await db.refresh(pos)
     await offload_simulated_state(db)

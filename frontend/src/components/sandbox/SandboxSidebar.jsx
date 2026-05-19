@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  PlusIcon, MinusCircleIcon, CurrencyDollarIcon, SignalIcon, BeakerIcon, QueueListIcon,
+  PlusIcon, MinusCircleIcon, CurrencyDollarIcon, SignalIcon, QueueListIcon,
   WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline'
 
@@ -15,9 +15,11 @@ import { encodeStrategy, fmtMoney, fmt, defaultParams } from './sandboxHelpers'
 export default function SandboxSidebar({
   ibMode,
   accountData,
+  engineState,
   totalEquity,
   totalUnrealizedPnl,
   totalRealizedPnl,
+  managerSettings = null,
   positions,
   quotes,
   sectors,
@@ -35,6 +37,71 @@ export default function SandboxSidebar({
   const ibRealizedPnl = ibMode && Number.isFinite(Number(accountData?.realized_pnl))
     ? Number(accountData.realized_pnl)
     : totalRealizedPnl
+  const [phaseNow, setPhaseNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const id = setInterval(() => setPhaseNow(Date.now()), 30_000)
+    return () => clearInterval(id)
+  }, [])
+
+  const marketPhase = useMemo(() => {
+    const holdOvernight = managerSettings?.hold_positions_overnight !== false
+    const sellWindow = Math.max(1, Number(managerSettings?.eod_sell_window_minutes ?? 30))
+    const shutoffWindow = Math.max(1, Number(managerSettings?.eod_engine_shutoff_minutes_before_sell ?? 120))
+
+    let weekday = null
+    let hour = 0
+    let minute = 0
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        weekday: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(new Date(phaseNow))
+      const wd = parts.find(p => p.type === 'weekday')?.value
+      const hh = Number(parts.find(p => p.type === 'hour')?.value ?? 0)
+      const mm = Number(parts.find(p => p.type === 'minute')?.value ?? 0)
+      weekday = wd
+      hour = Number.isFinite(hh) ? hh : 0
+      minute = Number.isFinite(mm) ? mm : 0
+    } catch {
+      // Fall back to local time parsing if Intl timezone parsing fails.
+      const now = new Date(phaseNow)
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+      weekday = days[now.getDay()]
+      hour = now.getHours()
+      minute = now.getMinutes()
+    }
+
+    const isWeekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday)
+    const minutesNow = hour * 60 + minute
+    const tradingOpenFromClock = isWeekday && minutesNow >= 570 && minutesNow < 960 // 09:30-16:00 ET
+    const tradingOpen = typeof engineState?.trading_open === 'boolean'
+      ? engineState.trading_open
+      : tradingOpenFromClock
+
+    if (!tradingOpen) {
+      return { label: 'CLOSED', className: 'bg-slate-800 text-slate-400 border border-dark-500' }
+    }
+
+    if (holdOvernight) {
+      return { label: 'NORMAL', className: 'bg-emerald-900/25 text-emerald-300 border border-emerald-700/40' }
+    }
+
+    const marketClose = 960
+    const sellStart = Math.max(0, marketClose - sellWindow)
+    const shutoffStart = Math.max(0, sellStart - shutoffWindow)
+
+    if (minutesNow >= sellStart) {
+      return { label: 'SELL PERIOD', className: 'bg-red-900/25 text-red-300 border border-red-700/40' }
+    }
+    if (minutesNow >= shutoffStart) {
+      return { label: 'SHUT OFF', className: 'bg-amber-900/25 text-amber-300 border border-amber-700/40' }
+    }
+    return { label: 'NORMAL', className: 'bg-emerald-900/25 text-emerald-300 border border-emerald-700/40' }
+  }, [managerSettings, engineState?.trading_open, phaseNow])
 
   const [showAddFunds, setShowAddFunds] = useState(false)
   const [fundsInput, setFundsInput] = useState('')
@@ -156,11 +223,10 @@ export default function SandboxSidebar({
                 <SignalIcon className="h-3 w-3" />
                 {ibMode === 'live' ? 'LIVE' : 'PAPER'}
               </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-500 border border-dark-500">
-                <BeakerIcon className="h-3 w-3" />SIM
-              </span>
-            )}
+            ) : null}
+            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${marketPhase.className}`} title="Current engine market phase">
+              {marketPhase.label}
+            </span>
           </div>
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
             {!ibMode && (
@@ -300,6 +366,8 @@ export default function SandboxSidebar({
             <StockListItem key={pos.symbol} pos={pos} quote={quotes[pos.symbol]}
               sector={sectors?.[pos.symbol]}
               pmScore={pmScores[pos.symbol]}
+              managerSettings={managerSettings}
+              accountTotalFunds={accountData?.total_funds ?? 0}
               isSelected={selectedSymbol === pos.symbol}
               toggleEngineMut={toggleEngineMut}
               onClick={() => onSelectSymbol(pos.symbol)} />

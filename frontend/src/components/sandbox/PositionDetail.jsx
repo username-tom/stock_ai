@@ -53,6 +53,7 @@ export default function PositionDetail({
   tradeMut,
   cancelOrderMut,
   accountData,
+  managerSettings = null,
 }) {
   const navigate = useNavigate()
   const appSettings = useAppSettings()
@@ -124,6 +125,10 @@ export default function PositionDetail({
       : '',
   )
   const [sentimentMode, setSentimentMode] = useState(selectedPos?.sentiment_mode ?? 'none')
+  const minFundsMode = managerSettings?.min_position_funds_mode ?? 'dollar'
+  const minFundsDollar = minFundsMode === 'percent'
+    ? ((Number(accountData?.total_funds) || 0) * (Number(managerSettings?.min_position_funds_pct ?? 1) / 100))
+    : Number(managerSettings?.min_position_funds ?? 0)
 
   // Auto-update trade price when live quote changes
   useEffect(() => {
@@ -378,6 +383,14 @@ export default function PositionDetail({
           <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
             <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Allocation Guardrails</h3>
             <span className="text-xs text-slate-500">Maximum Allocation</span>
+          </div>
+          <div className="text-xs text-slate-500 mb-2">
+            Minimum Funds per Position:{' '}
+            <span className="text-slate-300 font-semibold">
+              {minFundsMode === 'percent'
+                ? `${Number(managerSettings?.min_position_funds_pct ?? 1).toFixed(2)}% (${fmtMoney(minFundsDollar)})`
+                : fmtMoney(minFundsDollar)}
+            </span>
           </div>
           <p className="text-xs text-slate-500 mb-3">
             Cap how much this symbol can hold when the portfolio manager deploys or reallocates funds.

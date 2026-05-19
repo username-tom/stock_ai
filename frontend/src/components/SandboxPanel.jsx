@@ -688,9 +688,11 @@ export default function SandboxPanel() {
       <SandboxSidebar
         ibMode={ibMode}
         accountData={accountData}
+        engineState={engineState}
         totalEquity={totalEquity}
         totalUnrealizedPnl={totalUnrealizedPnl}
         totalRealizedPnl={totalRealizedPnl}
+        managerSettings={managerState?.settings ?? null}
         positions={positions}
         quotes={quotes}
         sectors={sectors}
@@ -1016,6 +1018,7 @@ export default function SandboxPanel() {
               handleTrade={handleTrade}
               tradeMut={tradeMut}
               cancelOrderMut={cancelOrderMut}
+              managerSettings={managerState?.settings ?? null}
             />
           )}
         </div>

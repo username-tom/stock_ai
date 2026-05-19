@@ -140,6 +140,28 @@ def _is_in_pre_sell_engine_shutoff_window(
     return engine_shutoff_start <= t < final_sell_start
 
 
+def should_force_engine_off_without_position(
+    *,
+    shares: float,
+    pending_shares: float,
+    hold_overnight: bool,
+    eod_sell_window_minutes: int,
+    eod_engine_shutoff_minutes_before_sell: int,
+) -> bool:
+    """Return True when a flat engine must stay off during the EOD shutoff flow."""
+    if hold_overnight:
+        return False
+    if float(shares or 0.0) > 0 or float(pending_shares or 0.0) > 0:
+        return False
+    return (
+        _is_in_pre_sell_engine_shutoff_window(
+            eod_sell_window_minutes,
+            eod_engine_shutoff_minutes_before_sell,
+        )
+        or _is_in_eod_sell_window(eod_sell_window_minutes)
+    )
+
+
 _final_sell_window_seen: set[str] = set()
 
 
@@ -387,6 +409,13 @@ async def _process_symbol(
                     action = "SELL"
                     reason = f"take_profit ({take_profit_pct:.2f}% @ ${tp_price:.2f})"
 
+        disable_engine_without_position = should_force_engine_off_without_position(
+            shares=pos.shares,
+            pending_shares=pos.pending_shares,
+            hold_overnight=hold_overnight,
+            eod_sell_window_minutes=eod_window_mins,
+            eod_engine_shutoff_minutes_before_sell=pre_sell_shutoff_mins,
+        )
         if action is None and trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0:
             # During pre-sell shutdown and final sell windows, suppress new entries.
             if in_pre_sell_shutoff_window or in_final_sell_window:
@@ -418,7 +447,13 @@ async def _process_symbol(
                 )
 
         # Write engine status back to the position row (current bar signal for display)
-        await _update_position_status(pos.id, current_signal, None, datetime.now(timezone.utc))
+        await _update_position_status(
+            pos.id,
+            current_signal,
+            None,
+            datetime.now(timezone.utc),
+            disable_engine=disable_engine_without_position,
+        )
 
     except Exception as exc:
         logger.warning("Engine error for %s: %s", symbol, exc)
@@ -433,6 +468,7 @@ async def _update_position_status(
     last_signal: int | None,
     engine_error: str | None,
     last_run_at: datetime,
+    disable_engine: bool = False,
 ) -> None:
     """Write last_signal / last_run_at / engine_error back to the DB."""
     async with AsyncSessionLocal() as db:
@@ -446,6 +482,8 @@ async def _update_position_status(
                 pos.last_signal = last_signal
             pos.last_run_at = last_run_at
             pos.engine_error = engine_error
+            if disable_engine:
+                pos.strategy_enabled = False
             await db.commit()
 
 

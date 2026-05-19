@@ -25,6 +25,22 @@ from app.services.local_storage import save_portfolio_state
 router = APIRouter()
 
 
+def _should_force_engine_off_for_position(pos: SandboxPosition) -> bool:
+    from app.services.portfolio_manager import get_manager_settings
+    from app.services.sandbox_engine import should_force_engine_off_without_position
+
+    manager_settings = get_manager_settings()
+    return should_force_engine_off_without_position(
+        shares=pos.shares,
+        pending_shares=pos.pending_shares,
+        hold_overnight=bool(manager_settings.get("hold_positions_overnight", True)),
+        eod_sell_window_minutes=int(manager_settings.get("eod_sell_window_minutes", 30) or 30),
+        eod_engine_shutoff_minutes_before_sell=int(
+            manager_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120
+        ),
+    )
+
+
 @router.get("/positions")
 async def get_positions(db: AsyncSession = Depends(get_db)):
     if ib_service.is_connected:
@@ -69,6 +85,9 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "total_invested": round(max(0.0, avg_cost * quantity), 4),
                 "unrealized_pnl": round(unrealized, 4),
                 "market_value": round(market_value, 4),
+                "max_allocation_mode": (local.max_allocation_mode if local and local.max_allocation_mode else "dollar"),
+                "max_allocation_value": (local.max_allocation_value if local else None),
+                "sentiment_mode": (local.sentiment_mode if local else None),
                 "is_on_watchlist": bool(local.is_on_watchlist) if local else True,
                 "created_at": local_created_at,
                 "pending_shares": float(local.pending_shares or 0.0) if local else 0.0,
@@ -212,6 +231,8 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
             sentiment_mode_changed = True
     if req.strategy_enabled is not None:
         pos.strategy_enabled = req.strategy_enabled
+        if pos.strategy_enabled and _should_force_engine_off_for_position(pos):
+            pos.strategy_enabled = False
     if req.max_allocation_mode is not None:
         pos.max_allocation_mode = req.max_allocation_mode
     if req.max_allocation_value is not None:

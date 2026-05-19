@@ -118,6 +118,34 @@ def test_is_in_pre_sell_engine_shutoff_window(monkeypatch):
     assert sandbox_engine._is_in_pre_sell_engine_shutoff_window(30, 120) is False
 
 
+def test_force_engine_off_without_position_in_shutoff_window(monkeypatch):
+    """Flat engines should be forced off during the pre-sell shutoff window."""
+    monkeypatch.setattr(sandbox_engine, "datetime", _FixedDateTime)
+
+    _FixedDateTime._now = datetime(2026, 5, 19, 14, 0, tzinfo=_ET)
+    assert sandbox_engine.should_force_engine_off_without_position(
+        shares=0,
+        pending_shares=0,
+        hold_overnight=False,
+        eod_sell_window_minutes=30,
+        eod_engine_shutoff_minutes_before_sell=120,
+    ) is True
+
+
+def test_force_engine_off_without_position_keeps_open_positions(monkeypatch):
+    """Engines with exposure should remain on until the sell path handles them."""
+    monkeypatch.setattr(sandbox_engine, "datetime", _FixedDateTime)
+
+    _FixedDateTime._now = datetime(2026, 5, 19, 14, 0, tzinfo=_ET)
+    assert sandbox_engine.should_force_engine_off_without_position(
+        shares=1,
+        pending_shares=0,
+        hold_overnight=False,
+        eod_sell_window_minutes=30,
+        eod_engine_shutoff_minutes_before_sell=120,
+    ) is False
+
+
 def test_mark_first_entry_into_final_sell_window_once_per_day(monkeypatch):
     """A symbol should trigger the final-sell-start marker once per trading day."""
     monkeypatch.setattr(sandbox_engine, "datetime", _FixedDateTime)

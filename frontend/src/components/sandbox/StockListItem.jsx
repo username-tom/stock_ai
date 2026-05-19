@@ -33,7 +33,7 @@ function pmClassLabel(cls) {
   return '—'
 }
 
-function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggleEngineMut }) {
+function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, accountTotalFunds = 0, isSelected, onClick, toggleEngineMut }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
   const { data: templatesData } = useQuery({ queryKey: ['builtin-templates'], queryFn: getBuiltinTemplates, staleTime: 300000 })
@@ -54,6 +54,13 @@ function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggl
 
   const { mp, equity, unrealised, totalPnl, changePct, positive } = calculations
   const canToggleEngine = !!toggleEngineMut && !!pos.strategy_name
+  const minFundsMode = managerSettings?.min_position_funds_mode ?? 'dollar'
+  const minFundsDollar = minFundsMode === 'percent'
+    ? ((Number(accountTotalFunds) || 0) * (Number(managerSettings?.min_position_funds_pct ?? 1) / 100))
+    : Number(managerSettings?.min_position_funds ?? 0)
+  const minFundsLabel = minFundsMode === 'percent'
+    ? `Min ${Number(managerSettings?.min_position_funds_pct ?? 1).toFixed(2)}% (${fmtMoney(minFundsDollar)})`
+    : `Min ${fmtMoney(minFundsDollar)}`
 
   const handleMouseEnter = useCallback(() => {
     if (!wrapperRef.current) return
@@ -120,6 +127,7 @@ function StockListItem({ pos, quote, sector, pmScore, isSelected, onClick, toggl
             <span className={`font-semibold ${unrealised >= 0 ? 'text-emerald-500/80' : 'text-red-500/80'}`}>{fmt(unrealised)}</span>
           </div>
         )}
+        <div className="text-[11px] text-slate-500 mt-0.5">{minFundsLabel} per position</div>
         {pos.strategy_name && (
           <div className="mt-0.5 flex items-center gap-1.5">
             <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${pos.strategy_enabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />
