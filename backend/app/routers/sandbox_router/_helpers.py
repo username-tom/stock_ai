@@ -80,9 +80,9 @@ def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict
     }
 
 
-def ensure_sandbox_write_allowed() -> None:
-    """Reject sandbox mutations while IB is connected and active."""
-    if ib_service.is_connected:
+def ensure_sandbox_write_allowed(*, allow_while_ib: bool = False) -> None:
+    """Reject sandbox mutations while IB is connected unless explicitly allowed."""
+    if ib_service.is_connected and not allow_while_ib:
         raise HTTPException(
             status_code=409,
             detail="Sandbox writes are disabled while IB is connected. Disconnect IB to edit simulated portfolio.",

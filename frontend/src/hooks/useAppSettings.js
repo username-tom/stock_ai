@@ -27,6 +27,12 @@ export const SETTINGS_DEFAULTS = {
   trading_positions_ms:       5_000,   // IB open positions
   trading_orders_ms:          5_000,   // IB open orders
 
+  // Open-order UX (sandbox position detail)
+  open_orders_panel_enabled:   true,   // show open-order status panel in activity log
+  open_orders_countdown_enabled:true,  // show countdown ring on open-order status rows
+  open_orders_price_helper_enabled:true,// show open-order price stepper/dropdown in trade card
+  open_orders_expiring_soon_min: 30,   // threshold for "expiring soon" status
+
   // Ticker bar
   ticker_rotate_ms:          30_000,   // rotate visible ticker symbols
   ticker_slot_count:              6,   // preferred number of fixed ticker slots

@@ -324,15 +324,19 @@ async def place_order(req: OrderRequest, db: AsyncSession = Depends(get_db)):
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
 
+    ib_status = str(result.get("status") or "").upper()
+    is_filled = ib_status == "FILLED"
+
     trade = Trade(
         symbol=req.symbol.upper(),
         side=OrderSide(req.side.upper()),
         quantity=req.quantity,
         price=req.limit_price or 0.0,
-        status=OrderStatus.PENDING,
+        status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
         mode=TradingMode(mode),
         ib_order_id=result.get("ib_order_id"),
         strategy_name=req.strategy_name,
+        filled_at=datetime.utcnow() if is_filled else None,
     )
     db.add(trade)
     await db.commit()

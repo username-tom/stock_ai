@@ -22,7 +22,7 @@ async def engine_state():
 
 @router.post("/engine/toggle-all")
 async def engine_toggle_all(db: AsyncSession = Depends(get_db)):
-    ensure_sandbox_write_allowed()
+    ensure_sandbox_write_allowed(allow_while_ib=True)
     result = await db.execute(select(SandboxPosition).where(SandboxPosition.strategy_name.isnot(None)))
     positions = result.scalars().all()
     if not positions:
@@ -37,7 +37,7 @@ async def engine_toggle_all(db: AsyncSession = Depends(get_db)):
 
 @router.post("/engine/toggle/{symbol}")
 async def engine_toggle(symbol: str, db: AsyncSession = Depends(get_db)):
-    ensure_sandbox_write_allowed()
+    ensure_sandbox_write_allowed(allow_while_ib=True)
     symbol = symbol.upper()
     result = await db.execute(select(SandboxPosition).where(SandboxPosition.symbol == symbol))
     pos = result.scalar_one_or_none()
@@ -104,7 +104,7 @@ async def get_manager_state():
 
 @router.patch("/manager/settings")
 async def update_manager_settings(req: PortfolioManagerSettingsRequest):
-    ensure_sandbox_write_allowed()
+    ensure_sandbox_write_allowed(allow_while_ib=True)
     from app.services.portfolio_manager import update_manager_settings
     payload = {k: v for k, v in req.model_dump().items() if v is not None}
     return update_manager_settings(payload)
@@ -112,7 +112,7 @@ async def update_manager_settings(req: PortfolioManagerSettingsRequest):
 
 @router.post("/manager/toggle")
 async def toggle_manager():
-    ensure_sandbox_write_allowed()
+    ensure_sandbox_write_allowed(allow_while_ib=True)
     from app.services.portfolio_manager import get_manager_settings, update_manager_settings
     current = get_manager_settings()
     return update_manager_settings({"enabled": not current["enabled"]})

@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     IB_HOST: str = "127.0.0.1"
     IB_PORT: int = 4002
     IB_CLIENT_ID: int = 1
+    # 1=real-time, 2=frozen, 3=delayed, 4=delayed-frozen
+    IB_MARKET_DATA_TYPE: int = 3
     DATABASE_URL: str = "sqlite+aiosqlite:///./stock_ai.db"
     CORS_ORIGINS: str = _DEFAULT_CORS
     TRADING_MODE: str = "paper"

@@ -5,7 +5,7 @@ import {
   BanknotesIcon, ArrowsRightLeftIcon, ArrowPathIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getScripts, getHistory, getSandboxFundEvents } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
@@ -17,6 +17,7 @@ import SymbolDetailPanel from '../dashboard/SymbolDetailPanel'
 
 export default function PositionDetail({
   ibMode,
+  ibOrders = [],
   selectedSymbol,
   selectedPos,
   selectedPrice,
@@ -54,6 +55,10 @@ export default function PositionDetail({
 }) {
   const navigate = useNavigate()
   const appSettings = useAppSettings()
+  const openOrdersPanelEnabled = appSettings.open_orders_panel_enabled !== false
+  const openOrdersCountdownEnabled = appSettings.open_orders_countdown_enabled !== false
+  const openOrdersPriceHelperEnabled = appSettings.open_orders_price_helper_enabled !== false
+  const openOrdersExpiringSoonMin = Math.max(1, Number(appSettings.open_orders_expiring_soon_min ?? 30))
   const isSimulated = !ibMode
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
@@ -85,6 +90,31 @@ export default function PositionDetail({
   const sliderPrice = hasDayRange
     ? Math.min(dayHigh, Math.max(dayLow, resolvedTradePrice ?? dayLow))
     : null
+  const openOrdersForSymbol = useMemo(
+    () => (ibOrders ?? []).filter(o => o.symbol === selectedSymbol),
+    [ibOrders, selectedSymbol],
+  )
+  const openOrderPriceLevels = useMemo(() => {
+    const levels = openOrdersForSymbol
+      .filter(o => Number.isFinite(Number(o.limit_price)) && Number(o.limit_price) > 0)
+      .map(o => ({
+        ib_order_id: o.ib_order_id,
+        price: Number(o.limit_price),
+        remaining: Number(o.remaining ?? o.quantity ?? 0),
+        quantity: Number(o.quantity ?? 0),
+        side: o.side,
+      }))
+    const unique = []
+    const seen = new Set()
+    for (const row of levels) {
+      const key = `${row.side}:${row.price.toFixed(2)}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      unique.push(row)
+    }
+    return unique.sort((a, b) => a.price - b.price)
+  }, [openOrdersForSymbol])
+  const [priceLevelIdx, setPriceLevelIdx] = useState(-1)
 
   const [maxAllocMode, setMaxAllocMode] = useState(selectedPos?.max_allocation_mode ?? 'dollar')
   const [maxAllocValue, setMaxAllocValue] = useState(
@@ -136,6 +166,69 @@ export default function PositionDetail({
     if (Number.isFinite(selectedPrice) && selectedPrice > 0) {
       setTradeForm(f => ({ ...f, price: selectedPrice.toFixed(2) }))
     }
+  }
+
+  function getOpenOrderTiming(order) {
+    if ((order?.tif ?? '').toUpperCase() !== 'DAY' || !order?.created_at) {
+      return { status: 'No expiry data', remainingLabel: 'n/a', progress: null }
+    }
+    const created = new Date(order.created_at)
+    if (Number.isNaN(created.getTime())) {
+      return { status: 'No expiry data', remainingLabel: 'n/a', progress: null }
+    }
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(created)
+    const y = parts.find(p => p.type === 'year')?.value
+    const m = parts.find(p => p.type === 'month')?.value
+    const d = parts.find(p => p.type === 'day')?.value
+    if (!y || !m || !d) {
+      return { status: 'No expiry data', remainingLabel: 'n/a', progress: null }
+    }
+
+    const close = new Date(`${y}-${m}-${d}T16:00:00-04:00`)
+    const totalMs = Math.max(close.getTime() - created.getTime(), 1)
+    const remainingMs = close.getTime() - Date.now()
+    const progress = Math.max(0, Math.min(1, remainingMs / totalMs))
+    if (remainingMs <= 0) return { status: 'Expired window', remainingLabel: '0m', progress: 0 }
+    const mins = Math.floor(remainingMs / 60000)
+    const status = mins <= openOrdersExpiringSoonMin ? 'Expiring soon' : 'Active'
+    const remainingLabel = mins >= 60
+      ? `${Math.floor(mins / 60)}h ${mins % 60}m`
+      : `${mins}m`
+    return { status, remainingLabel, progress }
+  }
+
+  function pickOpenOrderPrice(value) {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return
+    setTradeForm(f => ({ ...f, price: n.toFixed(2) }))
+  }
+
+  function stepOpenOrderPrice(direction) {
+    if (!openOrderPriceLevels.length) return
+    const sorted = openOrderPriceLevels
+    const current = Number.parseFloat(tradeForm.price)
+    let nextIdx = priceLevelIdx
+    if (nextIdx < 0 || nextIdx >= sorted.length) {
+      if (Number.isFinite(current)) {
+        const nearest = sorted.reduce((best, row, idx) => {
+          if (best < 0) return idx
+          return Math.abs(row.price - current) < Math.abs(sorted[best].price - current) ? idx : best
+        }, -1)
+        nextIdx = nearest < 0 ? 0 : nearest
+      } else {
+        nextIdx = 0
+      }
+    }
+    nextIdx = direction > 0
+      ? Math.min(sorted.length - 1, nextIdx + 1)
+      : Math.max(0, nextIdx - 1)
+    setPriceLevelIdx(nextIdx)
+    pickOpenOrderPrice(sorted[nextIdx].price)
   }
 
   function getScriptName(strategyName) {
@@ -590,6 +683,26 @@ export default function PositionDetail({
               <div className="flex items-center gap-2">
                 <input className="input w-28 shrink-0" type="number" step="0.01"
                   value={priceInputValue} onChange={e => setTradeForm(f => ({ ...f, price: e.target.value }))} />
+                {openOrdersPriceHelperEnabled && !!openOrderPriceLevels.length && (
+                  <div className="flex items-center rounded-lg border border-dark-500 overflow-hidden">
+                    <button
+                      type="button"
+                      className="px-2 py-2 text-slate-400 hover:text-slate-200 hover:bg-dark-700"
+                      onClick={() => stepOpenOrderPrice(1)}
+                      title="Step up through open-order prices"
+                    >
+                      ▲
+                    </button>
+                    <button
+                      type="button"
+                      className="px-2 py-2 border-l border-dark-500 text-slate-400 hover:text-slate-200 hover:bg-dark-700"
+                      onClick={() => stepOpenOrderPrice(-1)}
+                      title="Step down through open-order prices"
+                    >
+                      ▼
+                    </button>
+                  </div>
+                )}
                 <button
                   type="button"
                   onClick={resetTradePrice}
@@ -600,6 +713,26 @@ export default function PositionDetail({
                   <ArrowPathIcon className="h-4 w-4" />
                 </button>
               </div>
+              {openOrdersPriceHelperEnabled && !!openOrderPriceLevels.length && (
+                <div className="mt-1">
+                  <select
+                    className="input text-xs py-1.5 w-56"
+                    value=""
+                    onChange={e => {
+                      const v = e.target.value
+                      if (v) pickOpenOrderPrice(v)
+                      e.target.value = ''
+                    }}
+                  >
+                    <option value="">Select from open order levels…</option>
+                    {openOrderPriceLevels.map(row => (
+                      <option key={`${row.side}-${row.price.toFixed(2)}`} value={row.price.toFixed(2)}>
+                        {row.side} ${row.price.toFixed(2)} · rem {row.remaining.toFixed(2)} / {row.quantity.toFixed(2)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
             <div>
               <div>
@@ -651,6 +784,52 @@ export default function PositionDetail({
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">
           Activity Log — {selectedSymbol}
         </h3>
+        {openOrdersPanelEnabled && !!openOrdersForSymbol.length && (
+          <div className="mb-4 rounded-lg border border-amber-700/30 bg-amber-900/10 p-3">
+            <div className="text-xs font-semibold text-amber-300 mb-2 uppercase tracking-wider">Open Order Status</div>
+            <div className="space-y-2">
+              {openOrdersForSymbol.map(o => {
+                const timing = getOpenOrderTiming(o)
+                const progress = timing.progress ?? 1
+                const r = 12
+                const c = 2 * Math.PI * r
+                const offset = c * (1 - progress)
+                return (
+                  <div key={o.ib_order_id} className="flex items-center justify-between rounded-md border border-dark-600 bg-dark-900/60 px-2.5 py-2">
+                    <div className="min-w-0">
+                      <div className="text-xs text-slate-200">
+                        #{o.ib_order_id} {o.side} {Number(o.remaining ?? o.quantity ?? 0).toFixed(2)} / {Number(o.quantity ?? 0).toFixed(2)}
+                        {o.limit_price != null ? ` @ $${Number(o.limit_price).toFixed(2)}` : ' (MKT)'}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {timing.status} · remaining {timing.remainingLabel}
+                      </div>
+                    </div>
+                    {openOrdersCountdownEnabled ? (
+                      <svg width="30" height="30" viewBox="0 0 30 30" className="shrink-0">
+                        <circle cx="15" cy="15" r={r} fill="none" stroke="#334155" strokeWidth="3" />
+                        <circle
+                          cx="15"
+                          cy="15"
+                          r={r}
+                          fill="none"
+                          stroke={progress < 0.2 ? '#f87171' : progress < 0.4 ? '#fbbf24' : '#34d399'}
+                          strokeWidth="3"
+                          strokeDasharray={c}
+                          strokeDashoffset={offset}
+                          transform="rotate(-90 15 15)"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    ) : (
+                      <span className="text-[11px] text-slate-500">{timing.remainingLabel}</span>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
         {(() => {
           // Merge trades + fund events + allocation events into a single timeline, filtered by selectedSymbol
           const tradeEntries = trades

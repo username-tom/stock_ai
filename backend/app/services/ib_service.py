@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import threading
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 from app.config import settings
@@ -54,6 +54,7 @@ class _IBApiApp(EWrapper, EClient):
         self.historical_data_events: dict[int, threading.Event] = {}
 
         self.open_orders: dict[int, dict] = {}
+        self.open_order_first_seen: dict[int, str] = {}
         self.open_orders_event = threading.Event()
         self.order_status: dict[int, str] = {}
 
@@ -166,12 +167,22 @@ class _IBApiApp(EWrapper, EClient):
 
     def openOrder(self, orderId: int, contract: Any, order: Any, orderState) -> None:
         with self._lock:
+            created_at = self.open_order_first_seen.get(orderId)
+            if created_at is None:
+                created_at = datetime.now(timezone.utc).isoformat()
+                self.open_order_first_seen[orderId] = created_at
             self.open_orders[orderId] = {
                 "ib_order_id": orderId,
                 "symbol": contract.symbol,
                 "side": order.action,
-                "quantity": order.totalQuantity,
+                "quantity": float(order.totalQuantity),
+                "remaining": float(order.totalQuantity),
+                "filled": 0.0,
                 "status": orderState.status,
+                "order_type": getattr(order, "orderType", None),
+                "limit_price": float(getattr(order, "lmtPrice", 0.0) or 0.0) if getattr(order, "orderType", "") == "LMT" else None,
+                "tif": getattr(order, "tif", None),
+                "created_at": created_at,
             }
 
     def openOrderEnd(self) -> None:
@@ -195,6 +206,9 @@ class _IBApiApp(EWrapper, EClient):
             self.order_status[int(orderId)] = status
             if int(orderId) in self.open_orders:
                 self.open_orders[int(orderId)]["status"] = status
+                self.open_orders[int(orderId)]["filled"] = float(filled)
+                self.open_orders[int(orderId)]["remaining"] = float(remaining)
+                self.open_orders[int(orderId)]["avg_fill_price"] = float(avgFillPrice)
 
 
 class IBService:
@@ -308,6 +322,7 @@ class IBService:
             "port": settings.IB_PORT,
             "client_id": settings.IB_CLIENT_ID,
             "mode": settings.TRADING_MODE,
+            "market_data_type": settings.IB_MARKET_DATA_TYPE,
         }
 
     async def get_account_summary(self) -> dict:
@@ -369,6 +384,8 @@ class IBService:
             self._app.market_data_events[req_id] = evt
         try:
             contract = self._build_stock_contract(symbol)
+            # Prefer delayed feed by default for accounts without paid real-time subscriptions.
+            self._app.reqMarketDataType(int(settings.IB_MARKET_DATA_TYPE))
             self._app.reqMktData(req_id, contract, "", True, False, [])
             await self._wait_event(evt, timeout=6)
             self._app.cancelMktData(req_id)
@@ -508,6 +525,12 @@ class IBService:
             order.totalQuantity = float(quantity)
             order.orderType = kind
             order.tif = "DAY"
+            # Some IB server builds reject legacy routing flags when present.
+            # Explicitly disable them for broad compatibility.
+            if hasattr(order, "eTradeOnly"):
+                order.eTradeOnly = False
+            if hasattr(order, "firmQuoteOnly"):
+                order.firmQuoteOnly = False
             if kind == "LMT" and limit_price is not None:
                 order.lmtPrice = float(limit_price)
 
@@ -522,10 +545,19 @@ class IBService:
             status = "Submitted"
             for _ in range(15):
                 await asyncio.sleep(0.2)
+                err = self._pop_req_error(order_id)
+                if err:
+                    return {"error": f"IB rejected order {order_id}: {err}"}
                 with self._app._lock:
                     if order_id in self._app.order_status:
                         status = self._app.order_status[order_id]
                         break
+
+            if status in {"Inactive", "Cancelled", "ApiCancelled"}:
+                err = self._pop_req_error(order_id)
+                if err:
+                    return {"error": f"IB order {order_id} {status}: {err}"}
+                return {"error": f"IB order {order_id} {status}. Check TWS/Gateway logs for details."}
 
             return {
                 "ib_order_id": order_id,
@@ -534,6 +566,7 @@ class IBService:
                 "side": action,
                 "quantity": quantity,
                 "order_type": kind,
+                "limit_price": float(limit_price) if (kind == "LMT" and limit_price is not None) else None,
             }
         except Exception as exc:
             logger.error("place_order error: %s", exc)

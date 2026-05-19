@@ -26,7 +26,6 @@ export default function TradingPanel() {
     symbol: 'AAPL',
     side: 'BUY',
     quantity: 10,
-    mode: 'SIMULATED',
     order_type: 'MKT',
     limit_price: '',
     price: 150,
@@ -86,6 +85,7 @@ export default function TradingPanel() {
       setOrderMsg({ type: 'success', text: `Order placed — ID: ${data.id ?? data.ib_order_id}` })
       qc.invalidateQueries({ queryKey: ['trade-history'] })
       qc.invalidateQueries({ queryKey: ['ib-positions'] })
+      qc.invalidateQueries({ queryKey: ['ib-orders'] })
     },
     onError: (err) => {
       setOrderMsg({ type: 'error', text: err.response?.data?.detail || err.message })
@@ -104,14 +104,18 @@ export default function TradingPanel() {
       setOrderMsg({ type: 'error', text: 'Limit price is required for limit orders.' })
       return
     }
+    const executionMode = isConnected
+      ? (currentMode === 'live' ? 'LIVE' : 'PAPER')
+      : 'SIMULATED'
+
     const payload = {
       symbol: orderForm.symbol,
       side: orderForm.side,
       quantity: parseFloat(orderForm.quantity),
-      mode: orderForm.mode,
+      mode: executionMode,
       order_type: orderForm.order_type,
     }
-    if (orderForm.mode === 'SIMULATED') {
+    if (executionMode === 'SIMULATED') {
       payload.price = parseFloat(orderForm.price)
     }
     if (orderForm.order_type === 'LMT' && orderForm.limit_price) {
@@ -122,6 +126,9 @@ export default function TradingPanel() {
 
   const isConnected = ibStatus?.connected
   const currentMode = ibStatus?.mode ?? 'paper'
+  const executionModeLabel = isConnected
+    ? (currentMode === 'live' ? 'LIVE (IB API)' : 'PAPER (IB API)')
+    : 'SIMULATED'
   const connectState = connectMut.data?.status
   const connectMessage = connectMut.data?.message
   const portfolioRefreshSec = Math.max(1, Math.round((appSettings.trading_positions_ms ?? 5_000) / 1_000))
@@ -254,13 +261,19 @@ export default function TradingPanel() {
                 </select>
               </div>
               <div>
-                <label className="label">Mode</label>
-                <select className="input" value={orderForm.mode}
-                  onChange={e => setOrderForm(f => ({ ...f, mode: e.target.value }))}>
-                  <option value="SIMULATED">Simulated</option>
-                  <option value="PAPER">Paper (IB API)</option>
-                  <option value="LIVE">Live (IB API)</option>
-                </select>
+                <label className="label">Execution Mode</label>
+                <div className="input flex items-center justify-between">
+                  <span>{executionModeLabel}</span>
+                  {isConnected ? (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${currentMode === 'live' ? 'text-red-300 border-red-700/40 bg-red-900/20' : 'text-blue-300 border-blue-700/40 bg-blue-900/20'}`}>
+                      IB
+                    </span>
+                  ) : (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded border text-slate-400 border-dark-500 bg-dark-800">
+                      SIM
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -280,7 +293,7 @@ export default function TradingPanel() {
               </div>
             </div>
 
-            {orderForm.mode === 'SIMULATED' && (
+            {!isConnected && (
               <div>
                 <label className="label">Fill Price ($)</label>
                 <input className="input" type="number" step="0.01" value={orderForm.price}
@@ -296,9 +309,9 @@ export default function TradingPanel() {
               </div>
             )}
 
-            {orderForm.mode !== 'SIMULATED' && !isConnected && (
-              <div className="text-xs text-yellow-400 bg-yellow-400/10 border border-yellow-400/20 rounded-lg p-2">
-                ⚠ Connect to TWS or IB Gateway to place paper/live orders.
+            {!isConnected && (
+              <div className="text-xs text-slate-400 bg-dark-900/50 border border-dark-600 rounded-lg p-2">
+                Orders are currently simulated. Connect to TWS/Gateway to route orders to IB ({currentMode.toUpperCase()}).
               </div>
             )}
 

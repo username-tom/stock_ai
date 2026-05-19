@@ -10,6 +10,7 @@ import {
   getSandboxTrades, placeSandboxTrade,
   exportSandbox, importSandbox, resetSandbox, resetSandboxSoft,
   getBulkQuotes, getIBStatus, connectIB, disconnectIB, setIBMode,
+  placeOrder,
   getSymbolSectors,
   resetIBPaperPortfolio,
   getIBPositions, getIBOrders,
@@ -49,6 +50,33 @@ function writeDashboardWatchlist(symbols) {
   const next = symbols.slice(0, WATCHLIST_SYMBOL_LIMIT)
   try { localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next)) } catch {}
   window.dispatchEvent(new Event('watchlist-updated'))
+}
+
+function getIbOrderExpiryLabel(order) {
+  if ((order?.tif ?? '').toUpperCase() !== 'DAY' || !order?.created_at) return 'Expiry: n/a'
+  const created = new Date(order.created_at)
+  if (Number.isNaN(created.getTime())) return 'Expiry: n/a'
+
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(created)
+  const y = parts.find(p => p.type === 'year')?.value
+  const m = parts.find(p => p.type === 'month')?.value
+  const d = parts.find(p => p.type === 'day')?.value
+  if (!y || !m || !d) return 'Expiry: n/a'
+
+  const close = new Date(`${y}-${m}-${d}T16:00:00-04:00`)
+  const now = new Date()
+  const remainingMs = close.getTime() - now.getTime()
+  if (remainingMs <= 0) return 'Expiry: market close passed'
+  const mins = Math.floor(remainingMs / 60000)
+  if (mins <= 30) return `Expiry: ${mins}m remaining`
+  const hours = Math.floor(mins / 60)
+  const remMins = mins % 60
+  return `Expiry: ${hours}h ${remMins}m remaining`
 }
 
 export default function SandboxPanel() {
@@ -260,9 +288,10 @@ export default function SandboxPanel() {
       type: 'trade',
       profile: activeProfile,
       side: o.side,
-      label: `Open ${o.side} ${o.quantity} ${o.symbol}`,
-      sub: `Order #${o.ib_order_id} · ${o.status ?? 'Submitted'}`,
-      time: now,
+      label: `Open ${o.side} ${o.remaining ?? o.quantity} / ${o.quantity} ${o.symbol}`,
+      sub: `Order #${o.ib_order_id} · ${o.status ?? 'Submitted'} · ${getIbOrderExpiryLabel(o)}`,
+      time: o.created_at ? new Date(o.created_at).toLocaleTimeString() : now,
+      syncFromIb: true,
     }))
 
     const positionEntries = ibPositions
@@ -277,7 +306,12 @@ export default function SandboxPanel() {
       }))
 
     const entries = [...orderEntries, ...positionEntries]
-    setActivities(entries.slice(0, 100))
+    if (!entries.length) return
+    setActivities(prev => {
+      const keep = prev.filter(a => !((a.profile ?? 'simulated') === activeProfile && a.syncFromIb))
+      const synced = entries.map(e => ({ ...e, syncFromIb: true }))
+      return [...synced, ...keep].slice(0, 100)
+    })
   }, [ibConnected, ibMode, ibOrdersData, ibPositionsData])
 
   // build activity log entries from trades + mutations
@@ -330,12 +364,51 @@ export default function SandboxPanel() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['sandbox-positions'] }); qc.invalidateQueries({ queryKey: ['sandbox-account'] }) },
   })
   const tradeMut = useMutation({
-    mutationFn: p => placeSandboxTrade(p),
+    mutationFn: async (p) => {
+      if (p.mode === 'simulated') {
+        return placeSandboxTrade(p)
+      }
+
+      if (!ibConnected) {
+        throw new Error('Not connected to Interactive Brokers. Connect first.')
+      }
+
+      const limitPrice = Number.isFinite(p.price) && p.price > 0 ? p.price : null
+      const orderType = limitPrice != null ? 'LMT' : 'MKT'
+
+      return placeOrder({
+        symbol: p.symbol,
+        side: p.side,
+        quantity: p.quantity,
+        mode: p.mode.toUpperCase(),
+        order_type: orderType,
+        limit_price: limitPrice,
+        strategy_name: p.strategy_name,
+      })
+    },
     onSuccess: d => {
-      setTradeMsg({ type: 'success', text: `${d.side} ${d.quantity} ${d.symbol} @ $${d.price.toFixed(2)}${d.pnl != null ? ` — PnL: ${fmt(d.pnl)}` : ''}` })
+      if (d.trade_id != null) {
+        setTradeMsg({ type: 'success', text: `${d.side} ${d.quantity} ${d.symbol} @ $${d.price.toFixed(2)}${d.pnl != null ? ` — PnL: ${fmt(d.pnl)}` : ''}` })
+      } else {
+        setTradeMsg({
+          type: 'success',
+          text: `${d.side} ${d.quantity} ${d.symbol} submitted to ${activeProfileRef.current.toUpperCase()} IB (${d.order_type ?? 'MKT'}${d.limit_price != null ? ` @ $${Number(d.limit_price).toFixed(2)}` : ''})${d.ib_order_id != null ? ` · Order #${d.ib_order_id}` : ''}`,
+        })
+        setActivities(prev => [{
+          type: 'trade',
+          profile: activeProfileRef.current,
+          side: d.side,
+          label: `Order submitted ${d.side} ${d.quantity} ${d.symbol}`,
+          sub: `IB #${d.ib_order_id ?? 'n/a'} · ${d.status ?? 'Submitted'}${d.limit_price != null ? ` · LMT $${Number(d.limit_price).toFixed(2)}` : ''}`,
+          time: new Date().toLocaleTimeString(),
+        }, ...prev].slice(0, 100))
+      }
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      qc.invalidateQueries({ queryKey: ['ib-orders'] })
+      qc.invalidateQueries({ queryKey: ['ib-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-trades', selectedSymbol] })
+      qc.invalidateQueries({ queryKey: ['sandbox-trades-all'] })
       setTradeForm(f => ({ ...f, quantity: '', reason: 'manual' }))
     },
     onError: e => setTradeMsg({ type: 'error', text: e.response?.data?.detail || e.message }),
@@ -362,12 +435,11 @@ export default function SandboxPanel() {
     mutationFn: s => toggleSandboxEngine(s),
     onSuccess: (data, symbol) => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
-      if (activeProfileRef.current !== 'simulated') return
       const pos = positions.find(p => p.symbol === symbol)
       const nowEnabled = !pos?.strategy_enabled
       setActivities(prev => [{
         type: 'engine',
-        profile: 'simulated',
+        profile: activeProfileRef.current,
         label: `${symbol} engine ${nowEnabled ? 'started' : 'stopped'}`,
         sub: pos?.strategy_name?.split(':')[0],
         time: new Date().toLocaleTimeString(),
@@ -379,10 +451,9 @@ export default function SandboxPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-engine-state'] })
-      if (activeProfileRef.current !== 'simulated') return
       setActivities(prev => [{
         type: 'engine',
-        profile: 'simulated',
+        profile: activeProfileRef.current,
         label: 'All sandbox engines toggled',
         time: new Date().toLocaleTimeString(),
       }, ...prev].slice(0, 100))
@@ -392,11 +463,10 @@ export default function SandboxPanel() {
     mutationFn: togglePortfolioManager,
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
-      if (activeProfileRef.current !== 'simulated') return
       const enabled = data?.settings?.enabled ?? data?.enabled
       setActivities(prev => [{
         type: 'manager',
-        profile: 'simulated',
+        profile: activeProfileRef.current,
         label: `Portfolio Manager ${enabled ? 'enabled' : 'disabled'}`,
         time: new Date().toLocaleTimeString(),
       }, ...prev].slice(0, 100))
@@ -463,10 +533,9 @@ export default function SandboxPanel() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       setBulkStratOpen(false)
-      if (activeProfileRef.current !== 'simulated') return
       setActivities(prev => [{
         type: 'engine',
-        profile: 'simulated',
+        profile: activeProfileRef.current,
         label: `Strategy updated for all ${data.updated} position${data.updated !== 1 ? 's' : ''}`,
         sub: data.strategy_name ?? 'none',
         time: new Date().toLocaleTimeString(),
@@ -500,7 +569,15 @@ export default function SandboxPanel() {
   }
   function handleTrade(e) {
     e.preventDefault(); setTradeMsg(null)
-    tradeMut.mutate({ symbol: selectedSymbol, side: tradeForm.side, quantity: parseFloat(tradeForm.quantity), price: parseFloat(tradeForm.price) || selectedPrice, strategy_name: selectedPos?.strategy_name, reason: tradeForm.reason?.trim() || 'manual' })
+    tradeMut.mutate({
+      symbol: selectedSymbol,
+      side: tradeForm.side,
+      quantity: parseFloat(tradeForm.quantity),
+      price: parseFloat(tradeForm.price) || selectedPrice,
+      strategy_name: selectedPos?.strategy_name,
+      reason: tradeForm.reason?.trim() || 'manual',
+      mode: activeProfileRef.current,
+    })
   }
   function handleIbWatchlistAdd(symbol) {
     const sym = (symbol || '').trim().toUpperCase()
@@ -863,6 +940,7 @@ export default function SandboxPanel() {
           ) : (
             <PositionDetail
               ibMode={ibMode}
+              ibOrders={ibConnected ? (ibOrdersData?.orders ?? []) : []}
               selectedSymbol={selectedSymbol}
               selectedPos={selectedPos}
               selectedPrice={selectedPrice}

@@ -480,6 +480,40 @@ export default function SettingsPanel() {
                     <SliderInput value={uiForm.trading_orders_ms} onChange={v => setUi('trading_orders_ms', v)}
                       min={1_000} max={30_000} step={1_000} formatLabel={fmtMs} />
                   </Field>
+                  <Field label="Open-Order Status Panel" hint="Show open-order status rows in the position activity log.">
+                    <Select
+                      value={uiForm.open_orders_panel_enabled ? 'on' : 'off'}
+                      onChange={v => setUi('open_orders_panel_enabled', v === 'on')}
+                      options={[
+                        { value: 'on', label: 'Enabled' },
+                        { value: 'off', label: 'Disabled' },
+                      ]}
+                    />
+                  </Field>
+                  <Field label="Open-Order Countdown Ring" hint="Display the unwinding circle for order time-to-expiry.">
+                    <Select
+                      value={uiForm.open_orders_countdown_enabled ? 'on' : 'off'}
+                      onChange={v => setUi('open_orders_countdown_enabled', v === 'on')}
+                      options={[
+                        { value: 'on', label: 'Enabled' },
+                        { value: 'off', label: 'Disabled' },
+                      ]}
+                    />
+                  </Field>
+                  <Field label="Open-Order Price Helper" hint="Show open-order price stepper and dropdown near the price input.">
+                    <Select
+                      value={uiForm.open_orders_price_helper_enabled ? 'on' : 'off'}
+                      onChange={v => setUi('open_orders_price_helper_enabled', v === 'on')}
+                      options={[
+                        { value: 'on', label: 'Enabled' },
+                        { value: 'off', label: 'Disabled' },
+                      ]}
+                    />
+                  </Field>
+                  <Field label="Expiring Soon Threshold" hint="Minutes remaining before an open order is flagged as expiring soon.">
+                    <SliderInput value={uiForm.open_orders_expiring_soon_min} onChange={v => setUi('open_orders_expiring_soon_min', v)}
+                      min={5} max={120} step={5} formatLabel={v => `${v}m`} />
+                  </Field>
                 </div>
               </div>
 

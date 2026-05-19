@@ -87,7 +87,16 @@ class AddSymbolRequest(BaseModel):
 
 @router.post("/positions")
 async def add_symbol(req: AddSymbolRequest, db: AsyncSession = Depends(get_db)):
-    ensure_sandbox_write_allowed()
+    if ib_service.is_connected:
+        # In IB mode we only allow metadata rows (strategy/watchlist), not funding edits.
+        if req.allocated_funds > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Allocated funds cannot be changed while IB is connected.",
+            )
+        ensure_sandbox_write_allowed(allow_while_ib=True)
+    else:
+        ensure_sandbox_write_allowed()
     symbol = req.symbol.upper().strip()
     existing = await db.execute(select(SandboxPosition).where(SandboxPosition.symbol == symbol))
     pos = existing.scalar_one_or_none()
@@ -139,12 +148,38 @@ class UpdatePositionRequest(BaseModel):
 
 @router.patch("/positions/{symbol}")
 async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSession = Depends(get_db)):
-    ensure_sandbox_write_allowed()
+    if ib_service.is_connected:
+        # Allow strategy/sentiment/engine metadata updates in IB mode, but block
+        # capital/allocation mutations that should remain simulated-only.
+        forbidden = any(
+            field in req.model_fields_set
+            for field in ("allocated_funds", "max_allocation_mode", "max_allocation_value")
+        )
+        if forbidden:
+            raise HTTPException(
+                status_code=409,
+                detail="Allocation and max-allocation settings cannot be changed while IB is connected.",
+            )
+        ensure_sandbox_write_allowed(allow_while_ib=True)
+    else:
+        ensure_sandbox_write_allowed()
     symbol = symbol.upper()
     result = await db.execute(select(SandboxPosition).where(SandboxPosition.symbol == symbol))
     pos = result.scalar_one_or_none()
     if not pos:
-        raise HTTPException(404, f"Position {symbol} not found.")
+        if ib_service.is_connected:
+            # Allow assigning strategy metadata to IB watchlist symbols that do
+            # not yet exist in the local sandbox table.
+            pos = SandboxPosition(
+                symbol=symbol,
+                allocated_funds=0.0,
+                strategy_name=None,
+                is_on_watchlist=True,
+            )
+            db.add(pos)
+            await db.flush()
+        else:
+            raise HTTPException(404, f"Position {symbol} not found.")
 
     sentiment_mode_changed = False
     strategy_name_provided = "strategy_name" in req.model_fields_set
@@ -229,7 +264,7 @@ class BulkStrategyRequest(BaseModel):
 @router.patch("/positions-bulk-strategy")
 async def bulk_update_strategy(req: BulkStrategyRequest, db: AsyncSession = Depends(get_db)):
     """Set the same strategy on every existing position at once."""
-    ensure_sandbox_write_allowed()
+    ensure_sandbox_write_allowed(allow_while_ib=True)
     result = await db.execute(select(SandboxPosition))
     positions = result.scalars().all()
     sentiment_mode_changed = False
