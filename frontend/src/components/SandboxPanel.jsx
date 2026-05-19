@@ -652,6 +652,7 @@ export default function SandboxPanel() {
   }
 
   function handleSelectSymbol(symbol) {
+    setActiveMainTab('summary')
     setSelectedSymbol(symbol)
     setTradeMsg(null)
     setEditingStrategy(false)
@@ -680,7 +681,7 @@ export default function SandboxPanel() {
         pmScores={managerState?.scores ?? {}}
         toggleEngineMut={toggleEngineMut}
         onSelectSymbol={handleSelectSymbol}
-        onShowOverview={() => handleSelectSymbol(null)}
+        onShowOverview={() => { setActiveMainTab('summary'); handleSelectSymbol(null) }}
         onAddIbWatchlistSymbol={handleIbWatchlistAdd}
       />
 
@@ -934,7 +935,11 @@ export default function SandboxPanel() {
 
         <div className="p-6 space-y-6">
           {activeMainTab === 'manager' ? (
-            <PortfolioManagerPanel profile={activeProfile} />
+            <PortfolioManagerPanel
+              profile={activeProfile}
+              onShowOverview={() => { setActiveMainTab('summary'); setSelectedSymbol(null) }}
+              onSelectSymbol={(sym) => { setActiveMainTab('summary'); handleSelectSymbol(sym) }}
+            />
           ) : !selectedSymbol ? (
             <PortfolioOverview
               ibMode={ibMode}

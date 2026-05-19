@@ -148,7 +148,7 @@ function SettingRow({ label, hint, children }) {
   )
 }
 
-export default function PortfolioManagerPanel({ profile = 'simulated' }) {
+export default function PortfolioManagerPanel({ profile = 'simulated', onShowOverview, onSelectSymbol }) {
   const qc = useQueryClient()
   const appSettings = useAppSettings()
   const activeProfile = normalizeProfile(profile)
@@ -440,6 +440,15 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {onShowOverview && (
+            <button
+              onClick={onShowOverview}
+              className="text-xs text-slate-400 hover:text-emerald-300 border border-dark-500 hover:border-emerald-700/50 rounded-lg px-3 py-1.5 transition-colors"
+              title="Back to Portfolio Summary"
+            >
+              ← Summary
+            </button>
+          )}
           <button
             onClick={editSettings ? doneEditing : openEdit}
             className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
@@ -643,8 +652,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
             {Object.entries(scores).map(([sym, sc]) => (
               <div
                 key={sym}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-dark-800 border border-dark-600"
-                title={`Score: ${sc.score} — Updated: ${sc.updated_at ? new Date(sc.updated_at).toLocaleTimeString() : '?'}`}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-dark-800 border border-dark-600 ${
+                  onSelectSymbol ? 'cursor-pointer hover:border-violet-600/60 hover:bg-dark-700 transition-colors' : ''
+                }`}
+                title={onSelectSymbol
+                  ? `${sym} — Score: ${sc.score} · Click to view position detail`
+                  : `Score: ${sc.score} — Updated: ${sc.updated_at ? new Date(sc.updated_at).toLocaleTimeString() : '?'}`}
+                onClick={onSelectSymbol ? () => onSelectSymbol(sym) : undefined}
               >
                 <span className="font-bold text-xs text-slate-200 font-mono">{sym}</span>
                 <span className="text-xs font-semibold" style={{ color: classColor(sc.classification) }}>
