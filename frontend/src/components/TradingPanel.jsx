@@ -93,8 +93,21 @@ export default function TradingPanel() {
   })
 
   const cancelMut = useMutation({
-    mutationFn: cancelOrder,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['ib-orders'] }),
+    mutationFn: async (ibOrderId) => {
+      const result = await cancelOrder(ibOrderId)
+      if (result?.error) {
+        throw new Error(result.error)
+      }
+      return result
+    },
+    onSuccess: (data) => {
+      setOrderMsg({ type: 'success', text: `Cancel submitted for order #${data?.cancelled ?? 'unknown'}` })
+      qc.invalidateQueries({ queryKey: ['ib-orders'] })
+      qc.invalidateQueries({ queryKey: ['trade-history'] })
+    },
+    onError: (err) => {
+      setOrderMsg({ type: 'error', text: err.response?.data?.detail || err.message })
+    },
   })
 
   const handleOrderSubmit = (e) => {
@@ -434,7 +447,8 @@ export default function TradingPanel() {
                           <td><span className="badge-yellow">{o.status ?? 'Submitted'}</span></td>
                           <td>
                             <button
-                              className="text-xs text-red-400 hover:text-red-300"
+                              className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50"
+                              disabled={cancelMut.isPending}
                               onClick={() => cancelMut.mutate(o.ib_order_id)}
                             >Cancel</button>
                           </td>

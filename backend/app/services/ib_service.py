@@ -576,11 +576,17 @@ class IBService:
         if not self.is_connected or not self._app:
             return {"error": "Not connected to IB."}
         try:
-            self._app.cancelOrder(int(ib_order_id), "")
+            order_id = int(ib_order_id)
+            # ibapi changed cancelOrder signatures across versions.
+            # Try modern (orderId, manualCancelTime) first, then legacy (orderId).
+            try:
+                self._app.cancelOrder(order_id, "")
+            except TypeError:
+                self._app.cancelOrder(order_id)
             return {"status": "ok", "cancelled": ib_order_id}
         except Exception as exc:
             logger.error("cancel_order error: %s", exc)
-            return {"error": "Failed to cancel order."}
+            return {"error": f"Failed to cancel order: {exc}"}
 
     async def get_open_orders(self) -> list[dict]:
         if not self.is_connected or not self._app:

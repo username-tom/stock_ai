@@ -51,6 +51,7 @@ export default function PositionDetail({
   setTradeMsg,
   handleTrade,
   tradeMut,
+  cancelOrderMut,
   accountData,
 }) {
   const navigate = useNavigate()
@@ -805,25 +806,37 @@ export default function PositionDetail({
                         {timing.status} · remaining {timing.remainingLabel}
                       </div>
                     </div>
-                    {openOrdersCountdownEnabled ? (
-                      <svg width="30" height="30" viewBox="0 0 30 30" className="shrink-0">
-                        <circle cx="15" cy="15" r={r} fill="none" stroke="#334155" strokeWidth="3" />
-                        <circle
-                          cx="15"
-                          cy="15"
-                          r={r}
-                          fill="none"
-                          stroke={progress < 0.2 ? '#f87171' : progress < 0.4 ? '#fbbf24' : '#34d399'}
-                          strokeWidth="3"
-                          strokeDasharray={c}
-                          strokeDashoffset={offset}
-                          transform="rotate(-90 15 15)"
-                          strokeLinecap="round"
-                        />
-                      </svg>
-                    ) : (
-                      <span className="text-[11px] text-slate-500">{timing.remainingLabel}</span>
-                    )}
+                    <div className="flex items-center gap-2 shrink-0">
+                      {cancelOrderMut && (
+                        <button
+                          type="button"
+                          className="text-[11px] text-red-400 hover:text-red-300 disabled:opacity-50"
+                          disabled={cancelOrderMut.isPending}
+                          onClick={() => cancelOrderMut.mutate(o.ib_order_id)}
+                        >
+                          Cancel
+                        </button>
+                      )}
+                      {openOrdersCountdownEnabled ? (
+                        <svg width="30" height="30" viewBox="0 0 30 30" className="shrink-0">
+                          <circle cx="15" cy="15" r={r} fill="none" stroke="#334155" strokeWidth="3" />
+                          <circle
+                            cx="15"
+                            cy="15"
+                            r={r}
+                            fill="none"
+                            stroke={progress < 0.2 ? '#f87171' : progress < 0.4 ? '#fbbf24' : '#34d399'}
+                            strokeWidth="3"
+                            strokeDasharray={c}
+                            strokeDashoffset={offset}
+                            transform="rotate(-90 15 15)"
+                            strokeLinecap="round"
+                          />
+                        </svg>
+                      ) : (
+                        <span className="text-[11px] text-slate-500">{timing.remainingLabel}</span>
+                      )}
+                    </div>
                   </div>
                 )
               })}

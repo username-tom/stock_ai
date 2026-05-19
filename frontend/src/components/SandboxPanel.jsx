@@ -18,6 +18,7 @@ import {
   getSandboxAnalytics, getSandboxRealizedMetrics,
   getPortfolioManagerState, togglePortfolioManager,
   bulkUpdateSandboxStrategy,
+  cancelOrder,
 } from '../api/client'
 import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy } from './sandbox/sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandbox/sandboxConstants'
@@ -507,6 +508,23 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
     },
   })
+  const cancelOrderMut = useMutation({
+    mutationFn: async (ibOrderId) => {
+      const result = await cancelOrder(ibOrderId)
+      if (result?.error) {
+        throw new Error(result.error)
+      }
+      return result
+    },
+    onSuccess: (data) => {
+      setTradeMsg({ type: 'success', text: `Cancel submitted for order #${data?.cancelled ?? 'unknown'}` })
+      qc.invalidateQueries({ queryKey: ['ib-orders'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-trades-all'] })
+    },
+    onError: (err) => {
+      setTradeMsg({ type: 'error', text: err.response?.data?.detail || err.message })
+    },
+  })
   const paperResetMut = useMutation({
     mutationFn: () => resetIBPaperPortfolio(),
     onSuccess: (data) => {
@@ -975,6 +993,7 @@ export default function SandboxPanel() {
               setTradeMsg={setTradeMsg}
               handleTrade={handleTrade}
               tradeMut={tradeMut}
+              cancelOrderMut={cancelOrderMut}
             />
           )}
         </div>
