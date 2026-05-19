@@ -59,6 +59,7 @@ function buildDraftFromSettings(settings) {
     stop_loss_pct: settings.stop_loss_pct ?? 0,
     take_profit_pct: settings.take_profit_pct ?? 0,
     hold_positions_overnight: settings.hold_positions_overnight ?? true,
+    eod_engine_shutoff_minutes_before_sell: settings.eod_engine_shutoff_minutes_before_sell ?? 120,
     eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 30,
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
     sentiment_data_points: settings.sentiment_data_points ?? 10,
@@ -352,6 +353,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
       stop_loss_pct: Number(draft.stop_loss_pct),
       take_profit_pct: Number(draft.take_profit_pct),
       hold_positions_overnight: draft.hold_positions_overnight,
+      eod_engine_shutoff_minutes_before_sell: Number(draft.eod_engine_shutoff_minutes_before_sell),
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
       sentiment_lookback_days: Number(draft.sentiment_lookback_days),
       sentiment_data_points: Number(draft.sentiment_data_points),
@@ -511,7 +513,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
           <ClockIcon className="h-3.5 w-3.5" />
           {settings.hold_positions_overnight
             ? 'Hold positions overnight'
-            : `EOD liquidation window: ${settings.eod_sell_window_minutes}min before close`}
+            : `Engine shutdown: ${settings.eod_engine_shutoff_minutes_before_sell ?? 120}min before sell | EOD liquidation: ${settings.eod_sell_window_minutes}min before close`}
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
@@ -1216,6 +1218,23 @@ export default function PortfolioManagerPanel({ profile = 'simulated' }) {
                 <span className="text-xs text-slate-300">{draft.hold_positions_overnight ? 'Hold Overnight' : 'Liquidate at EOD'}</span>
               </label>
             </SettingRow>
+
+            {!draft.hold_positions_overnight && (
+              <SettingRow
+                label="Pre-Sell Engine Shutoff (minutes)"
+                hint="Duration before the final sell window where new engine BUY entries are blocked."
+              >
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number" min={1} max={480} step={1}
+                    value={draft.eod_engine_shutoff_minutes_before_sell}
+                    onChange={e => updateDraft(d => ({ ...d, eod_engine_shutoff_minutes_before_sell: e.target.value }))}
+                    className="input w-32 text-sm py-1.5"
+                  />
+                  <span className="text-slate-400 text-sm">minutes before final sell window</span>
+                </div>
+              </SettingRow>
+            )}
 
             {!draft.hold_positions_overnight && (
               <SettingRow

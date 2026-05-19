@@ -62,6 +62,26 @@ _PRE_OPEN_OFFSET  = dt_time(9, 20)   # 10 min before open (preparation window)
 _MARKET_CLOSE     = dt_time(16, 0)   # regular session close
 
 
+def _minutes_to_time(total_minutes: int) -> dt_time:
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return dt_time(hours, minutes)
+
+
+def _get_eod_window_starts(
+    eod_sell_window_minutes: int,
+    eod_engine_shutoff_minutes_before_sell: int,
+) -> tuple[dt_time, dt_time]:
+    """Return (engine_shutoff_start, final_sell_start) in ET clock time."""
+    close_minutes = _MARKET_CLOSE.hour * 60 + _MARKET_CLOSE.minute
+    sell_window_mins = max(1, int(eod_sell_window_minutes or 30))
+    shutoff_mins = max(1, int(eod_engine_shutoff_minutes_before_sell or 120))
+
+    final_sell_start_m = max(0, close_minutes - sell_window_mins)
+    engine_shutoff_start_m = max(0, final_sell_start_m - shutoff_mins)
+    return _minutes_to_time(engine_shutoff_start_m), _minutes_to_time(final_sell_start_m)
+
+
 def _market_is_active() -> bool:
     """Return True when the engine should tick.
 
@@ -97,14 +117,64 @@ def _is_in_eod_sell_window(eod_sell_window_minutes: int) -> bool:
     now_et = datetime.now(tz=_ET)
     if now_et.weekday() >= 5:
         return False
-    
-    eod_start_minutes = _MARKET_CLOSE.hour * 60 + _MARKET_CLOSE.minute - eod_sell_window_minutes
-    eod_start_hour = eod_start_minutes // 60
-    eod_start_min = eod_start_minutes % 60
-    eod_start_time = dt_time(eod_start_hour, eod_start_min)
-    
+
+    _, final_sell_start = _get_eod_window_starts(eod_sell_window_minutes, 120)
     t = now_et.time()
-    return eod_start_time <= t < _MARKET_CLOSE
+    return final_sell_start <= t < _MARKET_CLOSE
+
+
+def _is_in_pre_sell_engine_shutoff_window(
+    eod_sell_window_minutes: int,
+    eod_engine_shutoff_minutes_before_sell: int,
+) -> bool:
+    """Return True during the pre-sell period where new BUYs are blocked."""
+    now_et = datetime.now(tz=_ET)
+    if now_et.weekday() >= 5:
+        return False
+
+    engine_shutoff_start, final_sell_start = _get_eod_window_starts(
+        eod_sell_window_minutes,
+        eod_engine_shutoff_minutes_before_sell,
+    )
+    t = now_et.time()
+    return engine_shutoff_start <= t < final_sell_start
+
+
+_final_sell_window_seen: set[str] = set()
+
+
+def _mark_first_entry_into_final_sell_window(symbol: str, eod_sell_window_minutes: int) -> bool:
+    """Return True once per symbol/day on first tick inside the final sell window."""
+    now_et = datetime.now(tz=_ET)
+    if now_et.weekday() >= 5:
+        return False
+    if not _is_in_eod_sell_window(eod_sell_window_minutes):
+        return False
+
+    key = f"{symbol}:{now_et.date().isoformat()}"
+    if key in _final_sell_window_seen:
+        return False
+
+    _final_sell_window_seen.add(key)
+    return True
+
+
+def _notify_manager_activity(msg: str) -> None:
+    """Best-effort write to portfolio-manager activity feed."""
+    try:
+        from app.services.portfolio_manager import _log_activity
+        _log_activity(msg)
+    except Exception:
+        logger.info(msg)
+
+
+async def _notify_unrealized_loss(_position_id: int, symbol: str, unrealized_pnl: float) -> None:
+    """Publish a per-symbol unrealized-loss notice to manager activity feed."""
+    msg = (
+        f"EOD final-sell start: {symbol} unrealized loss ${abs(unrealized_pnl):.2f}; "
+        "position requires manual exit or later liquidation"
+    )
+    _notify_manager_activity(msg)
 
 # ── shared state ──────────────────────────────────────────────────────────── #
 _running = False
@@ -220,6 +290,19 @@ async def _process_symbol(
         manager_settings = get_manager_settings()
         stop_loss_pct = float(manager_settings.get("stop_loss_pct", 0.0) or 0.0)
         take_profit_pct = float(manager_settings.get("take_profit_pct", 0.0) or 0.0)
+        hold_overnight = bool(manager_settings.get("hold_positions_overnight", True))
+        eod_window_mins = int(manager_settings.get("eod_sell_window_minutes", 30) or 30)
+        pre_sell_shutoff_mins = int(
+            manager_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120
+        )
+        in_pre_sell_shutoff_window = (
+            not hold_overnight
+            and _is_in_pre_sell_engine_shutoff_window(eod_window_mins, pre_sell_shutoff_mins)
+        )
+        in_final_sell_window = (
+            not hold_overnight
+            and _is_in_eod_sell_window(eod_window_mins)
+        )
 
         # The raw last-bar signal is used for display (last_signal in DB).
         current_signal = int(last_row.get("signal", 0))
@@ -261,20 +344,35 @@ async def _process_symbol(
         # Determine what action to take
         action = None
         reason = None
+        disable_engine_after_sell = False
 
         strat_label = strategy_name.split(':')[0]
 
-        # End-of-day sell override: force liquidation if EOD window is active
-        # and hold_positions_overnight is disabled
-        if pos.shares > 0 and pos.avg_cost > 0:
-            from app.services.portfolio_manager import get_manager_settings
-            manager_settings = get_manager_settings()
-            hold_overnight = manager_settings.get("hold_positions_overnight", True)
-            eod_window_mins = manager_settings.get("eod_sell_window_minutes", 30)
-            
-            if not hold_overnight and _is_in_eod_sell_window(eod_window_mins):
+        # At the first tick of the final sell window (per symbol/day),
+        # immediately lock in winners and notify unrealized losers.
+        if (
+            pos.shares > 0
+            and pos.avg_cost > 0
+            and in_final_sell_window
+            and _mark_first_entry_into_final_sell_window(symbol, eod_window_mins)
+        ):
+            unrealized_pnl = (current_price - pos.avg_cost) * pos.shares
+            if unrealized_pnl > 0:
                 action = "SELL"
-                reason = f"end_of_day_liquidation (window: {eod_window_mins}min)"
+                disable_engine_after_sell = True
+                reason = (
+                    f"final_sell_window_profit_lock (${unrealized_pnl:.2f}, "
+                    f"window: {eod_window_mins}min)"
+                )
+            else:
+                await _notify_unrealized_loss(pos.id, symbol, unrealized_pnl)
+
+        # End-of-day sell override: force liquidation if EOD window is active
+        # and hold_positions_overnight is disabled.
+        if action is None and pos.shares > 0 and pos.avg_cost > 0 and in_final_sell_window:
+            action = "SELL"
+            disable_engine_after_sell = True
+            reason = f"end_of_day_liquidation (window: {eod_window_mins}min)"
 
         # Standard risk exits: stop loss and take profit
         if action is None and pos.shares > 0 and pos.avg_cost > 0:
@@ -290,8 +388,15 @@ async def _process_symbol(
                     reason = f"take_profit ({take_profit_pct:.2f}% @ ${tp_price:.2f})"
 
         if action is None and trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0:
-            action = "BUY"
-            reason = signal_source if signal_source else f"{strat_label} buy @ ${current_price:.2f}"
+            # During pre-sell shutdown and final sell windows, suppress new entries.
+            if in_pre_sell_shutoff_window or in_final_sell_window:
+                logger.debug(
+                    "Engine BUY suppressed for %s during EOD shutdown/final-sell window",
+                    symbol,
+                )
+            else:
+                action = "BUY"
+                reason = signal_source if signal_source else f"{strat_label} buy @ ${current_price:.2f}"
 
         elif action is None and trade_signal < 0 and pos.shares > 0:
             action = "SELL"
@@ -299,7 +404,13 @@ async def _process_symbol(
 
         if action:
             if _regular_session_is_open():
-                await _execute_trade(pos, action, current_price, reason)
+                await _execute_trade(
+                    pos,
+                    action,
+                    current_price,
+                    reason,
+                    disable_engine_after_sell=disable_engine_after_sell,
+                )
             else:
                 logger.debug(
                     "Engine skipping %s %s — pre-market warm-up (not yet 09:30 ET)",
@@ -343,6 +454,7 @@ async def _execute_trade(
     side: str,
     price: float,
     reason: str,
+    disable_engine_after_sell: bool = False,
 ) -> None:
     """Open a fresh DB session and execute the simulated trade."""
     async with AsyncSessionLocal() as db:
@@ -442,6 +554,10 @@ async def _execute_trade(
             acct2 = acct_res2.scalar_one_or_none()
             if acct2:
                 acct2.total_funds += pnl
+            if disable_engine_after_sell:
+                position.strategy_enabled = False
+                position.engine_error = None
+                logger.info("Engine auto-disabled for %s after EOD liquidation SELL", position.symbol)
         else:
             return
 

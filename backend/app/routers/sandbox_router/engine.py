@@ -89,6 +89,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     stop_loss_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     take_profit_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
     hold_positions_overnight: Optional[bool] = None
+    eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=1, le=480)
     eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=30)
     sentiment_data_points: Optional[int] = Field(default=None, ge=10, le=5000)

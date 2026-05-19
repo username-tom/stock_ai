@@ -46,6 +46,7 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN symbol_sentiment_strategies TEXT NOT NULL DEFAULT '{}'",
         # portfolio_manager_settings overnight/EOD exit and sentiment history columns
         "ALTER TABLE portfolio_manager_settings ADD COLUMN hold_positions_overnight BOOLEAN NOT NULL DEFAULT 1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN eod_engine_shutoff_minutes_before_sell INTEGER NOT NULL DEFAULT 120",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN eod_sell_window_minutes INTEGER NOT NULL DEFAULT 30",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_lookback_days INTEGER NOT NULL DEFAULT 5",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_data_points INTEGER NOT NULL DEFAULT 10",

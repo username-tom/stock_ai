@@ -65,6 +65,7 @@ _settings: dict[str, Any] = {
     "stop_loss_pct": 0.0,
     "take_profit_pct": 0.0,
     "hold_positions_overnight": True,     # whether to hold positions between days
+    "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
     "eod_sell_window_minutes": 30,        # minutes before market close to start sell-only mode
     "sentiment_lookback_days": 5,         # days of historical data for sentiment calc
     "sentiment_data_points": 10,          # number of recent bars used for sentiment calc
@@ -161,6 +162,7 @@ async def _load_settings_from_db() -> None:
             _settings["stop_loss_pct"] = float(getattr(row, "stop_loss_pct", 0.0) or 0.0)
             _settings["take_profit_pct"] = float(getattr(row, "take_profit_pct", 0.0) or 0.0)
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", True))
+            _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
             _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 30) or 30)
             _settings["sentiment_lookback_days"] = int(getattr(row, "sentiment_lookback_days", 5) or 5)
             _settings["sentiment_data_points"] = int(getattr(row, "sentiment_data_points", 10) or 10)
@@ -197,6 +199,7 @@ async def _save_settings_to_db() -> None:
         row.stop_loss_pct = float(_settings.get("stop_loss_pct", 0.0) or 0.0)
         row.take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", True)
+        row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
         row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 30) or 30)
         row.sentiment_lookback_days = int(_settings.get("sentiment_lookback_days", 5) or 5)
         row.sentiment_data_points = int(_settings.get("sentiment_data_points", 10) or 10)
@@ -212,7 +215,7 @@ def update_manager_settings(new: dict) -> dict:
                "market_sentiment_strategies", "symbol_sentiment_strategies",
               "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval",
               "stop_loss_pct", "take_profit_pct",
-              "hold_positions_overnight", "eod_sell_window_minutes"}
+              "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
