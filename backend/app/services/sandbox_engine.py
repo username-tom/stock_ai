@@ -213,6 +213,24 @@ def _get_buy_lock() -> asyncio.Lock:
     return _buy_lock
 
 
+def _position_committed_funds(pos: SandboxPosition) -> float:
+    settled_cost = float(pos.shares or 0.0) * float(pos.avg_cost or 0.0)
+    pending_cost = float(pos.pending_shares or 0.0) * float(pos.pending_avg_cost or 0.0)
+    allocated = float(pos.allocated_funds or 0.0)
+    return allocated + settled_cost + pending_cost
+
+
+def _position_max_allocation(pos: SandboxPosition, account_total_funds: float) -> float:
+    cap_val = float(getattr(pos, "max_allocation_value", 0.0) or 0.0)
+    if cap_val <= 0:
+        return float("inf")
+    mode = getattr(pos, "max_allocation_mode", "dollar") or "dollar"
+    if mode == "percent":
+        base = max(0.0, float(account_total_funds or 0.0))
+        return (base * cap_val) / 100.0
+    return cap_val
+
+
 def get_engine_state() -> dict:
     return {
         "running": _running,
@@ -530,9 +548,18 @@ async def _execute_trade(
                 else:
                     account_available = 0.0
 
-                available = position.allocated_funds + account_available
+                max_cap = _position_max_allocation(position, float(account.total_funds or 0.0) if account else 0.0)
+                committed = _position_committed_funds(position)
+                cap_room = max(0.0, max_cap - committed) if max_cap != float("inf") else float("inf")
+                max_extra_from_account = min(account_available, cap_room)
+                available = position.allocated_funds + max_extra_from_account
                 if available < price:
-                    logger.debug("Engine BUY skipped for %s — insufficient funds ($%.2f)", pos.symbol, available)
+                    logger.debug(
+                        "Engine BUY skipped for %s — insufficient funds/cap room ($%.2f, room=$%.2f)",
+                        pos.symbol,
+                        available,
+                        cap_room if cap_room != float("inf") else -1.0,
+                    )
                     return
                 quantity = math.floor(available / price)
                 if quantity <= 0:

@@ -299,6 +299,11 @@ class BulkStrategyRequest(BaseModel):
     strategy_name: Optional[str] = None
 
 
+class BulkAllocationCapRequest(BaseModel):
+    max_allocation_mode: str = Field(..., pattern=r'^(dollar|percent)$')
+    max_allocation_value: float = Field(..., ge=0)
+
+
 @router.patch("/positions-bulk-strategy")
 async def bulk_update_strategy(req: BulkStrategyRequest, db: AsyncSession = Depends(get_db)):
     """Set the same strategy on every existing position at once."""
@@ -319,3 +324,23 @@ async def bulk_update_strategy(req: BulkStrategyRequest, db: AsyncSession = Depe
         asyncio.create_task(refresh_sentiment_routing())
 
     return {"updated": len(positions), "strategy_name": req.strategy_name}
+
+
+@router.patch("/positions-bulk-allocation-cap")
+async def bulk_update_allocation_cap(req: BulkAllocationCapRequest, db: AsyncSession = Depends(get_db)):
+    """Set the same max allocation cap on every existing position at once."""
+    ensure_sandbox_write_allowed()
+    result = await db.execute(select(SandboxPosition))
+    positions = result.scalars().all()
+
+    for pos in positions:
+        pos.max_allocation_mode = req.max_allocation_mode
+        pos.max_allocation_value = req.max_allocation_value
+
+    await db.commit()
+    await offload_simulated_state(db)
+    return {
+        "updated": len(positions),
+        "max_allocation_mode": req.max_allocation_mode,
+        "max_allocation_value": req.max_allocation_value,
+    }

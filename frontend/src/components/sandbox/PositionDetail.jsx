@@ -43,6 +43,8 @@ export default function PositionDetail({
   allocInput,
   setAllocInput,
   updatePosMut,
+  bulkCapMut,
+  positionsCount = 0,
   removeSymbolMut,
   toggleEngineMut,
   tradeForm,
@@ -242,6 +244,22 @@ export default function PositionDetail({
     const scriptId = parseInt(strategyName.split(':')[1], 10)
     return scripts.find(s => s.id === scriptId)?.name ?? null
   }
+
+  function handleSaveCapToAll() {
+    const parsedValue = maxAllocValue === '' ? 0 : parseFloat(maxAllocValue)
+    if (Number.isNaN(parsedValue)) return
+    const ok = window.confirm(
+      `Apply this cap (${maxAllocMode === 'percent' ? `${parsedValue}%` : `$${parsedValue}`}) to all ${positionsCount} position${positionsCount !== 1 ? 's' : ''}?`,
+    )
+    if (!ok) return
+    bulkCapMut.mutate({
+      max_allocation_mode: maxAllocMode,
+      max_allocation_value: parsedValue,
+    })
+  }
+
+  const parsedCapValue = maxAllocValue === '' ? 0 : parseFloat(maxAllocValue)
+  const capValueInvalid = Number.isNaN(parsedCapValue)
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Top section */}
@@ -434,12 +452,19 @@ export default function PositionDetail({
                 symbol: selectedSymbol,
                 payload: {
                   max_allocation_mode: maxAllocMode,
-                  max_allocation_value: maxAllocValue === '' ? 0 : parseFloat(maxAllocValue),
+                  max_allocation_value: parsedCapValue,
                 },
               })}
-              disabled={updatePosMut.isPending || Number.isNaN(parseFloat(maxAllocValue || '0'))}
+              disabled={updatePosMut.isPending || bulkCapMut?.isPending || capValueInvalid}
             >
               {updatePosMut.isPending ? 'Saving…' : 'Save Cap'}
+            </button>
+            <button
+              className="text-xs bg-cyan-700 hover:bg-cyan-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
+              onClick={handleSaveCapToAll}
+              disabled={updatePosMut.isPending || bulkCapMut?.isPending || capValueInvalid || positionsCount <= 0}
+            >
+              {bulkCapMut?.isPending ? 'Applying…' : 'Save to All'}
             </button>
           </div>
           <p className="text-[11px] text-slate-600 mt-2">

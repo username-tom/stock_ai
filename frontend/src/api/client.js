@@ -75,6 +75,7 @@ export const getSandboxPositions = () => api.get('/sandbox/positions').then(r =>
 export const addSandboxSymbol = (payload) => api.post('/sandbox/positions', payload).then(r => r.data)
 export const updateSandboxPosition = (symbol, payload) => api.patch(`/sandbox/positions/${symbol}`, payload).then(r => r.data)
 export const bulkUpdateSandboxStrategy = (strategy_name) => api.patch('/sandbox/positions-bulk-strategy', { strategy_name }).then(r => r.data)
+export const bulkUpdateSandboxAllocationCap = (payload) => api.patch('/sandbox/positions-bulk-allocation-cap', payload).then(r => r.data)
 export const removeSandboxSymbol = (symbol) => api.delete(`/sandbox/positions/${symbol}`).then(r => r.data)
 export const getSandboxTrades = (symbol, limit = 200) =>
   api.get('/sandbox/trades', { params: { symbol, limit } }).then(r => r.data)

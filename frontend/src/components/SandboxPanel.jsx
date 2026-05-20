@@ -18,6 +18,7 @@ import {
   getSandboxAnalytics, getSandboxRealizedMetrics,
   getPortfolioManagerState, togglePortfolioManager,
   bulkUpdateSandboxStrategy,
+  bulkUpdateSandboxAllocationCap,
   cancelOrder,
 } from '../api/client'
 import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy } from './sandbox/sandboxHelpers'
@@ -577,6 +578,20 @@ export default function SandboxPanel() {
       }, ...prev].slice(0, 100))
     },
   })
+  const bulkCapMut = useMutation({
+    mutationFn: (payload) => bulkUpdateSandboxAllocationCap(payload),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      setActivities(prev => [{
+        type: 'engine',
+        profile: activeProfileRef.current,
+        label: `Allocation cap updated for all ${data.updated} position${data.updated !== 1 ? 's' : ''}`,
+        sub: `${data.max_allocation_mode} ${data.max_allocation_mode === 'percent' ? `${Number(data.max_allocation_value).toFixed(2)}%` : `$${Number(data.max_allocation_value).toFixed(2)}`}`,
+        time: new Date().toLocaleTimeString(),
+      }, ...prev].slice(0, 100))
+    },
+  })
 
   // handlers
   function handleEditStratOpen() {
@@ -1009,6 +1024,8 @@ export default function SandboxPanel() {
               allocInput={allocInput}
               setAllocInput={setAllocInput}
               updatePosMut={updatePosMut}
+              bulkCapMut={bulkCapMut}
+              positionsCount={positions.length}
               removeSymbolMut={removeSymbolMut}
               toggleEngineMut={toggleEngineMut}
               tradeForm={tradeForm}

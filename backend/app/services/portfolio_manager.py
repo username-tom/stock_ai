@@ -491,6 +491,13 @@ def _position_max_allocation(position: SandboxPosition, account_total_funds: flo
     return cap_val
 
 
+def _position_committed_funds(position: SandboxPosition) -> float:
+    settled_cost = float(position.shares or 0.0) * float(position.avg_cost or 0.0)
+    pending_cost = float(position.pending_shares or 0.0) * float(position.pending_avg_cost or 0.0)
+    allocated = float(position.allocated_funds or 0.0)
+    return allocated + settled_cost + pending_cost
+
+
 async def _do_transfer() -> None:
     """Move funds from bearish positions to bullish positions, and optionally
     deploy unallocated account cash to the most bearish position."""
@@ -547,7 +554,8 @@ async def _do_transfer() -> None:
                     acct2 = acct_res2.scalar_one_or_none()
                     if pos and acct2:
                         max_cap = _position_max_allocation(pos, acct2.total_funds)
-                        room = max(0.0, max_cap - pos.allocated_funds) if max_cap != float("inf") else deployable
+                        committed = _position_committed_funds(pos)
+                        room = max(0.0, max_cap - committed) if max_cap != float("inf") else deployable
                         deploy_amount = min(deployable, room)
                         deploy_amount = math.floor(deploy_amount * 100) / 100
                         if deploy_amount <= 0:
@@ -650,7 +658,8 @@ async def _do_transfer() -> None:
                 if not pos:
                     continue
                 cap = _position_max_allocation(pos, account2.total_funds if account2 else 0.0)
-                room = max(0.0, cap - pos.allocated_funds) if cap != float("inf") else total_to_move
+                committed = _position_committed_funds(pos)
+                room = max(0.0, cap - committed) if cap != float("inf") else total_to_move
                 room = math.floor(room * 100) / 100
                 if room > 0:
                     dest_rows.append(pos)

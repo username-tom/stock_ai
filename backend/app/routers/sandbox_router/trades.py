@@ -27,6 +27,24 @@ from app.services.local_storage import (
 router = APIRouter()
 
 
+def _position_committed_funds(pos: SandboxPosition) -> float:
+    settled_cost = float(pos.shares or 0.0) * float(pos.avg_cost or 0.0)
+    pending_cost = float(pos.pending_shares or 0.0) * float(pos.pending_avg_cost or 0.0)
+    allocated = float(pos.allocated_funds or 0.0)
+    return allocated + settled_cost + pending_cost
+
+
+def _position_max_allocation(pos: SandboxPosition, account_total_funds: float) -> float:
+    cap_val = float(getattr(pos, "max_allocation_value", 0.0) or 0.0)
+    if cap_val <= 0:
+        return float("inf")
+    mode = getattr(pos, "max_allocation_mode", "dollar") or "dollar"
+    if mode == "percent":
+        base = max(0.0, float(account_total_funds or 0.0))
+        return (base * cap_val) / 100.0
+    return cap_val
+
+
 class TradeRequest(BaseModel):
     symbol: str
     side: str = Field(..., pattern="^(BUY|SELL)$")
@@ -53,17 +71,31 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
     if side == "BUY":
         # How much extra cash must be pulled from the account's unallocated pool?
         shortfall = round(max(0.0, total - pos.allocated_funds), 4)
+        account = await get_account(db)
+        all_pos_res = await db.execute(select(SandboxPosition))
+        all_positions = all_pos_res.scalars().all()
+        account_available = await compute_available_cash(db, account, all_positions)
+        if shortfall > account_available:
+            raise HTTPException(
+                400,
+                f"Insufficient funds. Position: ${pos.allocated_funds:.2f}, "
+                f"Account available: ${account_available:.2f}, Need: ${total:.2f}"
+            )
+
+        max_cap = _position_max_allocation(pos, float(account.total_funds or 0.0))
+        committed = _position_committed_funds(pos)
+        cap_room = max(0.0, max_cap - committed) if max_cap != float("inf") else float("inf")
+        if shortfall > cap_room:
+            raise HTTPException(
+                400,
+                (
+                    "Buy exceeds allocation guardrail. "
+                    f"Cap: ${max_cap:.2f}, Committed: ${committed:.2f}, "
+                    f"Additional required: ${shortfall:.2f}, Remaining room: ${cap_room:.2f}"
+                ),
+            )
+
         if shortfall > 0:
-            account = await get_account(db)
-            all_pos_res = await db.execute(select(SandboxPosition))
-            all_positions = all_pos_res.scalars().all()
-            account_available = await compute_available_cash(db, account, all_positions)
-            if shortfall > account_available:
-                raise HTTPException(
-                    400,
-                    f"Insufficient funds. Position: ${pos.allocated_funds:.2f}, "
-                    f"Account available: ${account_available:.2f}, Need: ${total:.2f}"
-                )
             # Draw shortfall from the unallocated pool into this position
             pos.allocated_funds += shortfall
             db.add(SandboxAllocationEvent(
