@@ -120,6 +120,13 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
         )
         enriched.sort(key=lambda p: p["symbol"])
 
+        try:
+            from app.services.stock_learner import classify_symbols
+            insights = await classify_symbols(list({p["symbol"] for p in enriched}))
+        except Exception:
+            insights = {}
+        enriched = [{**p, **insights.get(p["symbol"], {})} for p in enriched]
+
         mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
         save_portfolio_state(mode, {
             "source": "ib",
@@ -130,7 +137,13 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
 
     result = await db.execute(select(SandboxPosition).order_by(SandboxPosition.symbol))
     positions = result.scalars().all()
-    return {"positions": [position_dict(p) for p in positions]}
+    pos_dicts = [position_dict(p) for p in positions]
+    try:
+        from app.services.stock_learner import classify_symbols
+        insights = await classify_symbols([p["symbol"] for p in pos_dicts])
+    except Exception:
+        insights = {}
+    return {"positions": [{**p, **insights.get(p["symbol"], {})} for p in pos_dicts]}
 
 
 class AddSymbolRequest(BaseModel):

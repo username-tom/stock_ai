@@ -14,6 +14,7 @@ from typing import Optional, List
 
 from app.database import get_db
 from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade
+from app.services.stock_learner import classify_symbols, get_learner_history
 from app.services.market_calendar import count_nyse_trading_days
 
 router = APIRouter(prefix="/api/sandbox", tags=["sandbox"])
@@ -95,7 +96,31 @@ async def add_funds(req: AddFundsRequest, db: AsyncSession = Depends(get_db)):
 async def get_positions(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(SandboxPosition).order_by(SandboxPosition.symbol))
     positions = result.scalars().all()
-    return {"positions": [_position_dict(p) for p in positions]}
+    all_symbols = list({p.symbol for p in positions})
+    try:
+        insights = await classify_symbols(all_symbols)
+    except Exception:
+        insights = {}
+    return {
+        "positions": [
+            {
+                **_position_dict(p),
+                **insights.get(p.symbol, {}),
+            }
+            for p in positions
+        ]
+    }
+
+
+@router.get("/learner/insights")
+async def get_learner_insights(symbols: str = ""):
+    requested = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not requested:
+        return {"insights": {}}
+    try:
+        return {"insights": await classify_symbols(requested)}
+    except Exception:
+        return {"insights": {}}
 
 
 class AddSymbolRequest(BaseModel):
@@ -684,3 +709,11 @@ async def reset_sandbox(db: AsyncSession = Depends(get_db)):
     db.add(account)
     await db.commit()
     return {"status": "ok", "message": "Sandbox reset to factory defaults."}
+
+
+# ── learner history ───────────────────────────────────────────────────────── #
+
+@router.get("/learner/history/{symbol}")
+async def learner_history(symbol: str):
+    """Return in-process historical learner tags accumulated for a symbol."""
+    return {"history": await get_learner_history(symbol)}

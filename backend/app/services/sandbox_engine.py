@@ -140,6 +140,53 @@ def _is_in_pre_sell_engine_shutoff_window(
     return engine_shutoff_start <= t < final_sell_start
 
 
+def _current_market_phase(
+    *,
+    hold_overnight: bool,
+    eod_sell_window_minutes: int,
+    eod_engine_shutoff_minutes_before_sell: int,
+) -> dict[str, str]:
+    """Return current trading phase metadata for UI and status APIs."""
+    if not _regular_session_is_open():
+        return {"code": "closed", "label": "CLOSED"}
+
+    now_et = datetime.now(tz=_ET)
+    minutes_now = now_et.hour * 60 + now_et.minute
+    market_open_m = _MARKET_OPEN.hour * 60 + _MARKET_OPEN.minute
+    market_close_m = _MARKET_CLOSE.hour * 60 + _MARKET_CLOSE.minute
+
+    frenzy_minutes = 180   # first few hours after open
+    settling_minutes = 60  # final hour before shutdown boundary
+
+    _, final_sell_start = _get_eod_window_starts(
+        eod_sell_window_minutes,
+        eod_engine_shutoff_minutes_before_sell,
+    )
+    final_sell_start_m = final_sell_start.hour * 60 + final_sell_start.minute
+    shutoff_start_m = max(
+        0,
+        final_sell_start_m - max(1, int(eod_engine_shutoff_minutes_before_sell or 120)),
+    )
+
+    if not hold_overnight:
+        if minutes_now >= final_sell_start_m:
+            return {"code": "sell_period", "label": "SELL PERIOD"}
+        if minutes_now >= shutoff_start_m:
+            return {"code": "shut_off", "label": "SHUT OFF"}
+        normal_end = shutoff_start_m
+    else:
+        normal_end = market_close_m
+
+    frenzy_end = min(normal_end, market_open_m + frenzy_minutes)
+    settling_start = max(frenzy_end, normal_end - settling_minutes)
+
+    if minutes_now < frenzy_end:
+        return {"code": "frenzy", "label": "FRENZY"}
+    if minutes_now < settling_start:
+        return {"code": "follow_up", "label": "FOLLOW UP"}
+    return {"code": "settling", "label": "SETTLING"}
+
+
 def should_force_engine_off_without_position(
     *,
     shares: float,
@@ -232,11 +279,25 @@ def _position_max_allocation(pos: SandboxPosition, account_total_funds: float) -
 
 
 def get_engine_state() -> dict:
+    from app.services.portfolio_manager import get_manager_settings
+
+    manager_settings = get_manager_settings()
+    hold_overnight = bool(manager_settings.get("hold_positions_overnight", True))
+    eod_window_mins = int(manager_settings.get("eod_sell_window_minutes", 30) or 30)
+    pre_sell_shutoff_mins = int(
+        manager_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120
+    )
+
     return {
         "running": _running,
         "last_tick": _last_tick.isoformat() if _last_tick else None,
         "market_active": _market_is_active(),
         "trading_open": _regular_session_is_open(),
+        "market_phase": _current_market_phase(
+            hold_overnight=hold_overnight,
+            eod_sell_window_minutes=eod_window_mins,
+            eod_engine_shutoff_minutes_before_sell=pre_sell_shutoff_mins,
+        ),
         "symbols": dict(_symbol_status),
     }
 

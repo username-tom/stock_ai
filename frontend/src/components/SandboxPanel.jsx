@@ -6,6 +6,7 @@ import {
 } from '@heroicons/react/24/outline'
 import {
   getSandboxAccount, getSandboxPositions,
+  getSandboxLearnerInsights,
   updateSandboxPosition, removeSandboxSymbol,
   getSandboxTrades, placeSandboxTrade,
   exportSandbox, importSandbox, resetSandbox, resetSandboxSoft,
@@ -160,11 +161,27 @@ export default function SandboxPanel() {
     }
   }, [ibConnected])
 
+  const symbols = useMemo(() => {
+    const baseSymbols = rawPositions.map(p => p.symbol)
+    const merged = ibConnected ? [...baseSymbols, ...ibWatchlistSymbols] : baseSymbols
+    return [...new Set(merged)]
+  }, [ibConnected, rawPositions, ibWatchlistSymbols])
+
+  const { data: learnerData } = useQuery({
+    queryKey: ['sandbox-learner-insights', symbols.join(',')],
+    queryFn: () => symbols.length ? getSandboxLearnerInsights(symbols) : Promise.resolve({ insights: {} }),
+    enabled: symbols.length > 0,
+    staleTime: 90_000,
+  })
+
   const positions = useMemo(() => {
-    if (!ibConnected) return rawPositions
+    const learnerBySymbol = learnerData?.insights ?? {}
+    const applyLearner = pos => ({ ...pos, ...(learnerBySymbol[pos.symbol] ?? {}) })
+
+    if (!ibConnected) return rawPositions.map(applyLearner)
 
     const bySymbol = new Map(rawPositions.map(p => [p.symbol, p]))
-    const merged = [...rawPositions]
+    const merged = rawPositions.map(applyLearner)
     for (const sym of ibWatchlistSymbols) {
       if (bySymbol.has(sym)) continue
       merged.push({
@@ -187,12 +204,11 @@ export default function SandboxPanel() {
         pending_shares: 0,
         pending_avg_cost: 0,
         pending_since: null,
+        ...(learnerBySymbol[sym] ?? {}),
       })
     }
     return merged
-  }, [ibConnected, rawPositions, ibWatchlistSymbols])
-
-  const symbols = positions.map(p => p.symbol)
+  }, [ibConnected, rawPositions, ibWatchlistSymbols, learnerData?.insights])
   const { data: quotesData } = useQuery({
     queryKey: ['sandbox-quotes', symbols.join(',')],
     queryFn: () => symbols.length ? getBulkQuotes(symbols) : Promise.resolve({}),

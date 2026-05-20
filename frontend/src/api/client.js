@@ -72,6 +72,8 @@ export const withdrawSandboxFunds = (amount) => api.post('/sandbox/account/withd
 export const repairSandboxFunds = () => api.post('/sandbox/account/repair-funds').then(r => r.data)
 export const getSandboxFundEvents = (limit = 200) => api.get('/sandbox/account/fund-events', { params: { limit } }).then(r => r.data)
 export const getSandboxPositions = () => api.get('/sandbox/positions').then(r => r.data)
+export const getSandboxLearnerInsights = (symbols) =>
+  api.get('/sandbox/learner/insights', { params: { symbols: symbols.join(',') } }).then(r => r.data)
 export const addSandboxSymbol = (payload) => api.post('/sandbox/positions', payload).then(r => r.data)
 export const updateSandboxPosition = (symbol, payload) => api.patch(`/sandbox/positions/${symbol}`, payload).then(r => r.data)
 export const bulkUpdateSandboxStrategy = (strategy_name) => api.patch('/sandbox/positions-bulk-strategy', { strategy_name }).then(r => r.data)

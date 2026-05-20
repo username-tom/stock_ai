@@ -45,9 +45,30 @@ export default function SandboxSidebar({
   }, [])
 
   const marketPhase = useMemo(() => {
+    const backendPhase = engineState?.market_phase
+    if (backendPhase && typeof backendPhase.code === 'string') {
+      const code = backendPhase.code
+      const classByCode = {
+        closed: 'bg-slate-800 text-slate-400 border border-dark-500',
+        frenzy: 'bg-orange-900/25 text-orange-300 border border-orange-700/40',
+        follow_up: 'bg-cyan-900/25 text-cyan-300 border border-cyan-700/40',
+        settling: 'bg-lime-900/25 text-lime-300 border border-lime-700/40',
+        shut_off: 'bg-amber-900/25 text-amber-300 border border-amber-700/40',
+        sell_period: 'bg-red-900/25 text-red-300 border border-red-700/40',
+      }
+      return {
+        label: backendPhase.label || code.replaceAll('_', ' ').toUpperCase(),
+        className: classByCode[code] || classByCode.closed,
+      }
+    }
+
     const holdOvernight = managerSettings?.hold_positions_overnight !== false
     const sellWindow = Math.max(1, Number(managerSettings?.eod_sell_window_minutes ?? 30))
     const shutoffWindow = Math.max(1, Number(managerSettings?.eod_engine_shutoff_minutes_before_sell ?? 120))
+    const marketOpen = 570 // 09:30 ET
+    const marketClose = 960 // 16:00 ET
+    const frenzyMinutes = 180 // first few hours after open
+    const settlingMinutes = 60 // final hour before shutdown boundary
 
     let weekday = null
     let hour = 0
@@ -77,7 +98,7 @@ export default function SandboxSidebar({
 
     const isWeekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday)
     const minutesNow = hour * 60 + minute
-    const tradingOpenFromClock = isWeekday && minutesNow >= 570 && minutesNow < 960 // 09:30-16:00 ET
+    const tradingOpenFromClock = isWeekday && minutesNow >= marketOpen && minutesNow < marketClose // 09:30-16:00 ET
     const tradingOpen = typeof engineState?.trading_open === 'boolean'
       ? engineState.trading_open
       : tradingOpenFromClock
@@ -86,22 +107,27 @@ export default function SandboxSidebar({
       return { label: 'CLOSED', className: 'bg-slate-800 text-slate-400 border border-dark-500' }
     }
 
-    if (holdOvernight) {
-      return { label: 'NORMAL', className: 'bg-emerald-900/25 text-emerald-300 border border-emerald-700/40' }
-    }
-
-    const marketClose = 960
     const sellStart = Math.max(0, marketClose - sellWindow)
     const shutoffStart = Math.max(0, sellStart - shutoffWindow)
+    const normalEnd = holdOvernight ? marketClose : shutoffStart
+    const frenzyEnd = Math.min(normalEnd, marketOpen + frenzyMinutes)
+    const settlingStart = Math.max(frenzyEnd, normalEnd - settlingMinutes)
 
-    if (minutesNow >= sellStart) {
+    if (!holdOvernight && minutesNow >= sellStart) {
       return { label: 'SELL PERIOD', className: 'bg-red-900/25 text-red-300 border border-red-700/40' }
     }
-    if (minutesNow >= shutoffStart) {
+    if (!holdOvernight && minutesNow >= shutoffStart) {
       return { label: 'SHUT OFF', className: 'bg-amber-900/25 text-amber-300 border border-amber-700/40' }
     }
-    return { label: 'NORMAL', className: 'bg-emerald-900/25 text-emerald-300 border border-emerald-700/40' }
-  }, [managerSettings, engineState?.trading_open, phaseNow])
+
+    if (minutesNow < frenzyEnd) {
+      return { label: 'FRENZY', className: 'bg-orange-900/25 text-orange-300 border border-orange-700/40' }
+    }
+    if (minutesNow < settlingStart) {
+      return { label: 'FOLLOW UP', className: 'bg-cyan-900/25 text-cyan-300 border border-cyan-700/40' }
+    }
+    return { label: 'SETTLING', className: 'bg-lime-900/25 text-lime-300 border border-lime-700/40' }
+  }, [managerSettings, engineState?.trading_open, engineState?.market_phase, phaseNow])
 
   const [showAddFunds, setShowAddFunds] = useState(false)
   const [fundsInput, setFundsInput] = useState('')

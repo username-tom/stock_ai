@@ -84,6 +84,7 @@ _state: dict[str, Any] = {
         "score": 0.0, "classification": "neutral", "bucket": "neutral", "updated_at": None,
     },
     "sentiment_groups": {"market": [], "symbol": []},  # symbols by sentiment mode
+    "last_engine_reenable_day": None,
 }
 
 # Prevent repeated IB profit-take submissions every PM loop tick.
@@ -827,6 +828,28 @@ async def _attempt_ib_profit_take_for_unwatched_owned() -> None:
             )
 
 
+async def _reenable_all_engines_for_trading_day_start() -> int:
+    """Turn every strategy engine back on at the start of each trading day."""
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+
+        res = await db.execute(
+            sa_select(SandboxPosition).where(
+                SandboxPosition.strategy_name.isnot(None),
+                SandboxPosition.strategy_enabled == False,  # noqa: E712
+            )
+        )
+        positions: list[SandboxPosition] = res.scalars().all()
+        if not positions:
+            return 0
+
+        for pos in positions:
+            pos.strategy_enabled = True
+            pos.engine_error = None
+        await db.commit()
+        return len(positions)
+
+
 # ── main loop ─────────────────────────────────────────────────────────────── #
 
 async def refresh_sentiment_routing() -> None:
@@ -856,9 +879,24 @@ async def run_portfolio_manager() -> None:
         if not _settings["enabled"]:
             continue
 
-        from app.services.sandbox_engine import _market_is_active
+        from app.services.sandbox_engine import _ET, _market_is_active, _regular_session_is_open
         if not _market_is_active():
             continue
+
+        # Start-of-day reset: when PM is ON, re-enable all symbol engines once
+        # per market day so symbols auto-resume after prior EOD shutoff/sell.
+        if _regular_session_is_open():
+            day_key = datetime.now(tz=_ET).date().isoformat()
+            if _state.get("last_engine_reenable_day") != day_key:
+                try:
+                    reenabled = await _reenable_all_engines_for_trading_day_start()
+                    if reenabled > 0:
+                        _log_activity(
+                            f"Trading-day start: re-enabled {reenabled} engine(s)"
+                        )
+                except Exception as exc:
+                    logger.warning("PM day-start engine re-enable error: %s", exc)
+                _state["last_engine_reenable_day"] = day_key
 
         now = asyncio.get_event_loop().time()
 

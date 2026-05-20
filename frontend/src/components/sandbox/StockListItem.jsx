@@ -10,6 +10,14 @@ import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
 const BULL_COLOR = '#10b981'
 const BEAR_COLOR = '#ef4444'
 const NEUTRAL_COLOR = '#64748b'
+const LEARNER_COLORS = {
+  'STRONG LONG': 'bg-emerald-900/25 text-emerald-300 border border-emerald-700/40',
+  LONG: 'bg-emerald-900/20 text-emerald-300 border border-emerald-700/30',
+  'STRONG SHORT': 'bg-red-900/25 text-red-300 border border-red-700/40',
+  SHORT: 'bg-red-900/20 text-red-300 border border-red-700/30',
+  WATCH: 'bg-slate-800 text-slate-400 border border-dark-500',
+  NEUTRAL: 'bg-slate-800 text-slate-400 border border-dark-500',
+}
 
 function scoreToClassification(score) {
   if (score >= 0.5) return 'euphoric'
@@ -61,6 +69,8 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
   const minFundsLabel = minFundsMode === 'percent'
     ? `Min ${Number(managerSettings?.min_position_funds_pct ?? 1).toFixed(2)}% (${fmtMoney(minFundsDollar)})`
     : `Min ${fmtMoney(minFundsDollar)}`
+  const learnerTag = (pos.learner_tag || '').toUpperCase()
+  const learnerTagClass = LEARNER_COLORS[learnerTag] || LEARNER_COLORS.NEUTRAL
 
   const handleMouseEnter = useCallback(() => {
     if (!wrapperRef.current) return
@@ -108,6 +118,16 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
         )}
         {sector && (
           <div className="text-[11px] text-sky-300/80 truncate mb-0.5">{sector}</div>
+        )}
+        {learnerTag && (
+          <div className="mb-0.5 flex items-center gap-1">
+            <span
+              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${learnerTagClass}`}
+              title={pos.learner_reason ? `${pos.learner_reason}${pos.learner_confidence != null ? ` · confidence ${Number(pos.learner_confidence).toFixed(2)}` : ''}` : `Learner bias: ${learnerTag}`}
+            >
+              AI {learnerTag}{pos.learner_confidence != null ? ` ${Math.round(pos.learner_confidence * 100)}%` : ''}
+            </span>
+          </div>
         )}
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>{pos.shares > 0 ? `${pos.shares.toFixed(4)} sh` : 'Watchlist'}</span>
