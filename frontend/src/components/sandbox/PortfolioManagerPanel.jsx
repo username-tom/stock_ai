@@ -25,6 +25,29 @@ const SENTIMENT_LABELS = {
   bullish: 'Bullish',
   euphoric: 'Euphoric',
 }
+
+const AI_TAG_BUCKETS = ['STRONG LONG', 'LONG', 'NEUTRAL', 'SHORT', 'STRONG SHORT']
+const AI_TAG_LABELS = {
+  'STRONG LONG': 'Strong Long',
+  'LONG': 'Long',
+  'NEUTRAL': 'Neutral',
+  'SHORT': 'Short',
+  'STRONG SHORT': 'Strong Short',
+}
+const AI_TAG_COLORS = {
+  'STRONG LONG': '#10b981',
+  'LONG': '#34d399',
+  'NEUTRAL': '#64748b',
+  'SHORT': '#f87171',
+  'STRONG SHORT': '#ef4444',
+}
+const DEFAULT_AI_TAG_STRATEGIES = {
+  'STRONG LONG': 'sma_crossover',
+  'LONG': 'sma_crossover',
+  'NEUTRAL': '',
+  'SHORT': 'rsi',
+  'STRONG SHORT': 'rsi',
+}
 const DEFAULT_SENTIMENT_STRATEGIES = {
   crash: 'rsi',
   bearish: 'macd',
@@ -64,6 +87,16 @@ function buildDraftFromSettings(settings) {
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
     sentiment_data_points: settings.sentiment_data_points ?? 10,
     sentiment_interval: settings.sentiment_interval ?? '1m',
+    ai_tag_strategy_enabled: settings.ai_tag_strategy_enabled ?? false,
+    ai_tag_strategies: {
+      ...DEFAULT_AI_TAG_STRATEGIES,
+      ...(settings.ai_tag_strategies ?? {}),
+    },
+    ai_tag_allow_overnight: settings.ai_tag_allow_overnight ?? true,
+    ai_tag_action_mode: settings.ai_tag_action_mode ?? 'strategy_override',
+    ai_tag_long_engine_off: settings.ai_tag_long_engine_off ?? true,
+    ai_tag_long_tp_pct: settings.ai_tag_long_tp_pct ?? 0,
+    ai_tag_long_sl_pct: settings.ai_tag_long_sl_pct ?? 0,
   }
 }
 
@@ -269,6 +302,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
   const settings = managerData.settings
   const scores = managerData.scores ?? {}
+  const aiTags = managerData.ai_tags ?? {}
   const activity = managerData.last_activity ?? []
 
   function openEdit() {
@@ -358,6 +392,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       sentiment_lookback_days: Number(draft.sentiment_lookback_days),
       sentiment_data_points: Number(draft.sentiment_data_points),
       sentiment_interval: draft.sentiment_interval,
+      ai_tag_strategy_enabled: draft.ai_tag_strategy_enabled,
+      ai_tag_strategies: draft.ai_tag_strategies,
+      ai_tag_allow_overnight: draft.ai_tag_allow_overnight,
+      ai_tag_action_mode: draft.ai_tag_action_mode,
+      ai_tag_long_engine_off: draft.ai_tag_long_engine_off,
+      ai_tag_long_tp_pct: Number(draft.ai_tag_long_tp_pct),
+      ai_tag_long_sl_pct: Number(draft.ai_tag_long_sl_pct),
     })
   }
 
@@ -528,6 +569,17 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           <ChartBarIcon className="h-3.5 w-3.5" />
           Sentiment window: last {settings.sentiment_data_points ?? 10} bars ({settings.sentiment_interval}, {settings.sentiment_lookback_days}d range)
         </span>
+        {settings.ai_tag_strategy_enabled && (
+          <span className="flex items-center gap-1 text-violet-400">
+            <CpuChipIcon className="h-3.5 w-3.5" />
+            AI tag routing active
+            {' · '}{settings.ai_tag_action_mode === 'direct' ? 'direct' : 'strategy override'}
+            {settings.ai_tag_allow_overnight ? ' · LONG/STRONG LONG exempt from EOD' : ''}
+            {settings.ai_tag_action_mode !== 'direct' && settings.ai_tag_long_engine_off && ' · long hold mode'}
+            {settings.ai_tag_long_tp_pct > 0 && ` TP ${settings.ai_tag_long_tp_pct}%`}
+            {settings.ai_tag_long_sl_pct > 0 && ` SL ${settings.ai_tag_long_sl_pct}%`}
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
@@ -667,6 +719,49 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 <span className="text-xs text-slate-500">({sc.score > 0 ? '+' : ''}{sc.score})</span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* AI Tags overview */}
+      {settings.ai_tag_strategy_enabled && Object.keys(aiTags).length > 0 && (
+        <div>
+          <div className="flex items-center gap-3 mb-2">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">AI Tag Routing</span>
+            {AI_TAG_BUCKETS.map(tag => {
+              const count = Object.values(aiTags).filter(t => (t.learner_tag || '').toUpperCase() === tag).length
+              if (!count) return null
+              return (
+                <span key={tag} className="text-xs font-medium" style={{ color: AI_TAG_COLORS[tag] }}>
+                  {count} {AI_TAG_LABELS[tag].toLowerCase()}
+                </span>
+              )
+            })}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(aiTags).map(([sym, tagInfo]) => {
+              const tag = (tagInfo.learner_tag || 'WATCH').toUpperCase()
+              const color = AI_TAG_COLORS[tag] ?? NEUTRAL_COLOR
+              const conf = tagInfo.learner_confidence != null ? Math.round(tagInfo.learner_confidence * 100) : null
+              const isHolding = tagInfo.hold_mode === true
+              return (
+                <div
+                  key={sym}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-dark-800 border transition-colors ${
+                    isHolding ? 'border-violet-700/60' : 'border-dark-600'
+                  } ${onSelectSymbol ? 'cursor-pointer hover:border-violet-600/60 hover:bg-dark-700' : ''}`}
+                  title={`${sym} AI: ${tag}${conf != null ? ` (${conf}% confidence)` : ''}${isHolding ? ' · Engine paused (long hold)' : ''}`}
+                  onClick={onSelectSymbol ? () => onSelectSymbol(sym) : undefined}
+                >
+                  <span className="font-bold text-xs text-slate-200 font-mono">{sym}</span>
+                  <span className="text-xs font-semibold" style={{ color }}>
+                    {tag === 'STRONG LONG' ? '▲▲' : tag === 'LONG' ? '▲' : tag === 'STRONG SHORT' ? '▼▼' : tag === 'SHORT' ? '▼' : '—'} {AI_TAG_LABELS[tag] ?? tag}
+                  </span>
+                  {conf != null && <span className="text-xs text-slate-500">{conf}%</span>}
+                  {isHolding && <span className="text-[10px] text-violet-400 font-medium">HOLD</span>}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
@@ -1212,6 +1307,174 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 })}
               </div>
             </SettingRow>
+
+            <hr className="border-dark-600 my-4" />
+
+            {/* ── AI Tag Strategy Routing ───────────────────────────────── */}
+            <SettingRow
+              label="AI Tag Strategy Switching"
+              hint="When enabled, the portfolio manager automatically updates the strategy for each position based on its AI learner tag. WATCH tag always keeps the current default day-trading strategy unchanged."
+            >
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                  onClick={() => {
+                    if (!editSettings) return
+                    updateDraft(d => ({ ...d, ai_tag_strategy_enabled: !d.ai_tag_strategy_enabled }))
+                  }}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_strategy_enabled ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs text-slate-300">{draft.ai_tag_strategy_enabled ? 'Enabled' : 'Disabled'}</span>
+              </label>
+            </SettingRow>
+
+            {draft.ai_tag_strategy_enabled && (
+              <>
+                {/* Mode toggle */}
+                <SettingRow
+                  label="Action Mode"
+                  hint="Strategy Override: PM sets the strategy name per AI tag, the engine executes trades. Direct Actions: PM directly buys/sells LONG/STRONG LONG positions without the engine — bypasses engine shutoff windows."
+                >
+                  <div className="flex gap-0.5 p-0.5 bg-dark-900 rounded-lg">
+                    {[
+                      { value: 'strategy_override', label: 'Strategy Override' },
+                      { value: 'direct', label: 'Direct Actions' },
+                    ].map(opt => (
+                      <button
+                        key={opt.value}
+                        disabled={!editSettings}
+                        onClick={() => editSettings && updateDraft(d => ({ ...d, ai_tag_action_mode: opt.value }))}
+                        className={`text-xs px-3 py-1.5 rounded-md transition-all ${
+                          draft.ai_tag_action_mode === opt.value
+                            ? 'bg-violet-600 text-white font-medium'
+                            : 'text-slate-400 hover:text-slate-300 disabled:opacity-50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </SettingRow>
+
+                {/* Per-tag strategy selectors */}
+                <SettingRow
+                  label="AI Tag Strategies"
+                  hint={draft.ai_tag_action_mode === 'direct'
+                    ? 'In Direct Actions mode, LONG/STRONG LONG are managed by PM directly. Strategies below apply to NEUTRAL, SHORT, and STRONG SHORT.'
+                    : 'Choose the strategy for each AI learner tag. Leave Neutral empty to keep the existing strategy. WATCH always uses the default engine (no override).'}
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {AI_TAG_BUCKETS.map(tag => {
+                      const isLong = tag === 'LONG' || tag === 'STRONG LONG'
+                      const directManaged = draft.ai_tag_action_mode === 'direct' && isLong
+                      const current = draft.ai_tag_strategies[tag] ?? DEFAULT_AI_TAG_STRATEGIES[tag] ?? ''
+                      return (
+                        <div key={`aitag-row-${tag}`} className={`border rounded-md p-2 space-y-1 ${directManaged ? 'bg-dark-900/30 border-dark-700 opacity-60' : 'bg-dark-900/60 border-dark-600'}`}>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[11px] font-bold" style={{ color: AI_TAG_COLORS[tag] }}>{AI_TAG_LABELS[tag]}</span>
+                            {directManaged && <span className="text-[10px] text-violet-400">PM direct</span>}
+                          </div>
+                          {directManaged ? (
+                            <span className="text-[11px] text-slate-500 italic">Bought/sold directly by PM</span>
+                          ) : (
+                            <select
+                              className="input text-xs py-1.5"
+                              disabled={!editSettings}
+                              value={current}
+                              onChange={e => updateDraft(d => ({
+                                ...d,
+                                ai_tag_strategies: { ...d.ai_tag_strategies, [tag]: e.target.value },
+                              }))}
+                            >
+                              <option value="">— no override —</option>
+                              {strategyOptions.map(s => <option key={`aitag-${tag}-${s.type}`} value={s.type}>{s.type}</option>)}
+                            </select>
+                          )}
+                        </div>
+                      )
+                    })}
+                    <div className="bg-dark-900/40 border border-dark-700 rounded-md p-2">
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <span className="text-[11px] font-bold text-slate-500">Watch</span>
+                      </div>
+                      <span className="text-[11px] text-slate-500 italic">Uses default day-trading engine — no override</span>
+                    </div>
+                  </div>
+                </SettingRow>
+
+                <SettingRow
+                  label="Allow Overnight for Long Tags"
+                  hint="When enabled, LONG/STRONG LONG positions are exempt from end-of-day liquidation. In Direct mode, the PM position simply stays open. In Strategy Override mode, the engine skips EOD sell for these positions."
+                >
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <div
+                      className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_allow_overnight ? 'bg-violet-600' : 'bg-dark-600'}`}
+                      onClick={() => {
+                        if (!editSettings) return
+                        updateDraft(d => ({ ...d, ai_tag_allow_overnight: !d.ai_tag_allow_overnight }))
+                      }}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_allow_overnight ? 'translate-x-4' : ''}`} />
+                    </div>
+                    <span className="text-xs text-slate-300">{draft.ai_tag_allow_overnight ? 'Hold overnight for LONG/STRONG LONG' : 'EOD rules apply to all'}</span>
+                  </label>
+                </SettingRow>
+
+                {/* Long TP/SL — always visible when AI tags enabled (used by both modes) */}
+                <SettingRow
+                  label="Long Take Profit %"
+                  hint="Sell when price rises this % above avg cost. 0 = disabled. In Direct mode: PM sells directly. In Strategy Override + Long Hold mode: PM re-enables engine after selling."
+                >
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number" min={0} max={100} step={0.1}
+                      disabled={!editSettings}
+                      value={draft.ai_tag_long_tp_pct}
+                      onChange={e => updateDraft(d => ({ ...d, ai_tag_long_tp_pct: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    />
+                    <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_tp_pct) > 0 ? '' : ' (off)'}</span>
+                  </div>
+                </SettingRow>
+                <SettingRow
+                  label="Long Stop Loss %"
+                  hint="Sell when price drops this % below avg cost. 0 = disabled."
+                >
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number" min={0} max={100} step={0.1}
+                      disabled={!editSettings}
+                      value={draft.ai_tag_long_sl_pct}
+                      onChange={e => updateDraft(d => ({ ...d, ai_tag_long_sl_pct: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    />
+                    <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_sl_pct) > 0 ? '' : ' (off)'}</span>
+                  </div>
+                </SettingRow>
+
+                {/* Long Hold Mode — strategy_override only */}
+                {draft.ai_tag_action_mode !== 'direct' && (
+                  <SettingRow
+                    label="Long Hold Mode"
+                    hint="After a BUY fills for a LONG or STRONG LONG position, disable the strategy engine so the position is held without short-term signal interference. The engine re-enables when TP/SL is hit or the AI tag changes."
+                  >
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <div
+                        className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_long_engine_off ? 'bg-violet-600' : 'bg-dark-600'}`}
+                        onClick={() => {
+                          if (!editSettings) return
+                          updateDraft(d => ({ ...d, ai_tag_long_engine_off: !d.ai_tag_long_engine_off }))
+                        }}
+                      >
+                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_long_engine_off ? 'translate-x-4' : ''}`} />
+                      </div>
+                      <span className="text-xs text-slate-300">{draft.ai_tag_long_engine_off ? 'Engine paused after buy (long hold)' : 'Engine runs normally for long tags'}</span>
+                    </label>
+                  </SettingRow>
+                )}
+              </>
+            )}
 
             <hr className="border-dark-600 my-4" />
 

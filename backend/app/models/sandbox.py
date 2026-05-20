@@ -28,6 +28,7 @@ class SandboxPosition(Base):
     strategy_name = Column(String(100), nullable=True)
     # Automated engine columns
     strategy_enabled = Column(Boolean, default=False, nullable=False)  # engine active
+    pm_managed = Column(Boolean, default=False, nullable=False)        # PM holds this position; engine must stay off
     last_signal = Column(Integer, nullable=True)      # +1 buy / -1 sell / 0 hold
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     engine_error = Column(Text, nullable=True)
@@ -117,4 +118,13 @@ class PortfolioManagerSettings(Base):
     sentiment_lookback_days = Column(Integer, default=5, nullable=False)
     sentiment_data_points = Column(Integer, default=10, nullable=False)
     sentiment_interval = Column(String(10), default="1m", nullable=False)
+    # AI tag (learner) strategy routing
+    ai_tag_strategy_enabled = Column(Boolean, default=False, nullable=False)
+    ai_tag_strategies = Column(Text, nullable=False, server_default=text("'{}'"))
+    ai_tag_allow_overnight = Column(Boolean, default=True, nullable=False)
+    ai_tag_action_mode = Column(String(20), default="strategy_override", nullable=False)
+    # AI tag long-hold mode: disable engine after buy, re-enable on TP/SL or tag change
+    ai_tag_long_engine_off = Column(Boolean, default=True, nullable=False)
+    ai_tag_long_tp_pct = Column(Float, default=0.0, nullable=False)
+    ai_tag_long_sl_pct = Column(Float, default=0.0, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

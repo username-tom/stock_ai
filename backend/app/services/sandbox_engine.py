@@ -392,6 +392,17 @@ async def _process_symbol(
         stop_loss_pct = float(manager_settings.get("stop_loss_pct", 0.0) or 0.0)
         take_profit_pct = float(manager_settings.get("take_profit_pct", 0.0) or 0.0)
         hold_overnight = bool(manager_settings.get("hold_positions_overnight", True))
+
+        # Per-symbol AI-tag overnight exemption: if the symbol has a LONG or STRONG LONG
+        # learner tag and ai_tag_allow_overnight is enabled, treat this symbol as
+        # hold_overnight=True regardless of the global setting.
+        if not hold_overnight and manager_settings.get("ai_tag_allow_overnight", True):
+            from app.services.portfolio_manager import get_manager_state as _get_pm_state
+            ai_tags = _get_pm_state().get("ai_tags", {})
+            sym_tag = (ai_tags.get(pos.symbol, {}).get("learner_tag") or "").upper()
+            if sym_tag in ("LONG", "STRONG LONG"):
+                hold_overnight = True
+
         eod_window_mins = int(manager_settings.get("eod_sell_window_minutes", 30) or 30)
         pre_sell_shutoff_mins = int(
             manager_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120

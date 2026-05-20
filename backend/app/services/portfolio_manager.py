@@ -62,6 +62,19 @@ _settings: dict[str, Any] = {
         "euphoric": "rsi",
     },
     "sentiment_strategy_enabled": True,   # auto-change strategy based on sentiment
+    "ai_tag_strategy_enabled": False,      # auto-change strategy based on AI learner tag
+    "ai_tag_strategies": {
+        "STRONG LONG": "sma_crossover",
+        "LONG": "sma_crossover",
+        "NEUTRAL": "",           # empty = keep current strategy (no override)
+        "SHORT": "rsi",
+        "STRONG SHORT": "rsi",
+    },
+    "ai_tag_allow_overnight": True,        # LONG/STRONG LONG positions skip EOD liquidation
+    "ai_tag_action_mode": "strategy_override",  # strategy_override | direct
+    "ai_tag_long_engine_off": True,        # disable engine after buy for LONG/STRONG LONG (hold mode)
+    "ai_tag_long_tp_pct": 0.0,            # take profit % for long-hold positions (0 = disabled)
+    "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
     "stop_loss_pct": 0.0,
     "take_profit_pct": 0.0,
     "hold_positions_overnight": True,     # whether to hold positions between days
@@ -85,6 +98,7 @@ _state: dict[str, Any] = {
     },
     "sentiment_groups": {"market": [], "symbol": []},  # symbols by sentiment mode
     "last_engine_reenable_day": None,
+    "ai_tags": {},   # { symbol: { learner_tag, learner_direction, learner_confidence } }
 }
 
 # Prevent repeated IB profit-take submissions every PM loop tick.
@@ -102,6 +116,7 @@ def get_manager_state() -> dict:
         "last_score_at": _state["last_score_at"].isoformat() if _state["last_score_at"] else None,
         "market_classification": _state.get("market_classification"),
         "sentiment_groups": _state.get("sentiment_groups", {"market": [], "symbol": []}),
+        "ai_tags": _state.get("ai_tags", {}),
         "settings": get_manager_settings(),
     }
 
@@ -171,6 +186,16 @@ async def _load_settings_from_db() -> None:
             _settings["sentiment_lookback_days"] = int(getattr(row, "sentiment_lookback_days", 5) or 5)
             _settings["sentiment_data_points"] = int(getattr(row, "sentiment_data_points", 10) or 10)
             _settings["sentiment_interval"] = getattr(row, "sentiment_interval", "1m") or "1m"
+            _settings["ai_tag_strategy_enabled"] = bool(getattr(row, "ai_tag_strategy_enabled", False))
+            _settings["ai_tag_strategies"] = _load_strategy_map(
+                getattr(row, "ai_tag_strategies", None),
+                _settings["ai_tag_strategies"],
+            )
+            _settings["ai_tag_allow_overnight"] = bool(getattr(row, "ai_tag_allow_overnight", True))
+            _settings["ai_tag_action_mode"] = getattr(row, "ai_tag_action_mode", "strategy_override") or "strategy_override"
+            _settings["ai_tag_long_engine_off"] = bool(getattr(row, "ai_tag_long_engine_off", True))
+            _settings["ai_tag_long_tp_pct"] = float(getattr(row, "ai_tag_long_tp_pct", 0.0) or 0.0)
+            _settings["ai_tag_long_sl_pct"] = float(getattr(row, "ai_tag_long_sl_pct", 0.0) or 0.0)
 
 
 async def _save_settings_to_db() -> None:
@@ -208,6 +233,13 @@ async def _save_settings_to_db() -> None:
         row.sentiment_lookback_days = int(_settings.get("sentiment_lookback_days", 5) or 5)
         row.sentiment_data_points = int(_settings.get("sentiment_data_points", 10) or 10)
         row.sentiment_interval = _settings.get("sentiment_interval", "1m") or "1m"
+        row.ai_tag_strategy_enabled = bool(_settings.get("ai_tag_strategy_enabled", False))
+        row.ai_tag_strategies = json.dumps(_settings.get("ai_tag_strategies", {}), sort_keys=True)
+        row.ai_tag_allow_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
+        row.ai_tag_action_mode = _settings.get("ai_tag_action_mode", "strategy_override") or "strategy_override"
+        row.ai_tag_long_engine_off = bool(_settings.get("ai_tag_long_engine_off", True))
+        row.ai_tag_long_tp_pct = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
+        row.ai_tag_long_sl_pct = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
         await db.commit()
 
 
@@ -219,7 +251,10 @@ def update_manager_settings(new: dict) -> dict:
                "market_sentiment_strategies", "symbol_sentiment_strategies",
               "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval",
               "stop_loss_pct", "take_profit_pct",
-              "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes"}
+              "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
+              "ai_tag_strategy_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
+              "ai_tag_action_mode",
+              "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -245,6 +280,8 @@ def update_manager_settings(new: dict) -> dict:
                     await _refresh_scores(syms)
                 await _apply_sentiment_strategies()
             loop.create_task(_refresh_and_apply())
+        if any(key in new for key in ("ai_tag_strategy_enabled", "ai_tag_strategies")):
+            loop.create_task(_apply_ai_tag_strategies())
     return get_manager_settings()
 
 
@@ -433,6 +470,329 @@ async def _apply_sentiment_strategies() -> None:
         if changed:
             await db.commit()
             _log_activity(f"Sentiment strategy update: {', '.join(changed)}")
+
+
+async def _apply_ai_tag_strategies() -> None:
+    """Apply strategy overrides / direct trades based on the AI learner tag.
+
+    Mode: strategy_override (default)
+    ----------------------------------
+    - WATCH → keep default engine strategy unchanged.
+    - Other tags → apply the configured strategy name from ai_tag_strategies.
+    - With ai_tag_long_engine_off: disable engine after BUY for LONG/STRONG LONG,
+      re-enable on TP/SL hit or tag change.
+
+    Mode: direct
+    ------------
+    - LONG/STRONG LONG: PM manages all trading directly; engine stays off.
+      · No position → direct BUY (bypasses engine shutoff window; respects market open
+        and final EOD sell window when hold_positions_overnight is disabled).
+      · Has position → monitor TP/SL; direct SELL when hit.
+      · Tag change LONG/STRONG LONG → other → direct SELL; re-enable engine.
+    - Other tags still receive strategy name overrides (same as strategy_override mode).
+    """
+    if not _settings.get("ai_tag_strategy_enabled", False):
+        return
+
+    tag_strategies = _settings.get("ai_tag_strategies", {})
+    action_mode = _settings.get("ai_tag_action_mode", "strategy_override")
+    engine_off_mode = bool(_settings.get("ai_tag_long_engine_off", True))
+    long_tp = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
+    long_sl = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
+
+    # Record existing tags before overwrite for change-detection.
+    old_tags: dict[str, str] = {
+        sym: (info.get("learner_tag") or "WATCH").upper()
+        for sym, info in _state.get("ai_tags", {}).items()
+    }
+
+    # ── 1. Fetch all positions ─────────────────────────────────────────── #
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        res = await db.execute(sa_select(SandboxPosition))
+        snap: list[SandboxPosition] = res.scalars().all()
+        if not snap:
+            return
+        symbols = [p.symbol for p in snap]
+
+    # ── 2. Classify symbols ───────────────────────────────────────────── #
+    try:
+        from app.services.stock_learner import classify_symbols
+        insights = await classify_symbols(symbols)
+    except Exception as exc:
+        logger.warning("AI tag classification failed: %s", exc)
+        return
+
+    # Persist current tags in state for engine overnight-override lookups.
+    _state["ai_tags"] = {
+        sym: {
+            "learner_tag": info.get("learner_tag", "WATCH"),
+            "learner_direction": info.get("learner_direction", "neutral"),
+            "learner_confidence": info.get("learner_confidence", 0.0),
+        }
+        for sym, info in insights.items()
+    }
+
+    # ── 3. Determine which symbols need current prices ─────────────────── #
+    if action_mode == "direct":
+        # Need prices for all LONG/STRONG LONG positions (buy + TP/SL) and
+        # positions that just had a tag change away from LONG (tag-change sell).
+        needs_price_set: set[str] = set()
+        for p in snap:
+            new_tag = (insights.get(p.symbol, {}).get("learner_tag") or "WATCH").upper()
+            old_tag = old_tags.get(p.symbol, "WATCH").upper()
+            is_long = new_tag in ("LONG", "STRONG LONG")
+            was_long = old_tag in ("LONG", "STRONG LONG")
+            if is_long or (was_long and p.shares > 0):
+                needs_price_set.add(p.symbol)
+        needs_price = list(needs_price_set)
+    else:
+        # strategy_override: only held long positions in engine-off mode with TP/SL set
+        needs_price = [
+            p.symbol for p in snap
+            if engine_off_mode
+            and p.shares > 0
+            and not p.strategy_enabled
+            and (insights.get(p.symbol, {}).get("learner_tag") or "WATCH").upper() in ("LONG", "STRONG LONG")
+            and (long_tp > 0 or long_sl > 0)
+        ]
+
+    price_map: dict[str, float] = {}
+    if needs_price:
+        try:
+            from app.services.market_service import get_bulk_quotes
+            quotes = await get_bulk_quotes(needs_price)
+            price_map = {
+                sym: float(q["last_price"])
+                for sym, q in quotes.items()
+                if q and q.get("last_price")
+            }
+        except Exception as exc:
+            logger.warning("AI tag price fetch failed: %s", exc)
+
+    # ── 4. Apply all changes in a single session ──────────────────────── #
+    strategy_changes: list[str] = []
+    engine_changes: list[str] = []
+    hold_modes: dict[str, bool] = {}
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        from app.models.sandbox import SandboxAccount
+        from app.models.sandbox import SandboxTrade as _ST
+        res = await db.execute(sa_select(SandboxPosition))
+        positions: list[SandboxPosition] = res.scalars().all()
+
+        for pos in positions:
+            info = insights.get(pos.symbol, {})
+            new_tag = (info.get("learner_tag") or "WATCH").upper()
+            old_tag = old_tags.get(pos.symbol, "WATCH").upper()
+            is_long = new_tag in ("LONG", "STRONG LONG")
+            was_long = old_tag in ("LONG", "STRONG LONG")
+
+            # ── Strategy name override ────────────────────────────────────
+            # direct mode: only apply for non-LONG tags (LONG positions managed by PM).
+            # strategy_override mode: apply for all non-WATCH tags.
+            if new_tag != "WATCH" and (action_mode == "strategy_override" or not is_long):
+                target = tag_strategies.get(new_tag, "")
+                if target and pos.strategy_name != target:
+                    old_strat = pos.strategy_name or "none"
+                    pos.strategy_name = target
+                    if pos.strategy_enabled:
+                        strategy_changes.append(f"{pos.symbol}[AI:{new_tag}]: {old_strat}→{target}")
+
+            # ── Direct mode: PM controls LONG/STRONG LONG positions ────────
+            if action_mode == "direct":
+                if is_long:
+                    # Engine always off in direct mode for LONG positions.
+                    if pos.strategy_enabled:
+                        pos.strategy_enabled = False
+                        engine_changes.append(f"{pos.symbol}: engine off (direct, {new_tag})")
+
+                    cp = price_map.get(pos.symbol, 0.0)
+
+                    if pos.shares == 0 and pos.pending_shares == 0:
+                        # Buy candidate: check market open and not in final sell window.
+                        if cp >= 1.0 and pos.allocated_funds >= cp:
+                            from app.services.sandbox_engine import (
+                                _regular_session_is_open,
+                                _is_in_eod_sell_window,
+                            )
+                            hold_overnight = bool(_settings.get("hold_positions_overnight", True))
+                            eod_mins = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+                            if _regular_session_is_open() and (
+                                hold_overnight or not _is_in_eod_sell_window(eod_mins)
+                            ):
+                                qty = math.floor(pos.allocated_funds / cp)
+                                if qty > 0:
+                                    total = qty * cp
+                                    pos.shares = qty
+                                    pos.avg_cost = cp
+                                    pos.allocated_funds -= total
+                                    pos.total_invested = (pos.total_invested or 0.0) + total
+                                    pos.pm_managed = True   # PM owns this; skip day-start re-enable
+                                    hold_modes[pos.symbol] = True
+                                    db.add(_ST(
+                                        symbol=pos.symbol,
+                                        side="BUY",
+                                        quantity=qty,
+                                        price=cp,
+                                        total=round(total, 4),
+                                        strategy_name=pos.strategy_name,
+                                        reason=f"ai_direct_buy ({new_tag})",
+                                        pnl=None,
+                                    ))
+                                    engine_changes.append(
+                                        f"{pos.symbol}: direct BUY {qty}@${cp:.2f} ({new_tag})"
+                                    )
+                    elif pos.shares > 0:
+                        # Position already held — ensure pm_managed is set (survive restarts).
+                        if not pos.pm_managed:
+                            pos.pm_managed = True
+
+                        if cp > 0 and pos.avg_cost > 0:
+                            # TP/SL check for held position.
+                            hit_sl = long_sl > 0 and cp <= pos.avg_cost * (1.0 - long_sl / 100.0)
+                            hit_tp = long_tp > 0 and cp >= pos.avg_cost * (1.0 + long_tp / 100.0)
+                            if hit_sl or hit_tp:
+                                reason = (
+                                    f"ai_long_sl ({long_sl:.2f}% @ ${cp:.2f})"
+                                    if hit_sl
+                                    else f"ai_long_tp ({long_tp:.2f}% @ ${cp:.2f})"
+                                )
+                                qty = pos.shares
+                                total = qty * cp
+                                pnl = round((cp - pos.avg_cost) * qty, 4)
+                                pos.shares = 0.0
+                                pos.allocated_funds += total
+                                pos.realized_pnl += pnl
+                                pos.avg_cost = 0.0
+                                pos.pm_managed = False  # PM releasing control
+                                hold_modes[pos.symbol] = False
+                                acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+                                acct = acct_res.scalar_one_or_none()
+                                if acct:
+                                    acct.total_funds += pnl
+                                db.add(_ST(
+                                    symbol=pos.symbol,
+                                    side="SELL",
+                                    quantity=qty,
+                                    price=cp,
+                                    total=round(total, 4),
+                                    strategy_name=pos.strategy_name,
+                                    reason=reason,
+                                    pnl=pnl,
+                                ))
+                                engine_changes.append(
+                                    f"{pos.symbol}: {reason.split('(')[0].strip()} PnL ${pnl:+.2f}"
+                                )
+                            else:
+                                hold_modes[pos.symbol] = True  # still holding
+
+                elif was_long and pos.shares > 0:
+                    # Tag changed from LONG/STRONG LONG → other: sell directly.
+                    cp = price_map.get(pos.symbol, 0.0)
+                    if cp > 0:
+                        qty = pos.shares
+                        total = qty * cp
+                        pnl = round((cp - pos.avg_cost) * qty, 4)
+                        pos.shares = 0.0
+                        pos.allocated_funds += total
+                        pos.realized_pnl += pnl
+                        pos.avg_cost = 0.0
+                        pos.pm_managed = False  # PM releasing control
+                        hold_modes[pos.symbol] = False
+                        acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+                        acct = acct_res.scalar_one_or_none()
+                        if acct:
+                            acct.total_funds += pnl
+                        db.add(_ST(
+                            symbol=pos.symbol,
+                            side="SELL",
+                            quantity=qty,
+                            price=cp,
+                            total=round(total, 4),
+                            strategy_name=pos.strategy_name,
+                            reason=f"ai_tag_change ({old_tag}→{new_tag})",
+                            pnl=pnl,
+                        ))
+                        engine_changes.append(
+                            f"{pos.symbol}: sold on tag change ({old_tag}→{new_tag}) PnL ${pnl:+.2f}"
+                        )
+                    # Re-enable engine so the new tag's strategy can run.
+                    if not pos.strategy_enabled:
+                        pos.strategy_enabled = True
+                        engine_changes.append(f"{pos.symbol}: engine re-enabled ({new_tag})")
+
+            # ── Strategy override mode: long-hold engine control ───────────
+            elif engine_off_mode:
+                has_open = pos.shares > 0 or pos.pending_shares > 0
+
+                if is_long and has_open and pos.strategy_enabled:
+                    pos.strategy_enabled = False
+                    pos.pm_managed = True   # PM holds; skip day-start re-enable
+                    hold_modes[pos.symbol] = True
+                    engine_changes.append(f"{pos.symbol}: engine off (long hold, {new_tag})")
+
+                elif is_long and pos.shares > 0 and not pos.strategy_enabled:
+                    # Ensure pm_managed survives a backend restart.
+                    if not pos.pm_managed:
+                        pos.pm_managed = True
+                    cp = price_map.get(pos.symbol, 0.0)
+                    if cp > 0 and pos.avg_cost > 0:
+                        hit_sl = long_sl > 0 and cp <= pos.avg_cost * (1.0 - long_sl / 100.0)
+                        hit_tp = long_tp > 0 and cp >= pos.avg_cost * (1.0 + long_tp / 100.0)
+                        if hit_sl or hit_tp:
+                            reason = (
+                                f"ai_long_sl ({long_sl:.2f}% @ ${cp:.2f})"
+                                if hit_sl
+                                else f"ai_long_tp ({long_tp:.2f}% @ ${cp:.2f})"
+                            )
+                            qty = pos.shares
+                            total = qty * cp
+                            pnl = round((cp - pos.avg_cost) * qty, 4)
+                            pos.shares = 0.0
+                            pos.allocated_funds += total
+                            pos.realized_pnl += pnl
+                            pos.avg_cost = 0.0
+                            pos.strategy_enabled = True
+                            pos.pm_managed = False  # PM releasing control
+                            hold_modes[pos.symbol] = False
+                            acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+                            acct = acct_res.scalar_one_or_none()
+                            if acct:
+                                acct.total_funds += pnl
+                            db.add(_ST(
+                                symbol=pos.symbol,
+                                side="SELL",
+                                quantity=qty,
+                                price=cp,
+                                total=round(total, 4),
+                                strategy_name=pos.strategy_name,
+                                reason=reason,
+                                pnl=pnl,
+                            ))
+                            engine_changes.append(
+                                f"{pos.symbol}: {reason.split('(')[0].strip()} PnL ${pnl:+.2f}"
+                            )
+                        else:
+                            hold_modes[pos.symbol] = True
+
+                elif not is_long and was_long and not pos.strategy_enabled:
+                    pos.strategy_enabled = True
+                    pos.pm_managed = False  # PM releasing control
+                    hold_modes[pos.symbol] = False
+                    engine_changes.append(f"{pos.symbol}: engine re-enabled ({old_tag}→{new_tag})")
+
+        if strategy_changes or engine_changes:
+            await db.commit()
+            if strategy_changes:
+                _log_activity(f"AI tag strategy: {', '.join(strategy_changes)}")
+            if engine_changes:
+                _log_activity(f"AI tag engine: {', '.join(engine_changes)}")
+
+    # Propagate hold_mode flags into the live state so the frontend can display them.
+    for sym, info in _state["ai_tags"].items():
+        info["hold_mode"] = hold_modes.get(sym, False)
 
 
 # ── transfer logic ────────────────────────────────────────────────────────── #
@@ -829,7 +1189,12 @@ async def _attempt_ib_profit_take_for_unwatched_owned() -> None:
 
 
 async def _reenable_all_engines_for_trading_day_start() -> int:
-    """Turn every strategy engine back on at the start of each trading day."""
+    """Turn every strategy engine back on at the start of each trading day.
+
+    Positions with ``pm_managed=True`` are skipped — the Portfolio Manager is
+    holding those through its own AI-tag logic (direct buy or long-hold mode)
+    and will handle the exit itself via TP/SL or tag change.
+    """
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
 
@@ -837,6 +1202,7 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
             sa_select(SandboxPosition).where(
                 SandboxPosition.strategy_name.isnot(None),
                 SandboxPosition.strategy_enabled == False,  # noqa: E712
+                SandboxPosition.pm_managed == False,        # noqa: E712  # skip PM-held positions
             )
         )
         positions: list[SandboxPosition] = res.scalars().all()
@@ -910,6 +1276,7 @@ async def run_portfolio_manager() -> None:
                 if syms:
                     await _refresh_scores(syms)
                     await _apply_sentiment_strategies()
+                    await _apply_ai_tag_strategies()
             except Exception as exc:
                 logger.warning("PM score refresh error: %s", exc)
             last_score = now

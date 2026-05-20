@@ -92,6 +92,18 @@ async def _migrate(conn):
         # portfolio_manager_settings global risk exits (sandbox engine)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_pct REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN take_profit_pct REAL NOT NULL DEFAULT 0.0",
+        # portfolio_manager_settings AI tag strategy routing
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_strategy_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_strategies TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_allow_overnight BOOLEAN NOT NULL DEFAULT 1",
+        # portfolio_manager_settings AI tag action mode (strategy_override | direct)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_action_mode VARCHAR(20) NOT NULL DEFAULT 'strategy_override'",
+        # sandbox_positions pm_managed flag (PM holds position, skip day-start engine re-enable)
+        "ALTER TABLE sandbox_positions ADD COLUMN pm_managed BOOLEAN NOT NULL DEFAULT 0",
+        # portfolio_manager_settings AI tag long-hold mode (disable engine after buy for LONG/STRONG LONG)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_engine_off BOOLEAN NOT NULL DEFAULT 1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_tp_pct REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_sl_pct REAL NOT NULL DEFAULT 0.0",
     ]
     for stmt in migrations:
         try:
