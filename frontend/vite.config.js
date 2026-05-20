@@ -36,7 +36,7 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
-      '/reports': {
+      '/report-files': {
         target: 'http://localhost:8000',
         changeOrigin: true,
       },

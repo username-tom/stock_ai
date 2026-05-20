@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { getStrategies, runBacktest, runSentimentBacktest, getScripts, getBuiltinTemplates } from '../api/client'
-import EquityChart from './charts/EquityChart'
-import SubplotChart from './charts/SubplotChart'
 import SymbolAutocomplete from './shared/SymbolAutocomplete'
+import { getReportFilename } from '../utils/reportPaths'
 import {
   ArrowPathIcon,
   CheckCircleIcon,
@@ -13,6 +12,7 @@ import {
   ArrowTopRightOnSquareIcon,
   ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline'
+import BacktestResultsPanel from './backtest/BacktestResultsPanel'
 
 const WATCHLIST_KEY = 'dashboard_watchlist'
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
@@ -37,111 +37,6 @@ function getOneWeekAgoDateString(fromDateString) {
   const base = new Date(`${fromDateString}T00:00:00`)
   base.setDate(base.getDate() - 7)
   return formatDateInput(base)
-}
-
-function MetricCard({ label, value, sub, positive }) {
-  const colorClass =
-    positive === true ? 'text-emerald-400' :
-    positive === false ? 'text-red-400' : 'text-slate-100'
-  return (
-    <div className="metric-card">
-      <div className="metric-label">{label}</div>
-      <div className={`metric-value ${colorClass}`}>{value}</div>
-      {sub && <div className="text-xs text-slate-500">{sub}</div>}
-    </div>
-  )
-}
-
-function SummaryPanel({ result }) {
-  const r = result?.result ?? {}
-  const m = result?.metrics ?? {}
-  const finalVal = m.final_value ?? 0
-  const initialCap = r.initial_capital ?? 0
-  const gainLoss = finalVal - initialCap
-  const gainLossPct = m.total_return_pct ?? 0
-  const maxSharesHeld = r.max_shares_held ?? 0
-  const cashRemaining = r.final_cash ?? 0
-  const entryPrice = r.final_entry_price ?? null
-  const lastTrade = r.trades?.length ? r.trades[r.trades.length - 1] : null
-  const lastEquity = r.equity_curve?.length ? r.equity_curve[r.equity_curve.length - 1] : null
-  const fmt = (n, opts) => Number(n).toLocaleString(undefined, opts)
-  return (
-    <div className="card bg-dark-900/60 border border-dark-500 space-y-3">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
-          <div className="text-xs text-slate-500 uppercase tracking-wider mb-0.5">Portfolio Summary</div>
-          <div className="text-2xl font-bold text-slate-100">
-            ${fmt(finalVal, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-          <div className={`text-sm font-medium mt-0.5 ${gainLoss >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {gainLoss >= 0 ? '+' : ''}${fmt(gainLoss, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            {' '}({gainLossPct >= 0 ? '+' : ''}{Number(gainLossPct).toFixed(2)}%)
-          </div>
-        </div>
-        {lastEquity && (
-          <div className="text-xs text-slate-500">as of {lastEquity.date}</div>
-        )}
-      </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-dark-600">
-        <div>
-          <div className="text-xs text-slate-500 mb-0.5">Max Shares Held</div>
-          <div className="text-sm font-semibold text-slate-200">
-            {maxSharesHeld > 0 ? fmt(maxSharesHeld, { maximumFractionDigits: 4 }) : '—'}
-          </div>
-          {entryPrice && maxSharesHeld > 0 && (
-            <div className="text-xs text-slate-500">last entry @ ${fmt(entryPrice, { maximumFractionDigits: 4 })}</div>
-          )}
-        </div>
-        <div>
-          <div className="text-xs text-slate-500 mb-0.5">Cash Remaining</div>
-          <div className="text-sm font-semibold text-slate-200">
-            ${fmt(cashRemaining, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-          </div>
-        </div>
-        <div>
-          <div className="text-xs text-slate-500 mb-0.5">Initial Capital</div>
-          <div className="text-sm font-semibold text-slate-200">${fmt(initialCap)}</div>
-        </div>
-        <div>
-          <div className="text-xs text-slate-500 mb-0.5">Last Trade P&amp;L</div>
-          {lastTrade ? (
-            <div className={`text-sm font-semibold ${(lastTrade.pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {(lastTrade.pnl ?? 0) >= 0 ? '+' : ''}${Number(lastTrade.pnl ?? 0).toFixed(2)}
-            </div>
-          ) : (
-            <div className="text-sm font-semibold text-slate-500">—</div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-const REASON_COLORS = {
-  rsi:           'bg-purple-900/50 text-purple-300 border-purple-700/40',
-  rsi_exit:      'bg-purple-900/30 text-purple-400 border-purple-700/30',
-  bb:            'bg-blue-900/50 text-blue-300 border-blue-700/40',
-  bb_exit:       'bg-blue-900/30 text-blue-400 border-blue-700/30',
-  ma:            'bg-yellow-900/50 text-yellow-300 border-yellow-700/40',
-  ma_exit:       'bg-yellow-900/30 text-yellow-400 border-yellow-700/30',
-  macd:          'bg-cyan-900/50 text-cyan-300 border-cyan-700/40',
-  macd_exit:     'bg-cyan-900/30 text-cyan-400 border-cyan-700/30',
-  stop_loss:     'bg-red-900/60 text-red-300 border-red-700/50',
-  take_profit:   'bg-emerald-900/50 text-emerald-300 border-emerald-700/40',
-  fallback_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
-  signal:        'bg-emerald-900/40 text-emerald-300 border-emerald-700/30',
-  strategy_exit: 'bg-slate-700/50 text-slate-400 border-slate-600/40',
-}
-
-function ReasonBadge({ value }) {
-  if (!value) return <span className="text-slate-600">—</span>
-  const cls = REASON_COLORS[value] ?? 'bg-slate-700/50 text-slate-400 border-slate-600/40'
-  const label = value.replace(/_/g, ' ')
-  return (
-    <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-medium leading-tight whitespace-nowrap ${cls}`}>
-      {label}
-    </span>
-  )
 }
 
 const STRATEGY_PARAM_UI = {
@@ -305,6 +200,7 @@ export default function BacktestPanel() {
       setSentProgress(100)
       setTimeout(() => setSentProgress(0), 600)
       setSentResult(data)
+      qc.invalidateQueries({ queryKey: ['reports'] })
     },
     onError: () => {
       clearInterval(sentProgressRef.current)
@@ -397,7 +293,11 @@ export default function BacktestPanel() {
 
   const mutation = useMutation({
     mutationFn: (payload) => runBacktest(payload),
-    onSuccess: (data) => { finishProgress(); setResult(data) },
+    onSuccess: (data) => {
+      finishProgress()
+      setResult(data)
+      qc.invalidateQueries({ queryKey: ['reports'] })
+    },
     onError: () => finishProgress(),
   })
 
@@ -897,7 +797,7 @@ export default function BacktestPanel() {
               </span>
               {mutation.data?.html_report_path && (
                 <a
-                  href={`/reports/${mutation.data.html_report_path.split('/').pop()}`}
+                  href={`/report-files/${getReportFilename(mutation.data.html_report_path)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="btn-secondary text-xs flex items-center gap-1"
@@ -928,177 +828,17 @@ export default function BacktestPanel() {
           )}
         </form>
 
-        {/* Results */}
-        <div className="xl:col-span-2 space-y-5">
-          {mutation.isPending && result ? (
-            <div className="space-y-5 animate-pulse">
-              <div className="card bg-dark-900/60 border border-dark-500 space-y-3">
-                <div className="h-4 w-36 bg-dark-600 rounded" />
-                <div className="h-8 w-48 bg-dark-600 rounded" />
-                <div className="h-4 w-32 bg-dark-700 rounded" />
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-dark-600">
-                  {[...Array(4)].map((_, i) => (
-                    <div key={i} className="space-y-1.5">
-                      <div className="h-3 w-20 bg-dark-700 rounded" />
-                      <div className="h-5 w-16 bg-dark-600 rounded" />
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {[...Array(8)].map((_, i) => (
-                  <div key={i} className="metric-card space-y-2">
-                    <div className="h-3 w-20 bg-dark-700 rounded" />
-                    <div className="h-6 w-24 bg-dark-600 rounded" />
-                  </div>
-                ))}
-              </div>
-              <div className="card">
-                <div className="h-4 w-32 bg-dark-700 rounded mb-4" />
-                <div className="h-64 bg-dark-700 rounded-lg" />
-              </div>
-            </div>
-          ) : result ? (
-            <>
-              {/* Summary header */}
-              {result.result?.day_trade && (
-                <div className="flex items-center gap-2 px-3 py-2 bg-indigo-900/30 border border-indigo-700/40 rounded-lg text-xs text-indigo-300">
-                  <span className="font-semibold uppercase tracking-wide">Day Trade Mode</span>
-                  <span className="text-indigo-500">•</span>
-                  <span>Interval: <span className="font-mono font-semibold">{result.result.interval ?? '—'}</span></span>
-                </div>
-              )}
-              <SummaryPanel result={result} />
-              {/* Metrics grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <MetricCard
-                  label="Total Return"
-                  value={`${result.metrics.total_return_pct >= 0 ? '+' : ''}${result.metrics.total_return_pct?.toFixed(2)}%`}
-                  positive={result.metrics.total_return_pct >= 0}
-                />
-                <MetricCard
-                  label="Annualised Return"
-                  value={`${result.metrics.annualized_return_pct >= 0 ? '+' : ''}${result.metrics.annualized_return_pct?.toFixed(2)}%`}
-                  positive={result.metrics.annualized_return_pct >= 0}
-                />
-                <MetricCard
-                  label="Sharpe Ratio"
-                  value={result.metrics.sharpe_ratio?.toFixed(2)}
-                  positive={result.metrics.sharpe_ratio >= 1}
-                />
-                <MetricCard
-                  label="Max Drawdown"
-                  value={`${result.metrics.max_drawdown_pct?.toFixed(2)}%`}
-                  positive={false}
-                />
-                <MetricCard
-                  label="Final Value"
-                  value={`$${result.metrics.final_value?.toLocaleString()}`}
-                />
-                <MetricCard
-                  label="Win Rate"
-                  value={`${result.metrics.win_rate_pct?.toFixed(1)}%`}
-                  positive={result.metrics.win_rate_pct >= 50}
-                />
-                <MetricCard label="Total Trades" value={result.metrics.total_trades} />
-                <MetricCard
-                  label="Initial Capital"
-                  value={`$${result.result?.initial_capital?.toLocaleString()}`}
-                />
-              </div>
-
-              {/* Chart tabs */}
-              <div className="card space-y-4">
-                <div className="flex gap-2 border-b border-dark-500 pb-3">
-                  {['equity', 'price', 'trades'].map(tab => (
-                    <button
-                      key={tab}
-                      onClick={() => setActiveTab(tab)}
-                      className={`px-3 py-1.5 text-sm rounded-md transition-colors capitalize ${
-                        activeTab === tab
-                          ? 'bg-emerald-600 text-white'
-                          : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
-                      }`}
-                    >
-                      {tab === 'equity' ? 'Equity Curve' : tab === 'price' ? 'Price Chart' : 'Trade Log'}
-                    </button>
-                  ))}
-                </div>
-
-                <div className={activeTab === 'equity' ? '' : 'hidden'}>
-                  <EquityChart
-                    data={result.result?.equity_curve ?? []}
-                    initialCapital={result.result?.initial_capital}
-                    height={300}
-                  />
-                </div>
-
-                <div className={activeTab === 'price' ? '' : 'hidden'}>
-                  <SubplotChart data={result.result?.ohlcv ?? []} height={240} />
-                </div>
-
-                {/* trades tab — always mounted to preserve scroll position */}
-                <div className={activeTab === 'trades' ? '' : 'hidden'}>
-                <div className="table-container max-h-80 overflow-y-auto">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Entry</th>
-                          <th>Exit</th>
-                          <th>Entry $</th>
-                          <th>Exit $</th>
-                          <th>Qty</th>
-                          <th>Buy Reason</th>
-                          <th>Sell Reason</th>
-                          <th>P&amp;L</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(result.result?.trades ?? []).map((t, i) => (
-                          <tr key={i}>
-                            <td className="font-mono text-xs">{t.entry_date}</td>
-                            <td className="font-mono text-xs">{t.exit_date}</td>
-                            <td className="font-mono">${t.entry_price}</td>
-                            <td className="font-mono">${t.exit_price}</td>
-                            <td>{t.quantity}</td>
-                            <td><ReasonBadge value={t.entry_reason} /></td>
-                            <td><ReasonBadge value={t.exit_reason} /></td>
-                            <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
-                              {t.pnl >= 0 ? '+' : ''}${t.pnl?.toFixed(2)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {!(result.result?.trades?.length) && (
-                      <div className="text-center text-slate-500 text-sm py-8">No trades executed</div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </>
-          ) : mutation.isPending ? (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {[...Array(8)].map((_, i) => (
-                  <div key={i} className="metric-card animate-pulse">
-                    <div className="h-3 w-20 bg-dark-500 rounded mb-2" />
-                    <div className="h-7 w-16 bg-dark-500 rounded" />
-                  </div>
-                ))}
-              </div>
-              <div className="card h-64 flex flex-col items-center justify-center gap-3 text-slate-400">
-                <ArrowPathIcon className="h-8 w-8 animate-spin text-emerald-500" />
-                <p className="text-sm">Running backtest…</p>
-              </div>
-            </div>
-          ) : (
-            <div className="card flex flex-col items-center justify-center h-64 text-slate-500">
-              <ArrowPathIcon className="h-10 w-10 mb-3 text-slate-600" />
-              <p className="font-medium">Configure and run a backtest to see results</p>
-            </div>
-          )}
-        </div>
+        <BacktestResultsPanel
+          mode={mode}
+          result={mode === 'standard' ? result : sentResult}
+          activeTab={mode === 'standard' ? activeTab : sentActiveTab}
+          setActiveTab={mode === 'standard' ? setActiveTab : setSentActiveTab}
+          isPending={mode === 'standard' ? mutation.isPending : sentMutation.isPending}
+          emptyMessage={mode === 'standard'
+            ? 'Configure and run a backtest to see results'
+            : 'Configure sentiment strategy map and run'}
+          pendingMessage={mode === 'standard' ? 'Running backtest…' : 'Running sentiment backtest…'}
+        />
       </div>
           )}
 

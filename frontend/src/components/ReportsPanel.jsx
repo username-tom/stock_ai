@@ -1,8 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useLocation } from 'react-router-dom'
 import { getReports, getReport, deleteReport } from '../api/client'
 import EquityChart from './charts/EquityChart'
 import SubplotChart from './charts/SubplotChart'
+import { getReportFilename } from '../utils/reportPaths'
 import {
   DocumentChartBarIcon,
   TrashIcon,
@@ -130,20 +132,33 @@ function mergeTradeSignalsIntoOhlcv(ohlcv = [], trades = []) {
 
 export default function ReportsPanel() {
   const qc = useQueryClient()
+  const { pathname } = useLocation()
   const [selected, setSelected] = useState(null)
   const [scriptOpen, setScriptOpen] = useState(false)
   const [search, setSearch] = useState('')
 
-  const { data: listData, isLoading } = useQuery({
+  const {
+    data: listData,
+    isLoading,
+    refetch: refetchReports,
+  } = useQuery({
     queryKey: ['reports'],
     queryFn: getReports,
+    staleTime: 0,
   })
 
   const { data: detail, isLoading: detailLoading } = useQuery({
     queryKey: ['report', selected],
     queryFn: () => getReport(selected),
     enabled: !!selected,
+    staleTime: 0,
   })
+
+  useEffect(() => {
+    if (pathname === '/reports') {
+      refetchReports()
+    }
+  }, [pathname, refetchReports])
 
   const deleteMut = useMutation({
     mutationFn: deleteReport,
@@ -154,6 +169,12 @@ export default function ReportsPanel() {
   })
 
   const reports = listData?.reports ?? []
+  useEffect(() => {
+    if (selected && !reports.some(r => r.id === selected)) {
+      setSelected(null)
+    }
+  }, [reports, selected])
+
   const q = search.trim().toUpperCase()
   const filtered = q
     ? reports.filter(r => r.symbol.includes(q) || r.strategy_type.toUpperCase().includes(q))
@@ -250,7 +271,7 @@ export default function ReportsPanel() {
                   <div className="flex gap-2">
                     {detail.html_report_path && (
                       <a
-                        href={`/reports/${detail.html_report_path.split('/').pop()}`}
+                        href={`/report-files/${getReportFilename(detail.html_report_path)}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="btn-secondary text-xs"

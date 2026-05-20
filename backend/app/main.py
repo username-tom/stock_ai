@@ -84,7 +84,7 @@ app.include_router(settings_router.router)
 # Serve HTML reports as static files
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)
 app.mount(
-    "/reports",
+    "/report-files",
     StaticFiles(directory=settings.REPORTS_DIR),
     name="reports",
 )
