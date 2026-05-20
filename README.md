@@ -1,6 +1,6 @@
 # Stock AI
 
-A full-stack algorithmic trading and market analytics platform. Real-time market data, interactive charting, financial news, backtesting, automated strategy execution, and live/paper trading via Interactive Brokers.
+A full-stack algorithmic trading and market analytics platform with real-time market data, backtesting, sandbox portfolio simulation, custom strategy scripts, and Interactive Brokers paper/live trading.
 
 ---
 
@@ -8,29 +8,14 @@ A full-stack algorithmic trading and market analytics platform. Real-time market
 
 | Feature | Description |
 |---|---|
-| **Dashboard** | Scrollable watchlist grid, intraday/historical price chart with technical indicators, and tabbed navigation for overview, movers, news, and earnings. |
-| **Watchlist** | Add/remove/reorder symbols via drag-and-drop. Persisted to localStorage. Scrollable grid with live price cards showing price, % change, day high/low, sentiment badge, and buy/hold/sell signal. |
-| **Live Quotes & Charts** | Quotes from Yahoo Finance v8 API with TTL in-memory and disk cache. Intraday chart distinguishes pre-market, regular session, and after-hours. 11 time-range options (1D to Max). Yahoo Finance-style dark theme with green/red direction coloring. |
-| **Technical Indicators** | Bollinger Bands, Fast MA, Slow MA, RSI, and MACD — individually togglable overlays rendered in stacked Recharts panels with synchronized hover cursor across all sub-panels. |
-| **Gainers & Losers** | Top 25 daily movers. Hover for a rich tooltip (price, volume, market cap, sentiment, signal). Click a symbol to open its Yahoo Finance page. Click a row to expand an inline 1D/2D/5D chart dropdown fetched on demand. Refreshes every 5 min during market hours. |
-| **Financial News** | Curated feed of Watchlist News and Market News. Initial load: 50 articles. Scroll to lazy-load 25 more at a time. Noise-filtered. Earnings items are separated into their own dedicated tab. |
-| **Earnings Tab** | Dedicated dashboard tab for upcoming earnings. Events split into *Reporting Today* (red) and *Upcoming* (amber) sections. Urgency colour-coding: red = today, amber = tomorrow/this week, muted = later. Shows related tickers and source. Refreshes every 15 min. |
-| **Skeleton Loading** | All loading states use animated pulse skeleton blocks. Price chart uses a shimmer SVG placeholder. |
-| **Symbol Search** | Shared autocomplete component used across Portfolio, Backtest, and Trading panels. Searches 8,000+ tickers by prefix or company name with debounced suggestions. |
-| **Sentiment & Signals** | Stock list BUY/SELL/HOLD badges prefer the engine-derived `last_signal` (marked ⚡) when a strategy has run, falling back to quote-based heuristics otherwise. |
-| **Backtesting** | Run backtests across yfinance, Stooq, and IB data. Results: equity curve, trade log, Sharpe ratio, max drawdown, win rate. |
-| **Custom Scripts** | Write and validate Python trading strategies in-browser using pandas/numpy in a sandboxed executor. Collapsible script editor with title, description, and default parameters. |
-| **Report Generation** | Auto-generates HTML reports with embedded charts after every backtest. Accessible via the Reports page (with search/filter) or at /reports/. |
-| **Portfolio (Simulated Trading)** | Full portfolio simulation with per-symbol fund allocation, automated strategy execution, and trade recording. Export/import/reset of the full simulation state. |
-| **Portfolio Overview** | Stat cards (total funds, equity, unrealised/realised P&L), dynamic allocation pie chart with bottom legend, position breakdown table, and analytics charts. |
-| **Portfolio Analytics** | Cumulative realised P&L (area chart), daily buy/sell volume (bar chart), realised P&L by symbol (horizontal bar), and win/loss ratio (donut + stats). |
-| **Position Detail Chart** | Each sandbox stock detail panel shows a live 1D candlestick chart above the strategy card. Chart starts at 07:30 ET (2 h pre-market), includes a dashed prev-close line, an amber vertical market-open line at 09:30 ET, volume bars, and a hover crosshair with OHLCV tooltip. Implemented as pure SVG — no charting library invariant risk. |
-| **Automated Strategy Engine** | Background engine ticks every 60 seconds during market hours (09:20–16:00 ET). Uses the last non-zero signal for trade decisions and writes the current-bar signal to `last_signal` for display. BUY orders consume both allocated funds and unallocated account balance. Per-symbol enable/disable toggle with live ON/OFF status in the sidebar. Start/Stop All Engines toolbar button. |
-| **Market Hours Gating** | Engine and polling respect market hours. A 10-minute pre-open window (09:20 ET) allows strategies to warm up before the open. |
-| **Market Status Indicator** | Top-right market badge and live ticker bar derive open/closed state from Yahoo Finance intraday quote metadata, with a clock-based fallback so the indicator is correct during regular trading hours even when Yahoo returns ambiguous state. |
-| **Paper & Live Trading** | Connect to IB TWS/Gateway for paper simulation or live order execution via ib_insync. Toggle between modes at runtime. |
-| **Real-time Prices** | WebSocket endpoint streams live price updates at a configurable interval. |
-| **Frontend Error Logging** | Runtime JS errors and unhandled promise rejections are forwarded to the Vite dev-server terminal for easy debugging. Chart render errors are caught by a React error boundary and logged to the browser console with full stack traces. |
+| **Market dashboard** | Watchlist cards, price charts, movers, news, earnings, and live market status in one place. |
+| **Technical analysis** | Toggle Bollinger Bands, moving averages, RSI, and MACD on synchronized chart views. |
+| **Signals and sentiment** | Quote heuristics and engine-derived signals drive BUY/SELL/HOLD badges and sentiment indicators. |
+| **Backtesting** | Run strategy backtests on yfinance, Stooq, or IB data and review equity curves, trade logs, and risk metrics. |
+| **Custom scripts** | Write, validate, and reuse Python strategies in-browser with a sandboxed execution path. |
+| **Interactive Brokers** | Connect to TWS or Gateway for paper or live trading and switch modes at runtime. |
+| **Reporting** | Generate HTML backtest reports with embedded charts and browse them from the app. |
+| **Real-time updates** | Stream live prices over WebSocket and keep the UI responsive with cached market data. |
 
 ---
 
@@ -41,7 +26,6 @@ stock_ai/
 ├── backend/
 │   └── app/
 │       ├── main.py                   # FastAPI entry point; CORS, startup cache pre-warm, engine scheduler
-│       ├── config.py                 # Settings loaded from .env
 │       ├── database.py               # SQLite + SQLAlchemy async engine; schema auto-migration
 │       ├── models/
 │       │   ├── trade.py              # Manual trade orders
@@ -66,7 +50,7 @@ stock_ai/
 │       │       └── trades.py         # Trade history endpoints
 │       ├── services/
 │       │   ├── market_service.py     # Yahoo Finance v8 quotes, history, movers, news (TTL-cached)
-│       │   ├── ib_service.py         # Interactive Brokers integration (ib_insync)
+│       │   ├── ib_service.py         # Interactive Brokers integration (ibapi)
 │       │   ├── backtester.py         # Vectorised backtest engine (pandas)
 │       │   ├── sandbox_engine.py     # Automated strategy execution scheduler; per-symbol enable/disable
 │       │   ├── data_provider.py      # Historical OHLCV (yfinance / Stooq / IB)
@@ -134,34 +118,10 @@ stock_ai/
 
 ---
 
-## Changelog
-
-### Recent updates
-
-#### Features added
-- **Earnings Tab** — Earnings news is now separated from the News tab into a dedicated *Earnings* dashboard tab. Events are split into *Reporting Today* and *Upcoming Earnings* sections with urgency-based colour coding (red for today, amber for this week, muted for later).
-- **1D Candlestick Chart in Position Detail** — Each sandbox stock detail panel now shows a live 1D candlestick chart above the strategy card. The chart is implemented as pure SVG with no third-party charting library.
-  - Starts at 07:30 ET (2 hours of pre-market data)
-  - Amber dashed vertical line marks the regular session open at 09:30 ET
-  - Dashed horizontal line shows the previous session close price
-  - Volume bars rendered as a background layer
-  - Hover crosshair with floating OHLCV tooltip
-  - React error boundary catches any render error and logs the full stack trace to the browser console
-- **Engine signal aligned with stock list badges** — The BUY/SELL/HOLD badge on each stock list row now uses the engine-derived `last_signal` value (marked ⚡) when a strategy has run at least once, rather than a generic quote heuristic.
-
-#### Bugs fixed
-- **Sandbox engine not executing trades** — The engine was only acting on a same-bar signal crossover event (`signal.diff()`), which is almost always zero. It now uses the last non-zero signal for trade decisions while writing the current-bar signal to `last_signal` for display.
-- **`last_signal` not updating after each engine tick** — Engine now correctly persists `last_signal`, `last_run_at`, and `engine_error` to the database after every tick regardless of whether a trade was placed.
-- **BUY orders ignoring unallocated account funds** — BUY logic now consumes both the position's allocated funds and any unallocated account balance, matching expected paper-trading behaviour.
-- **Market status showing "Closed" during market hours** — The market-open indicator and live ticker were reading Yahoo Finance quote metadata from daily candle requests, which frequently returns `CLOSED`. Quote fetching now uses 1-day/1-minute intraday requests, and the client-side `deriveMarketOpen()` helper falls back to the system clock when Yahoo returns an ambiguous state.
-- **Custom script double-execution** — Script validation and execution were sharing the same compile/exec path, causing scripts to run twice on validation. The execution path is now deduplicated.
-
----
-
 ## Quick Start
 
 
-### Option A — Docker Compose (recommended)
+### Option A - Docker Compose (recommended)
 
 #### 1. Prerequisites
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
@@ -183,14 +143,13 @@ docker-compose up --build
 - Frontend: http://localhost:3000
 - Backend API + Swagger: http://localhost:8000/docs
 
-### Option B — Local development (untested)
+### Option B - Local development (untested)
 
 **Backend:**
 ```bash
 cd backend
 python -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
 cp .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
@@ -205,7 +164,6 @@ npm run dev
 ---
 
 ## Portfolio (Simulated Trading)
-
 The Portfolio tab lets you simulate a full trading portfolio without a broker connection:
 
 1. **Add funds** — deposit simulated cash into the account.
@@ -217,7 +175,6 @@ The Portfolio tab lets you simulate a full trading portfolio without a broker co
    - Allocation pie chart: each symbol's slice = market value of shares + remaining allocated cash
    - Position breakdown table: shares, market value, undeployed cash, allocation %, unrealised and realised P&L
    - Analytics charts: cumulative P&L over time, daily trade volume, per-symbol P&L, win/loss ratio
-6. **Export / Import / Reset** — snapshot the full simulation state to JSON or wipe and start fresh.
 
 When connected to IB in paper or live mode, the Portfolio tab switches to reflect the IB account instead of the simulation.
 
@@ -328,7 +285,6 @@ Full interactive docs at http://localhost:8000/docs
 | POST | /api/sandbox/positions | Add a symbol to the portfolio |
 | PATCH | /api/sandbox/positions/{symbol} | Update position (allocation, strategy, engine toggle) |
 | DELETE | /api/sandbox/positions/{symbol} | Remove a symbol |
-| PATCH | /api/sandbox/positions-bulk-strategy | Set strategy for all positions |
 | POST | /api/sandbox/trade | Place a manual trade |
 | GET | /api/sandbox/trades | Trade history (optionally filtered by symbol) |
 | GET | /api/sandbox/analytics | Portfolio analytics (P&L, volume, win/loss, etc.) |
@@ -383,6 +339,6 @@ pytest tests/ -v
 
 ## Tech Stack
 
-**Backend:** Python 3.11+, FastAPI, SQLAlchemy (async), SQLite, ib_insync, yfinance, pandas, numpy, matplotlib, httpx, python-multipart
+**Backend:** Python 3.11+, FastAPI, SQLAlchemy (async), SQLite, ibapi, yfinance, pandas, numpy, matplotlib, httpx, python-multipart
 
-**Frontend:** React 18, Vite, TailwindCSS, Recharts, TanStack Query, React Router, Axios, Heroicons
+**Frontend:** React 18, Vite, Tailwind CSS, Recharts, TanStack Query, React Router, Axios, Heroicons
