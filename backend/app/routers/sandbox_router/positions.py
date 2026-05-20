@@ -189,12 +189,12 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
         # capital/allocation mutations that should remain simulated-only.
         forbidden = any(
             field in req.model_fields_set
-            for field in ("allocated_funds", "max_allocation_mode", "max_allocation_value")
+            for field in ("allocated_funds",)
         )
         if forbidden:
             raise HTTPException(
                 status_code=409,
-                detail="Allocation and max-allocation settings cannot be changed while IB is connected.",
+                detail="Allocated funds cannot be changed while IB is connected.",
             )
         ensure_sandbox_write_allowed(allow_while_ib=True)
     else:
@@ -329,7 +329,7 @@ async def bulk_update_strategy(req: BulkStrategyRequest, db: AsyncSession = Depe
 @router.patch("/positions-bulk-allocation-cap")
 async def bulk_update_allocation_cap(req: BulkAllocationCapRequest, db: AsyncSession = Depends(get_db)):
     """Set the same max allocation cap on every existing position at once."""
-    ensure_sandbox_write_allowed()
+    ensure_sandbox_write_allowed(allow_while_ib=True)
     result = await db.execute(select(SandboxPosition))
     positions = result.scalars().all()
 

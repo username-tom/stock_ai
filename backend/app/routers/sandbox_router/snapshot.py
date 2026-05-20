@@ -64,6 +64,8 @@ async def export_sandbox(db: AsyncSession = Depends(get_db)):
                 "strategy_name": p.strategy_name,
                 "realized_pnl": p.realized_pnl,
                 "is_on_watchlist": p.is_on_watchlist,
+                "max_allocation_mode": p.max_allocation_mode,
+                "max_allocation_value": p.max_allocation_value,
             }
             for p in positions
         ],
@@ -121,6 +123,8 @@ async def import_sandbox(file: UploadFile = File(...), db: AsyncSession = Depend
             strategy_name=p.get("strategy_name"),
             realized_pnl=p.get("realized_pnl", 0.0),
             is_on_watchlist=p.get("is_on_watchlist", True),
+            max_allocation_mode=p.get("max_allocation_mode", "dollar"),
+            max_allocation_value=p.get("max_allocation_value", None),
         ))
 
     for t in snapshot.get("trades", []):

@@ -126,6 +126,7 @@ export default function PositionDetail({
       ? String(selectedPos.max_allocation_value)
       : '',
   )
+  const [capNotice, setCapNotice] = useState(null)
   const [sentimentMode, setSentimentMode] = useState(selectedPos?.sentiment_mode ?? 'none')
   const minFundsMode = managerSettings?.min_position_funds_mode ?? 'dollar'
   const minFundsDollar = minFundsMode === 'percent'
@@ -143,6 +144,7 @@ export default function PositionDetail({
     setMaxAllocMode(selectedPos?.max_allocation_mode ?? 'dollar')
     setMaxAllocValue(selectedPos?.max_allocation_value != null ? String(selectedPos.max_allocation_value) : '')
     setSentimentMode(selectedPos?.sentiment_mode ?? 'none')
+    setCapNotice(null)
   }, [selectedPos?.symbol, selectedPos?.max_allocation_mode, selectedPos?.max_allocation_value, selectedPos?.sentiment_mode])
 
   // Cash available within this position's own allocation (idle, not tied up in shares)
@@ -252,9 +254,42 @@ export default function PositionDetail({
       `Apply this cap (${maxAllocMode === 'percent' ? `${parsedValue}%` : `$${parsedValue}`}) to all ${positionsCount} position${positionsCount !== 1 ? 's' : ''}?`,
     )
     if (!ok) return
+    setCapNotice(null)
     bulkCapMut.mutate({
       max_allocation_mode: maxAllocMode,
       max_allocation_value: parsedValue,
+    }, {
+      onSuccess: (data) => {
+        setCapNotice({
+          type: 'success',
+          text: `Applied cap to ${data?.updated ?? positionsCount} position${(data?.updated ?? positionsCount) === 1 ? '' : 's'}.`,
+        })
+      },
+      onError: (err) => {
+        const msg = err?.response?.data?.detail || err?.message || 'Failed to apply cap to all positions.'
+        setCapNotice({ type: 'error', text: msg })
+      },
+    })
+  }
+
+  function handleSaveCap() {
+    const parsedValue = maxAllocValue === '' ? 0 : parseFloat(maxAllocValue)
+    if (Number.isNaN(parsedValue)) return
+    setCapNotice(null)
+    updatePosMut.mutate({
+      symbol: selectedSymbol,
+      payload: {
+        max_allocation_mode: maxAllocMode,
+        max_allocation_value: parsedValue,
+      },
+    }, {
+      onSuccess: () => {
+        setCapNotice({ type: 'success', text: `Saved cap for ${selectedSymbol}.` })
+      },
+      onError: (err) => {
+        const msg = err?.response?.data?.detail || err?.message || 'Failed to save cap.'
+        setCapNotice({ type: 'error', text: msg })
+      },
     })
   }
 
@@ -448,13 +483,7 @@ export default function PositionDetail({
             </label>
             <button
               className="text-xs bg-sky-700 hover:bg-sky-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
-              onClick={() => updatePosMut.mutate({
-                symbol: selectedSymbol,
-                payload: {
-                  max_allocation_mode: maxAllocMode,
-                  max_allocation_value: parsedCapValue,
-                },
-              })}
+              onClick={handleSaveCap}
               disabled={updatePosMut.isPending || bulkCapMut?.isPending || capValueInvalid}
             >
               {updatePosMut.isPending ? 'Saving…' : 'Save Cap'}
@@ -467,6 +496,17 @@ export default function PositionDetail({
               {bulkCapMut?.isPending ? 'Applying…' : 'Save to All'}
             </button>
           </div>
+          {capNotice && (
+            <div
+              className={`mt-2 text-xs rounded-md border px-2.5 py-1.5 ${
+                capNotice.type === 'success'
+                  ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400'
+                  : 'bg-red-900/20 border-red-700/30 text-red-400'
+              }`}
+            >
+              {capNotice.text}
+            </div>
+          )}
           <p className="text-[11px] text-slate-600 mt-2">
             Set to 0 for no cap.
           </p>
