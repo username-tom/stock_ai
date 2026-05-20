@@ -168,6 +168,7 @@ export default function Dashboard() {
               histData={histData}
               histLoading={histLoading}
               chartPrevClose={chartPrevClose}
+              quoteTelemetry={quotesMap?.[chartSymbol]?.ib_telemetry ?? null}
             />
           </div>
         </div>

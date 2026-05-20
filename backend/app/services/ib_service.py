@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import threading
 from datetime import date, datetime, timezone
 from typing import Any
@@ -465,8 +466,32 @@ class IBService:
         what_to_show: str,
         use_rth: bool,
     ) -> list[dict]:
+        meta = await self.get_historical_bars_request_meta(
+            symbol=symbol,
+            end_datetime=end_datetime,
+            duration=duration,
+            bar_size=bar_size,
+            what_to_show=what_to_show,
+            use_rth=use_rth,
+        )
+        return list(meta.get("bars", []))
+
+    async def get_historical_bars_request_meta(
+        self,
+        symbol: str,
+        end_datetime: str,
+        duration: str,
+        bar_size: str,
+        what_to_show: str,
+        use_rth: bool,
+    ) -> dict[str, Any]:
         if not self.is_connected or not self._app:
-            return []
+            return {
+                "bars": [],
+                "timed_out": False,
+                "error": "Not connected to IB.",
+                "error_code": None,
+            }
         req_id = self._next_req_id()
         evt = threading.Event()
         with self._app._lock:
@@ -493,14 +518,35 @@ class IBService:
                 logger.warning("Historical data request timed out for %s", symbol)
             with self._app._lock:
                 bars = list(self._app.historical_data.get(req_id, []))
-            if not bars:
-                err = self._pop_req_error(req_id)
-                if err:
-                    logger.warning("Historical data request failed for %s: %s", symbol, err)
-            return bars
+            err = self._pop_req_error(req_id)
+            if not bars and err:
+                logger.warning("Historical data request failed for %s: %s", symbol, err)
+            if not bars and not done and not err:
+                err = "Historical data request timed out."
+
+            err_code: int | None = None
+            if err:
+                match = re.search(r"\[(\d+)\]", err)
+                if match:
+                    try:
+                        err_code = int(match.group(1))
+                    except ValueError:
+                        err_code = None
+
+            return {
+                "bars": bars,
+                "timed_out": not done,
+                "error": err,
+                "error_code": err_code,
+            }
         except Exception as exc:
             logger.error("get_historical_bars error: %s", exc)
-            return []
+            return {
+                "bars": [],
+                "timed_out": False,
+                "error": f"Failed to retrieve historical bars: {exc}",
+                "error_code": None,
+            }
         finally:
             with self._app._lock:
                 self._app.historical_data_events.pop(req_id, None)

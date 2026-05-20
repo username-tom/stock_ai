@@ -516,7 +516,10 @@ export default function PositionDetail({
             {/* 1D Price Chart - flex-grow to fill available space */}
             <div className="card flex flex-col flex-1 min-h-0">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Today — 1D</h3>
+                <div>
+                  <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Today — 1D</h3>
+                  <div className="text-[11px] text-slate-500 mt-0.5">Scroll to zoom, drag to pan, Reset to full view</div>
+                </div>
                 <button
                   title={`Open ${selectedSymbol} in dashboard`}
                   onClick={() => navigate(`/?symbol=${selectedSymbol}`)}

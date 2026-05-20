@@ -91,11 +91,29 @@ function TooltipBox({ bar, x, y, chartWidth }) {
   )
 }
 
+function IconButton({ title, onClick, disabled = false, children }) {
+  return (
+    <button
+      type="button"
+      className="inline-flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:text-slate-100 hover:bg-dark-700/60 disabled:opacity-40 disabled:hover:bg-transparent"
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  )
+}
+
 /* ?? Pure-SVG chart � zero recharts, zero invariant risk ????????? */
-function CandlestickInner({ data = [], prevClose, height = 260 }) {
+function CandlestickInner({ data = [], prevClose, height = 260, className = '' }) {
   const containerRef = useRef(null)
   const [width, setWidth] = useState(0)
   const [hovered, setHovered] = useState(null)
+  const [viewStart, setViewStart] = useState(0)
+  const [viewEnd, setViewEnd] = useState(0)
+  const [dragState, setDragState] = useState(null)
 
   useEffect(() => {
     const updateWidth = () => {
@@ -115,13 +133,15 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
   }, [])
 
   /* layout */
+  const CONTROL_ROW_H = 22
+  const chartHeight = Math.max(120, height - CONTROL_ROW_H)
   const PAD_TOP    = 16
   const PAD_BOTTOM = 24
   const PAD_LEFT   = 8
   const PAD_RIGHT  = 72
-  const VOL_HEIGHT = Math.round(height * 0.18)
+  const VOL_HEIGHT = Math.round(chartHeight * 0.18)
   const plotW = width  - PAD_LEFT - PAD_RIGHT
-  const plotH = height - PAD_TOP  - PAD_BOTTOM
+  const plotH = chartHeight - PAD_TOP  - PAD_BOTTOM
 
   const hidePremarket = shouldHidePremarket()
   /* filter: hide pre-market after 10:30 ET and keep full OHLC */
@@ -131,22 +151,35 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
     d.open != null && d.high != null && d.low != null && d.close != null
   )
 
+  useEffect(() => {
+    if (!bars.length) {
+      setViewStart(0)
+      setViewEnd(0)
+      return
+    }
+    setViewStart(0)
+    setViewEnd(bars.length - 1)
+  }, [bars.length])
+
   if (!bars.length) {
     return (
       <div
         ref={containerRef}
         className="flex items-center justify-center text-slate-500 text-sm"
-        style={{ height }}
+        style={{ height: chartHeight }}
       >
         No price data available
       </div>
     )
   }
 
-  const n = bars.length
+  const safeStart = Math.max(0, Math.min(viewStart, Math.max(0, bars.length - 1)))
+  const safeEnd = Math.max(safeStart, Math.min(viewEnd || (bars.length - 1), bars.length - 1))
+  const visibleBars = bars.slice(safeStart, safeEnd + 1)
+  const n = visibleBars.length
 
   /* price scale */
-  const allP = bars.flatMap(d => [d.low, d.high])
+  const allP = visibleBars.flatMap(d => [d.low, d.high])
   if (prevClose != null) allP.push(prevClose)
   const minP = Math.min(...allP)
   const maxP = Math.max(...allP)
@@ -156,7 +189,7 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
   const pToY = (p) => PAD_TOP + plotH - ((p - lo) / (hi - lo)) * plotH
 
   /* volume scale */
-  const maxVol = Math.max(...bars.map(d => d.volume ?? 0), 1)
+  const maxVol = Math.max(...visibleBars.map(d => d.volume ?? 0), 1)
   const vToH   = (v) => (v / maxVol) * VOL_HEIGHT
 
   /* x scale */
@@ -165,42 +198,153 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
   const bw  = Math.max(1, Math.min(14, bandwidth - 2))
 
   /* reference positions */
-  const mktOpenIdx  = bars.findIndex(d => timeOf(d.date) >= '09:30')
-  const mktCloseIdx  = bars.findIndex(d => timeOf(d.date) >= '16:00')
+  const mktOpenIdx  = visibleBars.findIndex(d => timeOf(d.date) >= '09:30')
+  const mktCloseIdx  = visibleBars.findIndex(d => timeOf(d.date) >= '16:00')
   const prevCloseY  = prevClose != null ? pToY(prevClose) : null
 
   /* axis ticks */
   const yTicks    = Array.from({ length: 5 }, (_, i) => lo + (hi - lo) * (i / 4))
   const xTickStep = Math.ceil(n / 8)
-  const xTicks    = bars.reduce((acc, _d, i) => {
+  const xTicks    = visibleBars.reduce((acc, _d, i) => {
     if (i === 0 || i % xTickStep === 0 || i === n - 1) acc.push(i)
     return acc
   }, [])
 
+  const maxZoomInBars = Math.min(24, bars.length)
+  const isZoomed = safeStart > 0 || safeEnd < (bars.length - 1)
+
+  const applyViewWindow = useCallback((nextStart, nextEnd) => {
+    const total = bars.length
+    if (!total) return
+    const size = Math.max(1, nextEnd - nextStart + 1)
+    const clampedStart = Math.max(0, Math.min(nextStart, total - size))
+    const clampedEnd = clampedStart + size - 1
+    setViewStart(clampedStart)
+    setViewEnd(clampedEnd)
+  }, [bars.length])
+
+  const zoomTo = useCallback((zoomIn, anchorRatio = 0.5) => {
+    const total = bars.length
+    if (!total) return
+    const size = safeEnd - safeStart + 1
+    const nextSize = zoomIn
+      ? Math.max(maxZoomInBars, Math.floor(size * 0.8))
+      : Math.min(total, Math.ceil(size * 1.25))
+    if (nextSize === size) return
+
+    const anchor = Math.max(0, Math.min(1, anchorRatio))
+    const anchorGlobal = safeStart + Math.round((size - 1) * anchor)
+    let nextStart = anchorGlobal - Math.round((nextSize - 1) * anchor)
+    nextStart = Math.max(0, Math.min(nextStart, total - nextSize))
+    applyViewWindow(nextStart, nextStart + nextSize - 1)
+  }, [applyViewWindow, bars.length, maxZoomInBars, safeEnd, safeStart])
+
+  const resetView = useCallback(() => {
+    if (!bars.length) return
+    setViewStart(0)
+    setViewEnd(bars.length - 1)
+  }, [bars.length])
+
   const handleMouseMove = useCallback((e) => {
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
+
+    if (dragState && bandwidth > 0) {
+      const dx = e.clientX - dragState.startClientX
+      const shiftBars = Math.round(dx / bandwidth)
+      const size = dragState.baseEnd - dragState.baseStart + 1
+      const maxStart = Math.max(0, bars.length - size)
+      const nextStart = Math.max(0, Math.min(dragState.baseStart - shiftBars, maxStart))
+      const nextEnd = nextStart + size - 1
+      setViewStart(nextStart)
+      setViewEnd(nextEnd)
+      setHovered(null)
+      return
+    }
+
     const mx  = e.clientX - rect.left - PAD_LEFT
     const idx = Math.floor(mx / bandwidth)
     if (idx >= 0 && idx < n) {
       setHovered({
-        bar: bars[idx],
+        bar: visibleBars[idx],
         x: e.clientX - rect.left,
         y: Math.max(0, e.clientY - rect.top - 20),
       })
     } else {
       setHovered(null)
     }
-  }, [bars, bandwidth, n])
+  }, [dragState, bandwidth, n, bars.length, visibleBars])
+
+  const handleMouseDown = useCallback((e) => {
+    if (bars.length <= n) return
+    setDragState({
+      startClientX: e.clientX,
+      baseStart: safeStart,
+      baseEnd: safeEnd,
+    })
+  }, [bars.length, n, safeEnd, safeStart])
+
+  const handleMouseUp = useCallback(() => {
+    setDragState(null)
+  }, [])
+
+  const handleWheel = useCallback((e) => {
+    e.preventDefault()
+    if (!bars.length || !plotW) return
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const mx = e.clientX - rect.left - PAD_LEFT
+    const anchorRatio = Math.max(0, Math.min(1, mx / Math.max(plotW, 1)))
+    zoomTo(e.deltaY < 0, anchorRatio)
+  }, [bars.length, plotW, zoomTo])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return undefined
+
+    const nativeWheel = (event) => {
+      handleWheel(event)
+    }
+
+    el.addEventListener('wheel', nativeWheel, { passive: false })
+    return () => el.removeEventListener('wheel', nativeWheel)
+  }, [handleWheel])
 
   return (
     <div
-      ref={containerRef}
+      className={className}
       style={{ position: 'relative', width: '100%', height }}
-      onMouseMove={handleMouseMove}
-      onMouseLeave={() => setHovered(null)}
     >
-      <svg width={width} height={height} style={{ display: 'block', overflow: 'visible', width: '100%' }}>
+      <div className="h-[22px] flex items-center justify-end gap-0.5 pr-1">
+        <IconButton title="Zoom in" onClick={() => zoomTo(true, 0.5)}>
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M11 8v6M8 11h6M20 20l-3.5-3.5" />
+          </svg>
+        </IconButton>
+        <IconButton title="Zoom out" onClick={() => zoomTo(false, 0.5)}>
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M8 11h6M20 20l-3.5-3.5" />
+          </svg>
+        </IconButton>
+        <IconButton title="Reset view" onClick={resetView} disabled={!isZoomed}>
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7" />
+            <path d="M3 4v4h4" />
+          </svg>
+        </IconButton>
+      </div>
+
+      <div
+        ref={containerRef}
+        style={{ position: 'relative', width: '100%', height: chartHeight }}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => { setHovered(null); setDragState(null) }}
+        onMouseDown={handleMouseDown}
+        onMouseUp={handleMouseUp}
+      >
+        <svg width={width} height={chartHeight} style={{ display: 'block', overflow: 'visible', width: '100%' }}>
 
         {/* Y grid + right-axis labels */}
         {yTicks.map((p, i) => {
@@ -251,7 +395,7 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
         )}
 
         {/* Volume bars */}
-        {bars.map((d, i) => {
+        {visibleBars.map((d, i) => {
           if (!d.volume) return null
           const x = xOf(i)
           const h = vToH(d.volume)
@@ -261,7 +405,7 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
         })}
 
         {/* Candlesticks */}
-        {bars.map((d, i) => {
+        {visibleBars.map((d, i) => {
           const x     = xOf(i)
           const isUp  = d.close >= d.open
           const color = isUp ? '#22c55e' : '#ef4444'
@@ -289,21 +433,22 @@ function CandlestickInner({ data = [], prevClose, height = 260 }) {
 
         {/* X-axis labels */}
         {xTicks.map(i => (
-          <text key={i} x={xOf(i)} y={height - 6} fill="#64748b" fontSize={10} textAnchor="middle" fontFamily="monospace">
-            {timeOf(bars[i].date)}
+          <text key={i} x={xOf(i)} y={chartHeight - 6} fill="#64748b" fontSize={10} textAnchor="middle" fontFamily="monospace">
+            {timeOf(visibleBars[i].date)}
           </text>
         ))}
-      </svg>
+        </svg>
 
       {/* Floating tooltip */}
-      {hovered && (
-        <TooltipBox
-          bar={{ ...hovered.bar, prev_close: prevClose }}
-          x={hovered.x}
-          y={hovered.y}
-          chartWidth={width}
-        />
-      )}
+        {hovered && (
+          <TooltipBox
+            bar={{ ...hovered.bar, prev_close: prevClose }}
+            x={hovered.x}
+            y={hovered.y}
+            chartWidth={width}
+          />
+        )}
+      </div>
     </div>
   )
 }

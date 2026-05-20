@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import zoneinfo
 from datetime import datetime, timezone, time as dt_time
@@ -133,9 +134,14 @@ SECTOR_TTL = 86_400  # 24 hours
 # IB historical-request hardening: smooth bursts and avoid pacing pressure.
 _IB_HIST_MIN_GAP_S = 0.35
 _IB_HIST_MAX_CONCURRENCY = 3
+_IB_HIST_DEFAULT_LIMIT_GAP_S = 60.0
+_IB_HIST_MAX_LIMIT_GAP_S = 600.0
 _ib_hist_lock = asyncio.Lock()
 _ib_hist_last_ts = 0.0
 _ib_hist_semaphore = asyncio.Semaphore(_IB_HIST_MAX_CONCURRENCY)
+_ib_hist_dynamic_gap_by_profile: dict[str, float] = {}
+_ib_hist_result_cache: dict[str, tuple[list[dict], float]] = {}
+_ib_hist_last_restriction_by_profile: dict[str, dict[str, Any]] = {}
 
 # In-flight quote dedupe so concurrent callers for one symbol share one IB fetch.
 _ib_quote_inflight: dict[str, asyncio.Task] = {}
@@ -331,6 +337,19 @@ def _ib_connected() -> bool:
     return bool(IB_AVAILABLE and ib_service.is_connected)
 
 
+def _ib_data_pull_allowed_now() -> bool:
+    """Return True when IB data pulls should run (NYSE extended session)."""
+    if not _ib_connected():
+        return False
+
+    now_et = datetime.now(tz=_ET)
+    if not is_nyse_trading_day(now_et.date()):
+        return False
+
+    t = now_et.time()
+    return dt_time(4, 0) <= t < dt_time(20, 0)
+
+
 def _parse_ib_bar_datetime(raw: Any) -> datetime | None:
     text = str(raw).strip()
     for fmt in ("%Y%m%d  %H:%M:%S", "%Y%m%d %H:%M:%S", "%Y%m%d"):
@@ -340,6 +359,133 @@ def _parse_ib_bar_datetime(raw: Any) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _ib_hist_profile_key(bar_size: str, what_to_show: str, use_rth: bool) -> str:
+    return f"{bar_size.strip().lower()}|{what_to_show.strip().upper()}|{int(use_rth)}"
+
+
+def _ib_hist_cache_key(
+    symbol: str,
+    end_datetime: str,
+    duration: str,
+    bar_size: str,
+    what_to_show: str,
+    use_rth: bool,
+) -> str:
+    return "|".join(
+        [
+            symbol.upper(),
+            end_datetime or "",
+            duration.strip().upper(),
+            bar_size.strip().lower(),
+            what_to_show.strip().upper(),
+            str(int(use_rth)),
+        ]
+    )
+
+
+def _ib_effective_hist_gap(bar_size: str, what_to_show: str, use_rth: bool) -> float:
+    profile = _ib_hist_profile_key(bar_size, what_to_show, use_rth)
+    dynamic = _ib_hist_dynamic_gap_by_profile.get(profile, _IB_HIST_MIN_GAP_S)
+    return max(_IB_HIST_MIN_GAP_S, dynamic)
+
+
+def _ib_hist_telemetry(bar_size: str, what_to_show: str, use_rth: bool) -> dict[str, Any]:
+    profile = _ib_hist_profile_key(bar_size, what_to_show, use_rth)
+    gap_s = _ib_effective_hist_gap(bar_size, what_to_show, use_rth)
+    last_restriction = _ib_hist_last_restriction_by_profile.get(profile, {})
+    return {
+        "bar_size": bar_size,
+        "what_to_show": what_to_show,
+        "use_rth": use_rth,
+        "effective_request_gap_seconds": round(gap_s, 3),
+        "pacing_limited": gap_s > (_IB_HIST_MIN_GAP_S + 1e-9),
+        "last_pacing_error": last_restriction.get("error"),
+        "last_pacing_error_code": last_restriction.get("error_code"),
+        "last_pacing_detected_at": last_restriction.get("detected_at"),
+    }
+
+
+def _duration_to_seconds(duration: str) -> float | None:
+    match = re.match(r"^\s*(\d+)\s*([SDWMY])\s*$", (duration or "").strip().upper())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2)
+    factors = {
+        "S": 1,
+        "D": 86_400,
+        "W": 7 * 86_400,
+        "M": 30 * 86_400,
+        "Y": 365 * 86_400,
+    }
+    return float(amount * factors[unit])
+
+
+def _seconds_to_duration(seconds: float) -> str:
+    total = max(1, int(seconds))
+    if total < 86_400:
+        return f"{total} S"
+    days = max(1, (total + 86_399) // 86_400)
+    return f"{days} D"
+
+
+def _bar_size_to_seconds(bar_size: str) -> float | None:
+    text = (bar_size or "").strip().lower()
+    fixed = {
+        "5 secs": 5.0,
+        "1 min": 60.0,
+        "2 mins": 120.0,
+        "5 mins": 300.0,
+        "15 mins": 900.0,
+        "1 hour": 3600.0,
+        "1 day": 86_400.0,
+        "1 week": 7 * 86_400.0,
+        "1 month": 30 * 86_400.0,
+    }
+    return fixed.get(text)
+
+
+def _expand_duration_for_gap(duration: str, bar_size: str, min_gap_s: float) -> str:
+    current_s = _duration_to_seconds(duration)
+    bar_s = _bar_size_to_seconds(bar_size)
+    if current_s is None or bar_s is None:
+        return duration
+
+    if bar_s >= 86_400:
+        return duration
+
+    target_s = max(current_s, min_gap_s + (bar_s * 2))
+    if target_s <= current_s:
+        return duration
+    return _seconds_to_duration(target_s)
+
+
+def _ib_extract_wait_seconds_from_error(error: str) -> float | None:
+    text = (error or "").lower()
+
+    minute_matches = re.findall(r"(\d+)\s*(?:minute|min)\b", text)
+    if minute_matches:
+        return float(max(int(m) for m in minute_matches) * 60)
+
+    second_matches = re.findall(r"(\d+)\s*(?:second|sec)\b", text)
+    if second_matches:
+        return float(max(int(s) for s in second_matches))
+
+    return None
+
+
+def _ib_is_historical_pacing_error(error_code: int | None, error: str | None) -> bool:
+    if error_code in {162, 420}:
+        return True
+    text = (error or "").lower()
+    return "historical" in text and (
+        "pacing" in text
+        or "too many" in text
+        or "limit" in text
+        or "exceeded" in text
+    )
 
 
 async def _get_ib_quote(symbol: str) -> dict[str, Any]:
@@ -361,8 +507,8 @@ async def _get_ib_quote(symbol: str) -> dict[str, Any]:
             intraday = await _ib_historical_request(
                 symbol=symbol,
                 end_datetime="",
-                duration="2 D",
-                bar_size="1 min",
+                duration="1800 S",
+                bar_size="5 secs",
                 what_to_show="TRADES",
                 use_rth=False,
             )
@@ -450,6 +596,7 @@ async def _get_ib_quote(symbol: str) -> dict[str, Any]:
         "change": round(change, 4) if change is not None else None,
         "change_pct": change_pct,
         "market_state": _market_state_now(),
+        "ib_telemetry": _ib_hist_telemetry("5 secs", "TRADES", False),
     }
 
 
@@ -533,6 +680,7 @@ async def _get_ib_history(symbol: str, period: str) -> dict[str, Any]:
 
     for row in result["data"]:
         row.pop("_dt", None)
+    result["ib_telemetry"] = _ib_hist_telemetry(bar_size, "TRADES", use_rth)
     return result
 
 
@@ -546,11 +694,13 @@ async def get_quote(symbol: str, source_preference: str | None = None) -> dict:
     if source_preference in {"ib", "yf"}:
         source = source_preference
     else:
-        source = "ib" if _ib_connected() else "yf"
+        source = "ib" if _ib_data_pull_allowed_now() else "yf"
     ttl = IB_QUOTE_TTL if source == "ib" else QUOTE_TTL
     cache_key = f"quote:{source}:{sym}"
     cached = await _cache.get(cache_key, ttl)
     if cached is not None:
+        if source == "ib" and isinstance(cached, dict) and "ib_telemetry" not in cached:
+            cached["ib_telemetry"] = _ib_hist_telemetry("5 secs", "TRADES", False)
         return cached
 
     if source == "ib":
@@ -614,14 +764,18 @@ def _fmt_ts(ts: int, intraday: bool, period: str) -> str:
 async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     """Return OHLCV records list for *symbol*, served from cache when fresh."""
     sym = symbol.upper()
-    source = "ib" if _ib_connected() else "yf"
+    source = "ib" if _ib_data_pull_allowed_now() else "yf"
     cache_key = f"history:{source}:{sym}:{period}"
     if source == "ib":
-        ttl = 1 if period in ("1d", "2d", "5d", "2w") else 10
+        _, bar_size, use_rth = _ib_period_request(period)
+        ttl = max(1.0, _ib_effective_hist_gap(bar_size, "TRADES", use_rth))
     else:
         ttl = _HISTORY_TTL_MAP.get(period, 900)
     cached = await _cache.get(cache_key, ttl)
     if cached is not None:
+        if source == "ib" and isinstance(cached, dict) and "ib_telemetry" not in cached:
+            _, bar_size, use_rth = _ib_period_request(period)
+            cached["ib_telemetry"] = _ib_hist_telemetry(bar_size, "TRADES", use_rth)
         return cached
 
     if source == "ib":
@@ -1125,15 +1279,32 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
     import pandas as pd  # optional heavy import – kept local
 
     sym = symbol.upper()
-    source = "ib" if _ib_connected() else "yf"
+    source = "ib" if _ib_data_pull_allowed_now() else "yf"
     # Yahoo does not support second-level bars; gracefully degrade to 1m when
     # callers persist an IB-only interval like "5s".
     resolved_interval = interval
     if source == "yf" and interval.endswith("s"):
         resolved_interval = "1m"
 
+    ib_bar_size = "1 min"
+    if source == "ib":
+        ib_bar_size_map = {
+            "5s": "5 secs",
+            "1m": "1 min",
+            "2m": "2 mins",
+            "5m": "5 mins",
+            "15m": "15 mins",
+            "1h": "1 hour",
+            "1d": "1 day",
+        }
+        ib_bar_size = ib_bar_size_map.get(resolved_interval, "1 min")
+
     cache_key = f"intraday_df:{source}:{sym}:{range_}:{resolved_interval}:{'pre' if include_pre_post else 'reg'}"
-    ttl = IB_INTRADAY_DF_TTL if source == "ib" else INTRADAY_DF_TTL
+    ttl = (
+        max(IB_INTRADAY_DF_TTL, _ib_effective_hist_gap(ib_bar_size, "TRADES", not include_pre_post))
+        if source == "ib"
+        else INTRADAY_DF_TTL
+    )
     cached = await _cache.get(cache_key, ttl)
     if cached is not None:
         df = pd.DataFrame(cached)
@@ -1149,20 +1320,11 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
             "1mo": "2 M",
             "3mo": "4 M",
         }
-        bar_size_map = {
-            "5s": "5 secs",
-            "1m": "1 min",
-            "2m": "2 mins",
-            "5m": "5 mins",
-            "15m": "15 mins",
-            "1h": "1 hour",
-            "1d": "1 day",
-        }
         bars = await _ib_historical_request(
             symbol=sym,
             end_datetime="",
             duration=duration_map.get(range_, "7 D"),
-            bar_size=bar_size_map.get(resolved_interval, "1 min"),
+            bar_size=ib_bar_size,
             what_to_show="TRADES",
             use_rth=not include_pre_post,
         )
@@ -1246,23 +1408,83 @@ async def _ib_historical_request(
     what_to_show: str,
     use_rth: bool,
 ) -> list[dict]:
-    """Rate-limited wrapper around IB historical requests."""
+    """Adaptive, restriction-aware wrapper around IB historical requests."""
     global _ib_hist_last_ts
+
+    profile_key = _ib_hist_profile_key(bar_size, what_to_show, use_rth)
+    cache_key = _ib_hist_cache_key(symbol, end_datetime, duration, bar_size, what_to_show, use_rth)
+    effective_gap = _ib_effective_hist_gap(bar_size, what_to_show, use_rth)
+    now = time.monotonic()
+
+    cached_entry = _ib_hist_result_cache.get(cache_key)
+    if cached_entry is not None:
+        cached_bars, cached_ts = cached_entry
+        if cached_bars and (now - cached_ts) < effective_gap:
+            return cached_bars
+
+    request_duration = _expand_duration_for_gap(duration, bar_size, effective_gap)
+
     async with _ib_hist_semaphore:
         async with _ib_hist_lock:
             now = time.monotonic()
-            wait_for = _IB_HIST_MIN_GAP_S - (now - _ib_hist_last_ts)
+            effective_gap = _ib_effective_hist_gap(bar_size, what_to_show, use_rth)
+            wait_for = effective_gap - (now - _ib_hist_last_ts)
             if wait_for > 0:
                 await asyncio.sleep(wait_for)
             _ib_hist_last_ts = time.monotonic()
-        return await ib_service.get_historical_bars_request(
+
+        response = await ib_service.get_historical_bars_request_meta(
             symbol=symbol,
             end_datetime=end_datetime,
-            duration=duration,
+            duration=request_duration,
             bar_size=bar_size,
             what_to_show=what_to_show,
             use_rth=use_rth,
         )
+        bars = list(response.get("bars", []))
+        error = response.get("error")
+        error_code = response.get("error_code")
+
+        if bars:
+            _ib_hist_result_cache[cache_key] = (bars, time.monotonic())
+            # Slowly relax previously elevated pacing gaps after successful requests.
+            current_gap = _ib_hist_dynamic_gap_by_profile.get(profile_key, _IB_HIST_MIN_GAP_S)
+            if current_gap > _IB_HIST_MIN_GAP_S:
+                _ib_hist_dynamic_gap_by_profile[profile_key] = max(
+                    _IB_HIST_MIN_GAP_S,
+                    current_gap * 0.9,
+                )
+            return bars
+
+        if _ib_is_historical_pacing_error(error_code, error):
+            wait_hint = _ib_extract_wait_seconds_from_error(str(error or ""))
+            new_gap = wait_hint if wait_hint is not None else _IB_HIST_DEFAULT_LIMIT_GAP_S
+            new_gap = min(max(new_gap, _IB_HIST_MIN_GAP_S), _IB_HIST_MAX_LIMIT_GAP_S)
+            prev_gap = _ib_hist_dynamic_gap_by_profile.get(profile_key, _IB_HIST_MIN_GAP_S)
+            _ib_hist_dynamic_gap_by_profile[profile_key] = max(prev_gap, new_gap)
+            _ib_hist_last_restriction_by_profile[profile_key] = {
+                "error": error,
+                "error_code": error_code,
+                "detected_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            logger.warning(
+                "IB historical pacing/restriction detected for %s (%s). "
+                "Using adaptive request gap %.1fs.",
+                symbol,
+                bar_size,
+                _ib_hist_dynamic_gap_by_profile[profile_key],
+            )
+
+            cached_entry = _ib_hist_result_cache.get(cache_key)
+            if cached_entry is not None:
+                cached_bars, _ = cached_entry
+                if cached_bars:
+                    return cached_bars
+
+        if error:
+            logger.debug("IB historical request returned no bars for %s: %s", symbol, error)
+
+        return []
 
 
 async def _get_ib_quote_deduped(symbol: str) -> dict[str, Any]:

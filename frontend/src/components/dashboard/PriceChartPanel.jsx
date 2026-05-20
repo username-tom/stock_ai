@@ -97,11 +97,44 @@ export default function PriceChartPanel({
   indicators, toggleIndicator,
   histData, histLoading,
   chartPrevClose,
+  quoteTelemetry = null,
 }) {
+  const ibTelemetry = histData?.ib_telemetry ?? quoteTelemetry
+  const effectiveGap = ibTelemetry?.effective_request_gap_seconds
+  const pacingReason = ibTelemetry?.last_pacing_error
+  const pacingLimited = ibTelemetry?.pacing_limited === true
+  const gapLabel = Number.isFinite(effectiveGap)
+    ? `${Math.max(1, Math.round(effectiveGap))}s`
+    : null
+
   return (
     <div className="card">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="font-semibold text-slate-200">{chartSymbol} Price Chart</h2>
+        <div className="min-w-0">
+          <h2 className="font-semibold text-slate-200">{chartSymbol} Price Chart</h2>
+          {gapLabel && (
+            <div className="mt-1 flex items-center gap-2 min-w-0">
+              <span
+                className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold ${
+                  pacingLimited
+                    ? 'border-amber-700/50 bg-amber-900/20 text-amber-300'
+                    : 'border-slate-700 bg-dark-800 text-slate-400'
+                }`}
+                title={`IB effective refresh cadence: ${gapLabel}`}
+              >
+                IB gap {gapLabel}
+              </span>
+              {pacingReason && (
+                <span
+                  className="truncate text-[10px] text-slate-500"
+                  title={pacingReason}
+                >
+                  {pacingReason}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
         <div className="flex gap-1">
           {PERIOD_OPTIONS.map(p => (
             <button
