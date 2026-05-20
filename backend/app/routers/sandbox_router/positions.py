@@ -45,15 +45,30 @@ def _should_force_engine_off_for_position(pos: SandboxPosition) -> bool:
 async def get_positions(db: AsyncSession = Depends(get_db)):
     if ib_service.is_connected:
         raw_positions = await ib_service.get_positions()
-        local_rows = (await db.execute(select(SandboxPosition))).scalars().all()
-        local_by_symbol = {p.symbol: p for p in local_rows if p.symbol}
-
         ib_filtered = [p for p in raw_positions if abs(float(p.get("quantity") or 0.0)) > 0]
         ib_by_symbol = {
             str(p.get("symbol") or "").upper(): p
             for p in ib_filtered
             if str(p.get("symbol") or "").strip()
         }
+
+        local_rows = (await db.execute(select(SandboxPosition))).scalars().all()
+        local_by_symbol = {p.symbol: p for p in local_rows if p.symbol}
+
+        # Ensure owned IB symbols are represented locally so PM/engine metadata
+        # can still track them even when they are not on the sidebar watchlist.
+        missing_owned = [sym for sym in ib_by_symbol.keys() if sym not in local_by_symbol]
+        if missing_owned:
+            for sym in missing_owned:
+                db.add(SandboxPosition(
+                    symbol=sym,
+                    allocated_funds=0.0,
+                    strategy_name=None,
+                    is_on_watchlist=False,
+                ))
+            await db.commit()
+            local_rows = (await db.execute(select(SandboxPosition))).scalars().all()
+            local_by_symbol = {p.symbol: p for p in local_rows if p.symbol}
 
         async def _to_position(symbol: str, ib_item: dict | None) -> dict:
             local = local_by_symbol.get(symbol)
@@ -95,7 +110,10 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "pending_since": local.pending_since.isoformat() if local and local.pending_since else None,
             }
 
-        symbols = sorted(set(local_by_symbol.keys()) | set(ib_by_symbol.keys()))
+        watched_local_symbols = {
+            p.symbol for p in local_rows if p.symbol and bool(getattr(p, "is_on_watchlist", True))
+        }
+        symbols = sorted(watched_local_symbols | set(ib_by_symbol.keys()))
         enriched = await asyncio.gather(
             *[_to_position(symbol, ib_by_symbol.get(symbol)) for symbol in symbols],
             return_exceptions=False,
@@ -283,16 +301,43 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
 
 @router.delete("/positions/{symbol}")
 async def remove_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
-    ensure_sandbox_write_allowed()
+    if ib_service.is_connected:
+        ensure_sandbox_write_allowed(allow_while_ib=True)
+    else:
+        ensure_sandbox_write_allowed()
     symbol = symbol.upper()
     result = await db.execute(select(SandboxPosition).where(SandboxPosition.symbol == symbol))
     pos = result.scalar_one_or_none()
     if not pos:
         raise HTTPException(404, "Position not found.")
-    await db.delete(pos)
+
+    if ib_service.is_connected:
+        # In IB mode this is a watchlist removal, not a hard delete.
+        # Return any idle allocation back to the unallocated pool.
+        settled_cost = float(pos.shares or 0.0) * float(pos.avg_cost or 0.0)
+        pending_cost = float(pos.pending_shares or 0.0) * float(pos.pending_avg_cost or 0.0)
+        committed_cost = settled_cost + pending_cost
+        releasable = max(0.0, float(pos.allocated_funds or 0.0) - committed_cost)
+        if releasable > 0:
+            pos.allocated_funds = round(float(pos.allocated_funds or 0.0) - releasable, 4)
+            db.add(SandboxAllocationEvent(
+                event_type="deallocate",
+                from_symbol=symbol,
+                to_symbol=None,
+                amount=round(releasable, 4),
+                note="IB watchlist removal: return idle allocation to pool",
+            ))
+        pos.is_on_watchlist = False
+    else:
+        await db.delete(pos)
+
     await db.commit()
     await offload_simulated_state(db)
-    return {"status": "ok", "symbol": symbol}
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "watchlist_removed": bool(ib_service.is_connected),
+    }
 
 
 class BulkStrategyRequest(BaseModel):

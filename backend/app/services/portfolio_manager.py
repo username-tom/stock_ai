@@ -86,6 +86,9 @@ _state: dict[str, Any] = {
     "sentiment_groups": {"market": [], "symbol": []},  # symbols by sentiment mode
 }
 
+# Prevent repeated IB profit-take submissions every PM loop tick.
+_ib_profit_take_last_attempt: dict[str, datetime] = {}
+
 
 def get_manager_settings() -> dict:
     return dict(_settings)
@@ -748,6 +751,82 @@ async def _do_transfer() -> None:
         _log_activity(f"Transferred ${actual_to_move:.2f} | from: {from_desc} | to: {to_desc}")
 
 
+async def _attempt_ib_profit_take_for_unwatched_owned() -> None:
+    """Best-effort IB profit-taking for owned symbols not on sidebar watchlist.
+
+    When PM is enabled in IB mode, place a DAY limit SELL at current market
+    for owned long positions that are currently profitable and not watchlisted.
+    """
+    from app.services.ib_service import ib_service
+
+    if not ib_service.is_connected:
+        return
+
+    ib_positions = await ib_service.get_positions()
+    owned = [p for p in ib_positions if float(p.get("quantity") or 0.0) > 0]
+    if not owned:
+        return
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        res = await db.execute(sa_select(SandboxPosition))
+        local_positions: list[SandboxPosition] = res.scalars().all()
+    watchlist_symbols = {
+        p.symbol for p in local_positions if p.symbol and bool(getattr(p, "is_on_watchlist", True))
+    }
+
+    open_orders = await ib_service.get_open_orders()
+    active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
+    open_sell_symbols = {
+        str(o.get("symbol") or "").upper()
+        for o in open_orders
+        if str(o.get("side") or "").upper() == "SELL"
+        and float(o.get("remaining") or 0.0) > 0
+        and str(o.get("status") or "") in active_status
+    }
+
+    now = datetime.now(timezone.utc)
+    cooldown_s = max(30, int(_settings.get("transfer_interval_s", 300) or 300))
+
+    for row in owned:
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol or symbol in watchlist_symbols or symbol in open_sell_symbols:
+            continue
+
+        last_try = _ib_profit_take_last_attempt.get(symbol)
+        if last_try and (now - last_try).total_seconds() < cooldown_s:
+            continue
+
+        qty = float(row.get("quantity") or 0.0)
+        avg_cost = float(row.get("avg_cost") or 0.0)
+        if qty <= 0 or avg_cost <= 0:
+            continue
+
+        quote = await ib_service.get_market_data(symbol)
+        market_px = float((quote or {}).get("last") or (quote or {}).get("close") or 0.0)
+        if market_px <= avg_cost:
+            continue
+
+        result = await ib_service.place_order(
+            symbol=symbol,
+            side="SELL",
+            quantity=qty,
+            order_type="LMT",
+            limit_price=round(market_px, 2),
+        )
+        _ib_profit_take_last_attempt[symbol] = now
+
+        if result.get("error"):
+            _log_activity(
+                f"IB PM profit-take attempt failed for unwatched {symbol}: {result['error']}"
+            )
+        else:
+            _log_activity(
+                f"IB PM submitted profit-take SELL for unwatched {symbol} "
+                f"x{qty:.4f} @ ${market_px:.2f}"
+            )
+
+
 # ── main loop ─────────────────────────────────────────────────────────────── #
 
 async def refresh_sentiment_routing() -> None:
@@ -800,6 +879,7 @@ async def run_portfolio_manager() -> None:
         # Transfer on interval
         if now - last_transfer >= _settings["transfer_interval_s"]:
             try:
+                await _attempt_ib_profit_take_for_unwatched_owned()
                 await _do_transfer()
             except Exception as exc:
                 logger.warning("PM transfer error: %s", exc)

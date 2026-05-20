@@ -144,6 +144,9 @@ export default function SandboxSidebar({
     mutationFn: p => addSandboxSymbol(p),
     onSuccess: d => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      if (!ibMode) {
+        onAddIbWatchlistSymbol?.(d.symbol)
+      }
       setShowAddSymbol(false); setNewSymbol(''); setNewAlloc(''); setAddSymbolErr('')
       onSelectSymbol(d.symbol)
     },
@@ -160,13 +163,14 @@ export default function SandboxSidebar({
     if (ibMode) {
       const result = onAddIbWatchlistSymbol?.(newSymbol)
       if (result?.added) {
-        setShowAddSymbol(false)
-        setNewSymbol('')
-        setNewAlloc('')
-        setAddSymbolErr(result?.downgraded
-          ? `Added and reduced refresh to 15s due to watchlist limit.`
-          : '')
-        onSelectSymbol(newSymbol.trim().toUpperCase())
+        addSymbolMut.mutate({
+          symbol: newSymbol.trim().toUpperCase(),
+          strategy_name: encodeStrategy(newStratType, newStratParams, newScriptId),
+          allocated_funds: 0,
+        })
+        if (result?.downgraded) {
+          setAddSymbolErr('Added and reduced refresh to 15s due to watchlist limit.')
+        }
       } else if (!result?.cancelled) {
         setAddSymbolErr(result?.error || 'Unable to add symbol.')
       }
@@ -182,11 +186,6 @@ export default function SandboxSidebar({
 
   const [addingWatchlist, setAddingWatchlist] = useState(false)
   async function handleAddFromWatchlist() {
-    if (ibMode) {
-      setAddSymbolErr('Paper/Live symbols are managed directly via watchlist add/remove.')
-      return
-    }
-
     const stored = localStorage.getItem('dashboard_watchlist')
     const watchlist = stored ? JSON.parse(stored) : ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
     const existingSymbols = new Set(positions.map(p => p.symbol))
@@ -323,15 +322,13 @@ export default function SandboxSidebar({
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Stocks</span>
           <div className="flex items-center gap-2">
-            {!ibMode && (
-              <button
-                onClick={handleAddFromWatchlist}
-                disabled={addingWatchlist}
-                className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
-                title="Add all watchlist symbols not already in portfolio">
-                <QueueListIcon className="h-3.5 w-3.5" />{addingWatchlist ? 'Adding…' : 'Watchlist'}
-              </button>
-            )}
+            <button
+              onClick={handleAddFromWatchlist}
+              disabled={addingWatchlist}
+              className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-200 disabled:opacity-50"
+              title="Add all watchlist symbols not already in sidebar list">
+              <QueueListIcon className="h-3.5 w-3.5" />{addingWatchlist ? 'Adding…' : 'Watchlist'}
+            </button>
             <button onClick={() => setShowAddSymbol(v => !v)} className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300">
               <PlusIcon className="h-3.5 w-3.5" />Add
             </button>

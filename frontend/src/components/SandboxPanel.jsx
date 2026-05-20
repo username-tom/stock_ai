@@ -367,6 +367,9 @@ export default function SandboxPanel() {
         return removeSandboxSymbol(s)
       }
 
+      // Remove from backend watchlist metadata (and release any idle allocation)
+      // while also removing from the local dashboard watchlist list.
+      await removeSandboxSymbol(s)
       const current = readDashboardWatchlist()
       const next = current.filter(sym => sym !== s)
       writeDashboardWatchlist(next)
