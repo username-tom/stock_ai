@@ -306,14 +306,11 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const activity = managerData.last_activity ?? []
 
   function openEdit() {
-    // Always build from current backend settings to avoid showing stale localStorage drafts
-    const nextDraft = buildDraftFromSettings(settings)
-    setDraft(nextDraft)
     setEditSettings(true)
     const next = {
       ...savedStates,
       [activeProfile]: {
-        draft: nextDraft,
+        ...(savedStates[activeProfile] ?? { draft }),
         editSettings: true,
         updatedAt: new Date().toISOString(),
       },

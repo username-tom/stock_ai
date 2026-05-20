@@ -1188,6 +1188,106 @@ async def _attempt_ib_profit_take_for_unwatched_owned() -> None:
             )
 
 
+async def _cancel_bearish_pending_orders() -> None:
+    """Cancel unsettled pending BUY orders when any of the following is true:
+
+    1. Sentiment score (symbol or market) is bearish/crash (< -0.2).
+    2. Current price has dropped below the pending order's fill price
+       (already underwater before the order even settles).
+    3. AI learner tag for the symbol is SHORT or STRONG SHORT.
+    4. We are in the EOD sell window and overnight holding is disabled.
+
+    Cancelled funds are returned to the position's allocated_funds pool.
+    """
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        from app.models.sandbox import SandboxTrade as _ST
+
+        res = await db.execute(
+            sa_select(SandboxPosition).where(SandboxPosition.pending_shares > 0)
+        )
+        positions: list[SandboxPosition] = res.scalars().all()
+        if not positions:
+            return
+
+        from app.services.sandbox_engine import _is_in_eod_sell_window
+        hold_overnight = bool(_settings.get("hold_positions_overnight", True))
+        eod_mins = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+        in_eod_window = not hold_overnight and _is_in_eod_sell_window(eod_mins)
+
+        market_score = float(_compute_market_classification().get("score", 0.0))
+
+        # Fetch current prices for all pending symbols (to check price vs fill price).
+        symbols = [p.symbol for p in positions]
+        price_map: dict[str, float] = {}
+        try:
+            from app.services.market_service import get_bulk_quotes
+            quotes = await get_bulk_quotes(symbols)
+            price_map = {
+                sym: float(q["last_price"])
+                for sym, q in quotes.items()
+                if q and q.get("last_price")
+            }
+        except Exception as exc:
+            logger.warning("PM pending cancel price fetch failed: %s", exc)
+
+        cancelled: list[str] = []
+        for pos in positions:
+            # ── 1. Sentiment score ────────────────────────────────────────
+            sym_info = _state.get("scores", {}).get(pos.symbol, {})
+            score = float(sym_info.get("score", market_score)) if sym_info else market_score
+            bearish_sentiment = score < -0.2
+
+            # ── 2. Price already below pending fill price (pre-loss) ──────
+            cp = price_map.get(pos.symbol, 0.0)
+            fill_price = float(pos.pending_avg_cost or 0.0)
+            price_dropped = cp > 0 and fill_price > 0 and cp < fill_price
+
+            # ── 3. AI tag is SHORT or STRONG SHORT ────────────────────────
+            ai_tag = (
+                _state.get("ai_tags", {}).get(pos.symbol, {}).get("learner_tag") or ""
+            ).upper()
+            ai_short = ai_tag in ("SHORT", "STRONG SHORT")
+
+            if not bearish_sentiment and not price_dropped and not ai_short and not (in_eod_window and not pos.pm_managed):
+                continue
+
+            # ── Build cancel reason ───────────────────────────────────────
+            reasons: list[str] = []
+            if bearish_sentiment:
+                reasons.append(f"sentiment {score:+.3f}")
+            if price_dropped:
+                reasons.append(f"price ${cp:.2f}<fill ${fill_price:.2f}")
+            if ai_short:
+                reasons.append(f"ai_tag {ai_tag}")
+            if in_eod_window and not pos.pm_managed:
+                reasons.append("eod_window")
+            reason = "pm_cancel: " + ", ".join(reasons)
+
+            returned = float(pos.pending_shares or 0.0) * fill_price
+            db.add(_ST(
+                symbol=pos.symbol,
+                side="CANCEL",
+                quantity=pos.pending_shares,
+                price=fill_price,
+                total=round(returned, 4),
+                strategy_name=pos.strategy_name,
+                reason=reason,
+                pnl=None,
+            ))
+            pos.allocated_funds += returned
+            pos.pending_shares = 0.0
+            pos.pending_avg_cost = 0.0
+            pos.pending_since = None
+            cancelled.append(f"{pos.symbol} ({reason})")
+
+        if cancelled:
+            await db.commit()
+            _log_activity(
+                f"PM cancelled {len(cancelled)} pending order(s): {', '.join(cancelled)}"
+            )
+
+
 async def _reenable_all_engines_for_trading_day_start() -> int:
     """Turn every strategy engine back on at the start of each trading day.
 
@@ -1265,6 +1365,12 @@ async def run_portfolio_manager() -> None:
                 _state["last_engine_reenable_day"] = day_key
 
         now = asyncio.get_event_loop().time()
+
+        # Cancel pending orders when sentiment worsens or entering EOD sell window
+        try:
+            await _cancel_bearish_pending_orders()
+        except Exception as exc:
+            logger.warning("PM pending cancel check error: %s", exc)
 
         # Refresh scores on interval
         if now - last_score >= _settings["indicator_interval_s"]:
