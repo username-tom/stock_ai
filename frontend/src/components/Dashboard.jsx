@@ -33,6 +33,7 @@ export default function Dashboard() {
     const sym = searchParams.get('symbol')
     if (sym) {
       setChartSymbol(sym)
+      setActiveTab('charts')
       setSearchParams({}, { replace: true })
     }
   }, [searchParams])
@@ -169,6 +170,7 @@ export default function Dashboard() {
               histLoading={histLoading}
               chartPrevClose={chartPrevClose}
               quoteTelemetry={quotesMap?.[chartSymbol]?.ib_telemetry ?? null}
+              isInWatchlist={watchlist.includes(chartSymbol)}
             />
           </div>
         </div>

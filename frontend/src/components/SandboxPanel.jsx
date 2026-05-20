@@ -1,4 +1,5 @@
 ﻿import { useState, useMemo, useRef, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   SignalIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, ArrowPathIcon, XMarkIcon,
@@ -87,7 +88,8 @@ export default function SandboxPanel() {
   const appSettings = useAppSettings()
   const importInputRef = useRef(null)
 
-  const [selectedSymbol, setSelectedSymbol] = useState(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get('symbol') || null)
   const [editingStrategy, setEditingStrategy] = useState(false)
   const [editStratType, setEditStratType] = useState('sma_crossover')
   const [editScriptId, setEditScriptId] = useState(null)
@@ -97,6 +99,15 @@ export default function SandboxPanel() {
   const [allocInput, setAllocInput] = useState('')
   const [tradeForm, setTradeForm] = useState({ side: 'BUY', quantity: '', price: '', reason: 'manual' })
   const [tradeMsg, setTradeMsg] = useState(null)
+
+  // Consume ?symbol= param on navigation from dashboard
+  useEffect(() => {
+    const sym = searchParams.get('symbol')
+    if (sym) {
+      setSelectedSymbol(sym)
+      setSearchParams({}, { replace: true })
+    }
+  }, [searchParams])
 
   // Reset per-trade fields when switching symbols so quantity doesn't bleed across positions
   useEffect(() => {

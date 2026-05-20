@@ -161,6 +161,97 @@ export function computeBollingerBands(closes, period = 20, multiplier = 2) {
 }
 
 /**
+ * Compute Stochastic Oscillator (%K fast line and %D signal line).
+ *
+ * @param {(number|null)[]} highs
+ * @param {(number|null)[]} lows
+ * @param {(number|null)[]} closes
+ * @param {number} [kPeriod=14]
+ * @param {number} [dPeriod=3]
+ * @returns {{ stoch_k: (number|null)[], stoch_d: (number|null)[] }}
+ */
+export function computeStochastic(highs, lows, closes, kPeriod = 14, dPeriod = 3) {
+  const n = closes.length
+  const stoch_k = new Array(n).fill(null)
+
+  for (let i = kPeriod - 1; i < n; i++) {
+    const sliceH = highs.slice(i - kPeriod + 1, i + 1)
+    const sliceL = lows.slice(i - kPeriod + 1, i + 1)
+    if (closes[i] == null || sliceH.some(v => v == null) || sliceL.some(v => v == null)) continue
+    const highest = Math.max(...sliceH)
+    const lowest  = Math.min(...sliceL)
+    const range = highest - lowest
+    stoch_k[i] = range === 0 ? 50 : ((closes[i] - lowest) / range) * 100
+  }
+
+  const stoch_d = computeSMA(stoch_k, dPeriod)
+  return { stoch_k, stoch_d }
+}
+
+/**
+ * Compute Average True Range (ATR) using Wilder's smoothing.
+ *
+ * @param {(number|null)[]} highs
+ * @param {(number|null)[]} lows
+ * @param {(number|null)[]} closes
+ * @param {number} [period=14]
+ * @returns {(number|null)[]}
+ */
+export function computeATR(highs, lows, closes, period = 14) {
+  const n = closes.length
+  const result = new Array(n).fill(null)
+  if (n < period + 1) return result
+
+  let sum = 0
+  for (let i = 1; i <= period; i++) {
+    if (highs[i] == null || lows[i] == null || closes[i - 1] == null) continue
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i]  - closes[i - 1]),
+    )
+    sum += tr
+  }
+  let atr = sum / period
+  result[period] = atr
+
+  for (let i = period + 1; i < n; i++) {
+    if (highs[i] == null || lows[i] == null || closes[i - 1] == null) continue
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i]  - closes[i - 1]),
+    )
+    atr = (atr * (period - 1) + tr) / period
+    result[i] = atr
+  }
+  return result
+}
+
+/**
+ * Compute On-Balance Volume (OBV).
+ *
+ * @param {(number|null)[]} closes
+ * @param {(number|null)[]} volumes
+ * @returns {(number|null)[]}
+ */
+export function computeOBV(closes, volumes) {
+  const n = closes.length
+  const result = new Array(n).fill(null)
+  if (n === 0) return result
+
+  result[0] = volumes[0] ?? 0
+  for (let i = 1; i < n; i++) {
+    if (closes[i] == null || closes[i - 1] == null || result[i - 1] == null) continue
+    const vol = volumes[i] ?? 0
+    if (closes[i] > closes[i - 1])      result[i] = result[i - 1] + vol
+    else if (closes[i] < closes[i - 1]) result[i] = result[i - 1] - vol
+    else                                result[i] = result[i - 1]
+  }
+  return result
+}
+
+/**
  * Enrich an OHLCV data array with RSI, MACD, Bollinger Bands, and MAs.
  *
  * Backend-computed values take precedence — if the data already contains
@@ -172,18 +263,31 @@ export function computeBollingerBands(closes, period = 20, multiplier = 2) {
 export function enrichData(data) {
   if (!data || data.length === 0) return data
 
-  const closes = data.map(d => d.close)
+  const closes  = data.map(d => d.close)
+  const highs    = data.map(d => d.high)
+  const lows     = data.map(d => d.low)
+  const volumes  = data.map(d => d.volume)
+
   const hasRSI    = data.some(d => d.rsi     != null)
   const hasMACD   = data.some(d => d.macd    != null)
   const hasBB     = data.some(d => d.upper   != null)
   const hasFastMA = data.some(d => d.fast_ma != null)
   const hasSlowMA = data.some(d => d.slow_ma != null)
+  const hasStoch  = data.some(d => d.stoch_k != null)
+  const hasATR    = data.some(d => d.atr     != null)
+  const hasOBV    = data.some(d => d.obv     != null)
 
-  const rsiValues  = hasRSI    ? null : computeRSI(closes)
-  const macdValues = hasMACD   ? null : computeMACD(closes)
-  const bbValues   = hasBB     ? null : computeBollingerBands(closes)
-  const fastMA     = hasFastMA ? null : computeEMA(closes, 20)
-  const slowMA     = hasSlowMA ? null : computeEMA(closes, 50)
+  const hasHighLow = highs.some(v => v != null) && lows.some(v => v != null)
+  const hasVol     = volumes.some(v => v != null)
+
+  const rsiValues   = hasRSI              ? null : computeRSI(closes)
+  const macdValues  = hasMACD             ? null : computeMACD(closes)
+  const bbValues    = hasBB               ? null : computeBollingerBands(closes)
+  const fastMA      = hasFastMA           ? null : computeEMA(closes, 20)
+  const slowMA      = hasSlowMA           ? null : computeEMA(closes, 50)
+  const stochValues = hasStoch || !hasHighLow ? null : computeStochastic(highs, lows, closes)
+  const atrValues   = hasATR   || !hasHighLow ? null : computeATR(highs, lows, closes)
+  const obvValues   = hasOBV   || !hasVol     ? null : computeOBV(closes, volumes)
 
   const roundTo = (v, decimalPlaces = 2) => (v != null ? parseFloat(v.toFixed(decimalPlaces)) : null)
 
@@ -206,5 +310,13 @@ export function enrichData(data) {
       : {}),
     ...(fastMA ? { fast_ma: roundTo(fastMA[i]) } : {}),
     ...(slowMA ? { slow_ma: roundTo(slowMA[i]) } : {}),
+    ...(stochValues
+      ? {
+          stoch_k: roundTo(stochValues.stoch_k[i]),
+          stoch_d: roundTo(stochValues.stoch_d[i]),
+        }
+      : {}),
+    ...(atrValues ? { atr: roundTo(atrValues[i], 4) } : {}),
+    ...(obvValues ? { obv: obvValues[i] != null ? Math.round(obvValues[i]) : null } : {}),
   }))
 }

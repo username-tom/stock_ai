@@ -1,3 +1,5 @@
+import { useNavigate } from 'react-router-dom'
+import { BriefcaseIcon } from '@heroicons/react/24/outline'
 import SubplotChart from '../charts/SubplotChart'
 
 function ChartSkeleton() {
@@ -98,7 +100,9 @@ export default function PriceChartPanel({
   histData, histLoading,
   chartPrevClose,
   quoteTelemetry = null,
+  isInWatchlist = false,
 }) {
+  const navigate = useNavigate()
   const ibTelemetry = histData?.ib_telemetry ?? quoteTelemetry
   const effectiveGap = ibTelemetry?.effective_request_gap_seconds
   const pacingReason = ibTelemetry?.last_pacing_error
@@ -111,7 +115,18 @@ export default function PriceChartPanel({
     <div className="card">
       <div className="flex items-center justify-between mb-3">
         <div className="min-w-0">
-          <h2 className="font-semibold text-slate-200">{chartSymbol} Price Chart</h2>
+          <div className="flex items-center gap-1.5">
+            <h2 className="font-semibold text-slate-200">{chartSymbol} Price Chart</h2>
+            {isInWatchlist && (
+              <button
+                onClick={() => navigate(`/sandbox?symbol=${chartSymbol}`)}
+                title="View in Portfolio"
+                className="text-slate-500 hover:text-emerald-400 transition-colors"
+              >
+                <BriefcaseIcon className="h-4 w-4" />
+              </button>
+            )}
+          </div>
           {gapLabel && (
             <div className="mt-1 flex items-center gap-2 min-w-0">
               <span

@@ -16,6 +16,10 @@ const MACD_COLOR = '#60a5fa'
 const SIGNAL_COLOR = '#f97316'
 const BUY_COLOR = '#4ade80'
 const SELL_COLOR = '#f87171'
+const STOCH_K = '#34d399'
+const STOCH_D = '#f59e0b'
+const ATR_COLOR = '#c084fc'
+const OBV_COLOR = '#38bdf8'
 
 // Custom dot renderer: draws triangle up (buy) or down (sell) on signal bars
 const SignalDot = (props) => {
@@ -46,6 +50,16 @@ function fmtVol(v) {
   if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`
   if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`
   return `${(v / 1e3).toFixed(0)}K`
+}
+
+function fmtOBV(v) {
+  if (v == null) return '—'
+  const sign = v < 0 ? '-' : ''
+  const abs = Math.abs(v)
+  if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(2)}B`
+  if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(2)}M`
+  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(0)}K`
+  return `${sign}${abs.toFixed(0)}`
 }
 
 function TTRow({ label, value, className = 'text-slate-200' }) {
@@ -176,6 +190,9 @@ function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 })
   const hasBB     = (indicators.bb     !== false) && segmented.some(d => d.upper   != null)
   const hasFastMA = (indicators.fastMa !== false) && segmented.some(d => d.fast_ma != null)
   const hasSlowMA = (indicators.slowMa !== false) && segmented.some(d => d.slow_ma != null)
+  const hasStoch  = (indicators.stoch  !== false) && segmented.some(d => d.stoch_k != null)
+  const hasATR    = (indicators.atr    !== false) && segmented.some(d => d.atr     != null)
+  const hasOBV    = (indicators.obv    !== false) && segmented.some(d => d.obv     != null)
 
   const oscHeight = 90
   const gradId = `1d-grad-${isUp ? 'up' : 'dn'}`
@@ -339,12 +356,70 @@ function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 })
           </ComposedChart>
         </ResponsiveContainer>
       )}
+
+      {/* Stochastic panel */}
+      {hasStoch && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
+            <Tooltip content={<StochTooltip />} position={{ y: 50 }} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-st-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-st-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} isAnimationActive={false} name="Stoch %K" />
+            <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} name="Stoch %D" />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+
+      {/* ATR panel */}
+      {hasATR && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => `$${v?.toFixed(2)}`} />
+            <Tooltip content={<ATRTooltip />} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-at-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-at-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="ATR(14)" />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+
+      {/* OBV panel */}
+      {hasOBV && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => fmtOBV(v)} />
+            <Tooltip content={<OBVTooltip />} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-ov-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-ov-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.5} />
+            <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} isAnimationActive={false} name="OBV" />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
     </div>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Session shading helpers for 5d
 // ---------------------------------------------------------------------------
 
 /**
@@ -450,6 +525,47 @@ function MACDTooltip({ active, payload }) {
   )
 }
 
+function StochTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (d?.stoch_k == null && d?.stoch_d == null) return null
+  const k = d.stoch_k
+  const overbought = k != null && k >= 80
+  const oversold   = k != null && k <= 20
+  const kColor = overbought ? 'text-red-400' : oversold ? 'text-emerald-400' : 'text-emerald-300'
+  const badge  = overbought ? 'Overbought' : oversold ? 'Oversold' : null
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl space-y-0.5 min-w-[130px]">
+      <div className="text-slate-500 font-medium mb-0.5">Stochastic</div>
+      {d.stoch_k != null && <TTRow label="%K" value={d.stoch_k.toFixed(2)} className={kColor} />}
+      {d.stoch_d != null && <TTRow label="%D" value={d.stoch_d.toFixed(2)} className="text-amber-400" />}
+      {badge && <div className={`text-[10px] ${kColor} opacity-75 text-right pt-0.5`}>{badge}</div>}
+    </div>
+  )
+}
+
+function ATRTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (d?.atr == null) return null
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl min-w-[140px]">
+      <TTRow label="ATR(14)" value={`$${d.atr.toFixed(3)}`} className="text-purple-400" />
+    </div>
+  )
+}
+
+function OBVTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (d?.obv == null) return null
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl min-w-[130px]">
+      <TTRow label="OBV" value={fmtOBV(d.obv)} className="text-sky-400" />
+    </div>
+  )
+}
+
 export default function SubplotChart({ data = [], height = 240, indicators = {}, period = '', prevClose }) {
   const syncId = useId()
 
@@ -476,10 +592,9 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
   const hasBB   = (indicators.bb     !== false) && sampled.some(d => d.upper   != null)
   const hasFastMA = (indicators.fastMa !== false) && sampled.some(d => d.fast_ma != null)
   const hasSlowMA = (indicators.slowMa !== false) && sampled.some(d => d.slow_ma != null)
-
-  const oscPanels = []
-  if (hasRSI) oscPanels.push('rsi')
-  if (hasMACD) oscPanels.push('macd')
+  const hasStoch  = (indicators.stoch  !== false) && sampled.some(d => d.stoch_k != null)
+  const hasATR    = (indicators.atr    !== false) && sampled.some(d => d.atr     != null)
+  const hasOBV    = (indicators.obv    !== false) && sampled.some(d => d.obv     != null)
 
   const priceHeight = height
   const oscHeight = 100
@@ -558,6 +673,67 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
             </Bar>
             <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} name="MACD"   isAnimationActive={false} />
             <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="Signal" isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+
+      {/* Stochastic panel */}
+      {hasStoch && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {sharedXAxis}
+            <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
+            <Tooltip content={<StochTooltip />} position={{ y: 50 }} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-st-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-st-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} name="Stoch %K" isAnimationActive={false} />
+            <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="Stoch %D" isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+
+      {/* ATR panel */}
+      {hasATR && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {sharedXAxis}
+            <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => `$${v?.toFixed(2)}`} />
+            <Tooltip content={<ATRTooltip />} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-at-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-at-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} name="ATR(14)" isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
+
+      {/* OBV panel */}
+      {hasOBV && (
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {sharedXAxis}
+            <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => fmtOBV(v)} />
+            <Tooltip content={<OBVTooltip />} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-ov-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-ov-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.5} />
+            <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} name="OBV" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
       )}
