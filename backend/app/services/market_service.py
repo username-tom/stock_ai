@@ -1004,13 +1004,18 @@ async def _fetch_yf_history(sym: str, period: str) -> dict:
 
 def _patch_yf_volume_with_ib(yf_data: dict, vol_map: dict[str, int | None]) -> dict:
     """Return a copy of *yf_data* with the volume field replaced by IB values
-    where available.  Bars with no IB volume entry are left unchanged."""
+    only for bars where YF reports zero or null volume (typically extended-hours
+    bars).  RTH bars where YF already has real consolidated market volume are
+    left unchanged — IB only tracks a subset of exchanges and its per-bar
+    volume is far lower than the true market total."""
     if not vol_map:
         return yf_data
     patched = []
     for bar in yf_data.get("data", []):
         d = bar.get("date")
-        if d in vol_map and vol_map[d] is not None:
+        yf_vol = bar.get("volume")
+        # Only substitute IB volume where YF has no data (0 or None).
+        if d in vol_map and vol_map[d] is not None and (yf_vol is None or yf_vol == 0):
             bar = {**bar, "volume": vol_map[d]}
         patched.append(bar)
     return {**yf_data, "data": patched}
@@ -1034,11 +1039,26 @@ def _merge_ib_onto_yf(ib_result: dict, yf_result: dict) -> dict:
     ib_by_date: dict[str, dict] = {b["date"]: b for b in ib_bars}
 
     # Walk YF bars in order; replace with IB where available, keep YF otherwise.
+    # For volume: keep YF volume when it is non-zero (YF consolidated market
+    # volume is more accurate than IB's partial feed during RTH).  Only fill
+    # in IB volume where YF has zero or null (extended-hours bars).
     merged: list[dict] = []
     seen: set[str] = set()
     for bar in yf_bars:
         d = bar["date"]
-        merged.append(ib_by_date.get(d, bar))
+        ib_bar = ib_by_date.get(d)
+        if ib_bar is not None:
+            yf_vol = bar.get("volume")
+            ib_vol = ib_bar.get("volume")
+            # Use IB OHLC (more accurate price) but prefer YF volume when present.
+            merged_bar = {**ib_bar}
+            if yf_vol is not None and yf_vol != 0:
+                merged_bar["volume"] = yf_vol
+            elif ib_vol is not None:
+                merged_bar["volume"] = ib_vol
+            merged.append(merged_bar)
+        else:
+            merged.append(bar)
         seen.add(d)
 
     # Append any IB bars that YF didn't have at all (edge-case: IB emitted
