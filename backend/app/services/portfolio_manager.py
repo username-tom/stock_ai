@@ -393,13 +393,13 @@ async def _refresh_scores(symbols: list[str]) -> None:
 
 def _score_to_bucket(score: float) -> str:
     """Map a -1..1 composite score to a 5-label sentiment bucket."""
-    if score >= 0.8:
+    if score >= 0.5:
         return "euphoric"
-    if score >= 0.2:
+    if score >= 0.1:
         return "bullish"
-    if score > -0.2:
+    if score > -0.1:
         return "neutral"
-    if score > -0.8:
+    if score > -0.5:
         return "bearish"
     return "crash"
 
@@ -1321,7 +1321,7 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
 # ── main loop ─────────────────────────────────────────────────────────────── #
 
 async def refresh_sentiment_routing() -> None:
-    """Refresh sentiment_groups from current position routing data."""
+    """Refresh sentiment_groups from current position routing data and apply strategies if scores exist."""
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
         res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.sentiment_mode.isnot(None)))
@@ -1329,6 +1329,10 @@ async def refresh_sentiment_routing() -> None:
         market_syms = [p.symbol for p in positions if p.sentiment_mode == "market"]
         symbol_syms = [p.symbol for p in positions if p.sentiment_mode == "symbol"]
         _state["sentiment_groups"] = {"market": market_syms, "symbol": symbol_syms}
+    # If scores are already populated, apply strategies immediately so a
+    # routing-mode change takes effect without waiting for the next PM tick.
+    if _state.get("scores"):
+        await _apply_sentiment_strategies()
 
 
 async def run_portfolio_manager() -> None:

@@ -364,7 +364,6 @@ export default function SandboxPanel() {
 
   // build activity log entries from trades + mutations
   useEffect(() => {
-    if (ibConnected) return
     if (!allTrades.length) return
     const newest = allTrades[0]
     if (newest.id === prevTradeIdRef.current) return
@@ -376,7 +375,7 @@ export default function SandboxPanel() {
         .filter(t => !existingIds.has(t.id))
         .map(t => ({
           type: 'trade',
-          profile: 'simulated',
+          profile: activeProfile,
           tradeId: t.id,
           side: t.side,
           label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}${
@@ -388,7 +387,7 @@ export default function SandboxPanel() {
         }))
       return [...newEntries, ...prev].slice(0, 500)
     })
-  }, [allTrades, ibConnected])
+  }, [allTrades, activeProfile])
 
   // mutations
   const removeSymbolMut = useMutation({

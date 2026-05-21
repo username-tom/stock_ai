@@ -104,6 +104,8 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_engine_off BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_tp_pct REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_sl_pct REAL NOT NULL DEFAULT 0.0",
+        # Rename legacy strategy name 'bollinger' → 'bollinger_bands' on any existing positions
+        "UPDATE sandbox_positions SET strategy_name = 'bollinger_bands' WHERE strategy_name = 'bollinger'",
     ]
     for stmt in migrations:
         try:

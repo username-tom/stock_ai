@@ -11,8 +11,13 @@ STRATEGY_MAP: dict[str, type[BaseStrategy]] = {
     "macd": MACDStrategy,
 }
 
+_STRATEGY_ALIASES: dict[str, str] = {
+    "bollinger": "bollinger_bands",
+}
+
 
 def get_strategy(strategy_type: str, **params) -> BaseStrategy:
+    strategy_type = _STRATEGY_ALIASES.get(strategy_type, strategy_type)
     cls = STRATEGY_MAP.get(strategy_type)
     if cls is None:
         raise ValueError(f"Unknown strategy: {strategy_type}. "

@@ -153,6 +153,10 @@ _IB_HIST_OVERLAY_TTL = 900.0  # seconds (15 minutes)
 _ib_hist_overlay_inflight: dict[str, asyncio.Task] = {}
 _ib_hist_overlay_lock = asyncio.Lock()
 
+# Long-lived IB volume patch — keeps per-minute IB volume values available for
+# the full trading day so the chart shows IB volume even between overlay refreshes.
+_IB_VOLUME_PATCH_TTL = 28800.0  # seconds (8 hours)
+
 # ---------------------------------------------------------------------------
 # Persistent HTTP client – reuses connections for lower latency
 # ---------------------------------------------------------------------------
@@ -998,6 +1002,20 @@ async def _fetch_yf_history(sym: str, period: str) -> dict:
     return result
 
 
+def _patch_yf_volume_with_ib(yf_data: dict, vol_map: dict[str, int | None]) -> dict:
+    """Return a copy of *yf_data* with the volume field replaced by IB values
+    where available.  Bars with no IB volume entry are left unchanged."""
+    if not vol_map:
+        return yf_data
+    patched = []
+    for bar in yf_data.get("data", []):
+        d = bar.get("date")
+        if d in vol_map and vol_map[d] is not None:
+            bar = {**bar, "volume": vol_map[d]}
+        patched.append(bar)
+    return {**yf_data, "data": patched}
+
+
 def _merge_ib_onto_yf(ib_result: dict, yf_result: dict) -> dict:
     """Merge IB-verified bars onto the YF base.
 
@@ -1089,8 +1107,25 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
                 _ib_hist_overlay_inflight[inflight_key] = task
 
         # Re-merge IB-verified bars onto current YF data every request.
+        vol_patch_key = f"history:ibvol:{sym}:{period}"
         if ib_cached is not None:
-            return _merge_ib_onto_yf(ib_cached, yf_data)
+            merged = _merge_ib_onto_yf(ib_cached, yf_data)
+            # Persist IB volumes in a long-lived patch cache so they survive
+            # between 15-min overlay refreshes and backend restarts.
+            ib_vol_map: dict[str, int | None] = {
+                b["date"]: b.get("volume")
+                for b in merged.get("data", [])
+                if b.get("volume") is not None
+            }
+            if ib_vol_map:
+                await _cache.set(vol_patch_key, ib_vol_map)
+            return merged
+
+        # IB overlay not yet ready — apply last known IB volume patch so the
+        # chart shows detailed per-minute volume instead of Yahoo's sparse bars.
+        vol_patch = await _cache.get(vol_patch_key, _IB_VOLUME_PATCH_TTL)
+        if vol_patch:
+            return _patch_yf_volume_with_ib(yf_data, vol_patch)
 
         return yf_data
 
