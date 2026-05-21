@@ -18,6 +18,14 @@ import MiniSparkline from '../dashboard/MiniSparkline'
 const BULL_COLOR = '#10b981'
 const BEAR_COLOR = '#ef4444'
 const NEUTRAL_COLOR = '#64748b'
+const AI_TAG_CELL_STYLES = {
+  'STRONG LONG': 'text-emerald-300',
+  LONG: 'text-emerald-400',
+  'STRONG SHORT': 'text-red-300',
+  SHORT: 'text-red-400',
+  WATCH: 'text-slate-400',
+  NEUTRAL: 'text-slate-400',
+}
 
 function scoreToClassification(score) {
   if (score >= 0.5) return 'euphoric'
@@ -48,6 +56,24 @@ function stratLabel(strategy_name) {
   }
   if (strategy_name.startsWith('custom:')) return 'Custom Script'
   return strategy_name.split(':')[0]
+}
+
+function fmtUpperLimit(pos) {
+  const mode = pos?.max_allocation_mode ?? 'dollar'
+  const value = Number(pos?.max_allocation_value)
+  if (!Number.isFinite(value) || value <= 0) return 'No cap'
+  return mode === 'percent' ? `${value.toFixed(2)}%` : fmtMoney(value)
+}
+
+function fmtLowerLimit(managerSettings, totalFunds) {
+  if (!managerSettings) return '—'
+  const mode = managerSettings.min_position_funds_mode ?? 'dollar'
+  if (mode === 'percent') {
+    const pct = Number(managerSettings.min_position_funds_pct ?? 1)
+    const dollar = (Number(totalFunds) || 0) * (pct / 100)
+    return `${pct.toFixed(2)}% (${fmtMoney(dollar)})`
+  }
+  return fmtMoney(Number(managerSettings.min_position_funds ?? 0))
 }
 
 export default function PortfolioOverview({
@@ -378,7 +404,7 @@ export default function PortfolioOverview({
       )}
 
       {/* Per-position breakdown table */}
-      {pieData.length > 0 ? (
+      {positions.length > 0 ? (
         <div className="card">
             <div className="flex items-center gap-2 mb-4">
               <TableCellsIcon className="h-4 w-4 text-slate-400" />
@@ -390,7 +416,9 @@ export default function PortfolioOverview({
                   <tr className="text-slate-500 border-b border-dark-600">
                     <th className="text-left pb-2 font-medium">Symbol</th>
                     <th className="text-left pb-2 font-medium">PM Sentiment</th>
+                    <th className="text-left pb-2 font-medium">AI Sentiment</th>
                     <th className="text-left pb-2 font-medium">Strategy</th>
+                    <th className="text-right pb-2 font-medium">Limits</th>
                     <th className="text-right pb-2 font-medium">Shares</th>
                     <th className="text-right pb-2 font-medium">Avg Price</th>
                     <th className="text-right pb-2 font-medium">Current</th>
@@ -415,6 +443,10 @@ export default function PortfolioOverview({
                     const realizedPct = pos.total_invested > 0.01 ? ((pos.realized_pnl ?? 0) / pos.total_invested) * 100 : null
                     const pd = pieData.find(d => d.symbol === pos.symbol)
                     const priceColor = priceColors[pos.symbol]
+                    const aiTag = (pos.learner_tag || '—').toUpperCase()
+                    const aiStyle = AI_TAG_CELL_STYLES[aiTag] ?? 'text-slate-500'
+                    const upperLimit = fmtUpperLimit(pos)
+                    const lowerLimit = fmtLowerLimit(managerSettings, accountData?.total_funds)
                     return (
                       <tr
                         key={pos.symbol}
@@ -444,11 +476,20 @@ export default function PortfolioOverview({
                           )}
                         </td>
                         <td className="py-2 pl-2">
+                          <span className={`text-xs font-semibold ${aiStyle}`}>{aiTag}</span>
+                        </td>
+                        <td className="py-2 pl-2">
                           {pos.strategy_name ? (
                             <span className="text-xs text-blue-400/80">{stratLabel(pos.strategy_name)}</span>
                           ) : (
                             <span className="text-xs text-slate-600">—</span>
                           )}
+                        </td>
+                        <td className="text-right py-2 pr-2">
+                          <div className="font-mono text-[11px] leading-tight">
+                            <div className="text-emerald-400">{upperLimit}</div>
+                            <div className="text-amber-300">{lowerLimit}</div>
+                          </div>
                         </td>
                         <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? pos.shares.toFixed(3) : '—'}</td>
                         <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? fmtMoney(pos.avg_cost) : '—'}</td>
@@ -477,6 +518,8 @@ export default function PortfolioOverview({
                 <tfoot>
                   <tr className="border-t border-dark-500 text-slate-400 font-semibold">
                     <td className="pt-2">Total</td>
+                    <td />
+                    <td />
                     <td />
                     <td />
                     <td />

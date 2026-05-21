@@ -22,12 +22,18 @@ function fmtMktCap(v) {
   return `$${v}`
 }
 
+function getRangePositionPct(price, low, high) {
+  const p = Number(price)
+  const lo = Number(low)
+  const hi = Number(high)
+  if (!Number.isFinite(p) || !Number.isFinite(lo) || !Number.isFinite(hi) || hi === lo) return null
+  return Math.max(0, Math.min(100, ((p - lo) / (hi - lo)) * 100))
+}
+
 /** Tooltip card that pops near the symbol name, flipping to stay in-viewport */
 function MoverTooltip({ q, pos = {} }) {
   const positive = q.change_pct >= 0
-  const rangePct = (q.last_price != null && q.day_high != null && q.day_low != null && q.day_high !== q.day_low)
-    ? ((q.last_price - q.day_low) / (q.day_high - q.day_low) * 100).toFixed(1)
-    : null
+  const rangePct = getRangePositionPct(q.last_price, q.day_low, q.day_high)
 
   return (
     <div
@@ -69,7 +75,7 @@ function MoverTooltip({ q, pos = {} }) {
       {rangePct != null && (
         <div className="px-3 py-2 text-xs border-b border-dark-500">
           <div className="flex justify-between text-slate-500 mb-1">
-            <span>Day Range</span><span>{rangePct}% from low</span>
+            <span>Day Range</span><span>{rangePct.toFixed(1)}% from low</span>
           </div>
           <div className="h-1.5 w-full bg-dark-500 rounded-full overflow-hidden">
             <div className="h-full bg-gradient-to-r from-red-500 via-yellow-400 to-emerald-500 rounded-full"

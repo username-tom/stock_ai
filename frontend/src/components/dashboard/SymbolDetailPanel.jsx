@@ -37,6 +37,20 @@ function fmtVol(v) {
   return `${(v / 1e3).toFixed(0)}K`
 }
 
+function toFiniteNumber(value) {
+  if (value == null) return null
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function getRangePositionPct(price, low, high) {
+  const p = toFiniteNumber(price)
+  const lo = toFiniteNumber(low)
+  const hi = toFiniteNumber(high)
+  if (p == null || lo == null || hi == null || hi === lo) return null
+  return Math.max(0, Math.min(100, ((p - lo) / (hi - lo)) * 100))
+}
+
 const MARKET_STATE_LABEL = {
   REGULAR: { label: 'Market Open',   cls: 'text-emerald-400 bg-emerald-400/10 border-emerald-500/30' },
   PRE:     { label: 'Pre-Market',    cls: 'text-amber-400  bg-amber-400/10  border-amber-500/30'  },
@@ -78,8 +92,8 @@ function StatRow({ label, value, valueClass = 'text-slate-200' }) {
 
 /** Horizontal gauge showing where price sits in the day range */
 function DayRangeBar({ low, high, price }) {
-  if (low == null || high == null || price == null || high === low) return null
-  const pct = Math.max(0, Math.min(100, ((price - low) / (high - low)) * 100))
+  const pct = getRangePositionPct(price, low, high)
+  if (pct == null) return null
   return (
     <div className="mt-1 mb-1">
       <div className="relative h-1.5 w-full bg-dark-600 rounded-full overflow-hidden">
@@ -135,8 +149,9 @@ function getSentimentBreakdown(q) {
     : null
 
   let s2 = null
-  if (price != null && hi != null && lo != null && hi !== lo) {
-    const r = (price - lo) / (hi - lo)
+  const rangePct = getRangePositionPct(price, lo, hi)
+  if (rangePct != null) {
+    const r = rangePct / 100
     s2 = r >= 0.6 ? 1 : r <= 0.4 ? -1 : 0
   }
 
@@ -144,13 +159,9 @@ function getSentimentBreakdown(q) {
     ? (price > prev ? 1 : price < prev ? -1 : 0)
     : null
 
-  const rangePct = (price != null && hi != null && lo != null && hi !== lo)
-    ? ((price - lo) / (hi - lo) * 100).toFixed(0)
-    : null
-
   return [
     { label: 'Day Change',   detail: q.change_pct != null ? `${q.change_pct > 0 ? '+' : ''}${fmt(q.change_pct)}%` : '—', score: s1 ?? 0 },
-    { label: 'Range Pos.',   detail: rangePct != null ? `${rangePct}% of range` : '—',                                    score: s2 ?? 0 },
+    { label: 'Range Pos.',   detail: rangePct != null ? `${rangePct.toFixed(0)}% of range` : '—',                          score: s2 ?? 0 },
     { label: 'vs Prev Close',detail: (price != null && prev != null) ? `${price >= prev ? '▲' : '▼'} $${fmt(Math.abs(price - prev))}` : '—', score: s3 ?? 0 },
   ]
 }
@@ -166,8 +177,9 @@ function getSignalBreakdown(q) {
     : null
 
   let s2 = null
-  if (price != null && hi != null && lo != null && hi !== lo) {
-    const r = (price - lo) / (hi - lo)
+  const rangePct = getRangePositionPct(price, lo, hi)
+  if (rangePct != null) {
+    const r = rangePct / 100
     s2 = r >= 0.75 ? 1 : r <= 0.25 ? -1 : 0
   }
 
@@ -177,13 +189,9 @@ function getSignalBreakdown(q) {
     s3 = mom > 0.5 ? 1 : mom < -0.5 ? -1 : 0
   }
 
-  const rangePct = (price != null && hi != null && lo != null && hi !== lo)
-    ? ((price - lo) / (hi - lo) * 100).toFixed(0)
-    : null
-
   return [
     { label: 'Momentum',    detail: chg != null ? `${chg > 0 ? '+' : ''}${fmt(chg)}%` : '—',                         score: s1 ?? 0 },
-    { label: 'Price Pos.',  detail: rangePct != null ? `${rangePct}% of range` : '—',                                  score: s2 ?? 0 },
+    { label: 'Price Pos.',  detail: rangePct != null ? `${rangePct.toFixed(0)}% of range` : '—',                      score: s2 ?? 0 },
     { label: 'vs Prev',     detail: (price != null && prev != null) ? `${price >= prev ? '+' : ''}${fmt(((price - prev) / prev) * 100)}%` : '—', score: s3 ?? 0 },
   ]
 }
@@ -238,6 +246,7 @@ export default function SymbolDetailPanel({ symbol, quoteData, isLoading, ownedS
   }
 
   const price = q.last_price ?? q.previous_close ?? 0
+  const dayRangePrice = q.last_price
   const prev  = q.previous_close ?? price
   const changePct = q.change_pct ?? (prev ? ((price - prev) / prev) * 100 : 0)
   const changeAbs = q.change ?? (price - prev)
@@ -251,9 +260,7 @@ export default function SymbolDetailPanel({ symbol, quoteData, isLoading, ownedS
   const stateInfo = MARKET_STATE_LABEL[resolveMarketState(q.market_state)] ?? MARKET_STATE_LABEL.CLOSED
 
   // Derived range position
-  const rangePct = (price != null && q.day_high != null && q.day_low != null && q.day_high !== q.day_low)
-    ? ((price - q.day_low) / (q.day_high - q.day_low) * 100).toFixed(1)
-    : null
+  const rangePct = getRangePositionPct(dayRangePrice, q.day_low, q.day_high)
   const hasOwnershipData = ownedShares != null || averagePrice != null
 
   return (
@@ -299,9 +306,9 @@ export default function SymbolDetailPanel({ symbol, quoteData, isLoading, ownedS
       <div className="py-3 border-b border-dark-700">
         <SectionLabel>Day Range</SectionLabel>
         {rangePct != null && (
-          <div className="text-xs text-slate-500 mb-1.5 text-right">{rangePct}% from low</div>
+          <div className="text-xs text-slate-500 mb-1.5 text-right">{rangePct.toFixed(1)}% from low</div>
         )}
-        <DayRangeBar low={q.day_low} high={q.day_high} price={price} />
+        <DayRangeBar low={q.day_low} high={q.day_high} price={dayRangePrice} />
       </div>
 
       {/* ── Sentiment ── */}
