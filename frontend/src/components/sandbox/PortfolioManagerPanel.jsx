@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
-  ChartBarIcon, CheckCircleIcon, XCircleIcon,
+  ChartBarIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
@@ -171,6 +171,31 @@ function sanitizeSentimentMap(map) {
   )
 }
 
+function CollapsibleSection({ title, badge, children, isOpen, onToggle }) {
+  return (
+    <div className="border border-dark-600 rounded-lg overflow-hidden">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && onToggle()}
+        className="w-full flex items-center justify-between px-3 py-2 bg-dark-800/60 hover:bg-dark-700/50 transition-colors text-left gap-2 cursor-pointer select-none"
+      >
+        <span className="text-xs font-semibold text-slate-300 uppercase tracking-wider">{title}</span>
+        <div className="flex items-center gap-2 shrink-0">
+          {badge && <span className="text-[11px] text-slate-500">{badge}</span>}
+          <ChevronDownIcon className={`h-3.5 w-3.5 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        </div>
+      </div>
+      {isOpen && (
+        <div className="px-3 py-3 space-y-4 bg-dark-900/30 border-t border-dark-600/50">
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SettingRow({ label, hint, children }) {
   return (
     <div className="flex flex-col gap-1">
@@ -192,7 +217,11 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [dragPayload, setDragPayload] = useState(null)
   const [dragOverMode, setDragOverMode] = useState(null)
   const [sentimentError, setSentimentError] = useState(null)
+  const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false })
 
+  function toggleSection(key) {
+    setOpenSections(prev => ({ ...prev, [key]: !prev[key] }))
+  }
   const { data: managerData, isLoading } = useQuery({
     queryKey: ['portfolio-manager-state'],
     queryFn: getPortfolioManagerState,
@@ -258,7 +287,16 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     setSavedStates(prev => {
       const current = prev[activeProfile]
       if (current?.draft) {
-        setDraft(current.draft)
+        // Merge with fresh defaults so fields added after the state was saved are populated
+        const freshDefaults = buildDraftFromSettings(managerData.settings)
+        const mergedDraft = {
+          ...freshDefaults,
+          ...current.draft,
+          ai_tag_strategies: { ...freshDefaults.ai_tag_strategies, ...(current.draft.ai_tag_strategies ?? {}) },
+          market_sentiment_strategies: { ...freshDefaults.market_sentiment_strategies, ...(current.draft.market_sentiment_strategies ?? {}) },
+          symbol_sentiment_strategies: { ...freshDefaults.symbol_sentiment_strategies, ...(current.draft.symbol_sentiment_strategies ?? {}) },
+        }
+        setDraft(mergedDraft)
         setEditSettings(!!current.editSettings)
         return prev
       }
@@ -795,447 +833,440 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             </span>
           </div>
 
-          <fieldset disabled={!editSettings || updateMut.isPending} className="space-y-5 disabled:opacity-70">
+          <fieldset disabled={!editSettings || updateMut.isPending} className="space-y-3 disabled:opacity-70">
 
-            <SettingRow
-              label="Fund Reallocation"
-              hint="Periodically move idle cash between positions or back to available funds."
+            {/* ── Fund Reallocation & Deployment ── */}
+            <CollapsibleSection
+              title="Fund Reallocation & Deployment"
+              badge={draft.reallocation_enabled ? 'Enabled' : 'Disabled'}
+              isOpen={openSections.reallocation}
+              onToggle={() => toggleSection('reallocation')}
             >
-              <label className="flex items-center gap-2 cursor-pointer">
-                <div
-                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.reallocation_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => {
-                    if (!editSettings) return
-                    updateDraft(d => ({ ...d, reallocation_enabled: !d.reallocation_enabled }))
-                  }}
-                >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.reallocation_enabled ? 'translate-x-4' : ''}`} />
-                </div>
-                <span className="text-xs text-slate-300">{draft.reallocation_enabled ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </SettingRow>
-
-            <SettingRow
-              label="Sentiment Lookback Period (days)"
-              hint="Number of days of historical data used to calculate position sentiment scores (1-365 days)."
-            >
-              <div className="flex items-center gap-2">
-                <input
-                  type="number" min={1} max={365} step={1}
-                  value={draft.sentiment_lookback_days}
-                  onChange={e => updateDraft(d => ({ ...d, sentiment_lookback_days: e.target.value }))}
-                  className="input w-24 text-sm py-1.5"
-                />
-                <span className="text-xs text-slate-500">{draft.sentiment_lookback_days} day(s)</span>
-              </div>
-            </SettingRow>
-
-            <SettingRow
-              label="Sentiment Data Points"
-              hint="Number of most recent bars used to determine sentiment (10-5000)."
-            >
-              <div className="flex items-center gap-2">
-                <input
-                  type="number" min={10} max={5000} step={1}
-                  value={draft.sentiment_data_points}
-                  onChange={e => updateDraft(d => ({ ...d, sentiment_data_points: e.target.value }))}
-                  className="input w-28 text-sm py-1.5"
-                />
-                <span className="text-xs text-slate-500">last {draft.sentiment_data_points} bars</span>
-              </div>
-            </SettingRow>
-
-            <SettingRow
-              label="Sentiment Data Interval"
-              hint="Time interval for historical data used in sentiment calculation (e.g., 1-minute bars, 5-minute bars, daily, etc.)."
-            >
-              <select
-                value={draft.sentiment_interval}
-                onChange={e => updateDraft(d => ({ ...d, sentiment_interval: e.target.value }))}
-                className="input text-sm py-1.5"
-              >
-                {ibConnected && <option value="5s">5 seconds (IB only)</option>}
-                {!ibConnected && draft.sentiment_interval === '5s' && (
-                  <option value="5s">5 seconds (requires IB connection)</option>
-                )}
-                <option value="1m">1 minute</option>
-                <option value="5m">5 minutes</option>
-                <option value="15m">15 minutes</option>
-                <option value="30m">30 minutes</option>
-                <option value="1h">1 hour</option>
-                <option value="daily">Daily</option>
-              </select>
-            </SettingRow>
-
-            {draft.reallocation_enabled && (
               <SettingRow
-                label="Reallocation Mode"
-                hint="Where idle cash is moved each cycle."
+                label="Fund Reallocation"
+                hint="Periodically move idle cash between positions or back to available funds."
               >
-                <div className="space-y-2">
-                  <label className="flex items-start gap-2 cursor-pointer">
-                    <input
-                      type="radio" name="reallocation_mode" value="to_stock"
-                      checked={draft.reallocation_mode === 'to_stock'}
-                      onChange={() => updateDraft(d => ({ ...d, reallocation_mode: 'to_stock' }))}
-                      className="mt-0.5 accent-violet-500"
-                    />
-                    <span>
-                      <span className="text-xs font-medium text-slate-200">To Stock</span>
-                      <span className="text-xs text-slate-500 ml-1">&mdash; Move idle cash from bearish positions to bullish ones</span>
-                    </span>
-                  </label>
-                  <label className="flex items-start gap-2 cursor-pointer">
-                    <input
-                      type="radio" name="reallocation_mode" value="to_available"
-                      checked={draft.reallocation_mode === 'to_available'}
-                      onChange={() => updateDraft(d => ({ ...d, reallocation_mode: 'to_available' }))}
-                      className="mt-0.5 accent-violet-500"
-                    />
-                    <span>
-                      <span className="text-xs font-medium text-slate-200">To Available Funds</span>
-                      <span className="text-xs text-slate-500 ml-1">&mdash; Return idle cash from all positions to account available funds</span>
-                    </span>
-                  </label>
-                </div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.reallocation_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, reallocation_enabled: !d.reallocation_enabled }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.reallocation_enabled ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.reallocation_enabled ? 'Enabled' : 'Disabled'}</span>
+                </label>
               </SettingRow>
-            )}
 
-            {draft.reallocation_enabled && (
-            <SettingRow
-              label="Transfer Amount (%)"
-              hint={draft.reallocation_mode === 'to_available'
-                ? "Percentage of each position's idle cash returned to available funds per cycle."
-                : "Percentage of bearish positions' idle cash moved per cycle."}
-            >
-              <div className="flex items-center gap-3">
-                <input
-                  type="range" min={1} max={100} step={1}
-                  value={draft.transfer_pct}
-                    onChange={e => updateDraft(d => ({ ...d, transfer_pct: Number(e.target.value) }))}
-                  className="flex-1 accent-violet-500"
-                />
-                <span className="w-10 text-right text-sm font-bold text-slate-200">{draft.transfer_pct}%</span>
-              </div>
-            </SettingRow>
-            )}
-
-            {draft.reallocation_enabled && (
-            <SettingRow
-              label="Transfer Interval (seconds)"
-              hint="How often funds are redistributed between positions."
-            >
-              <div className="flex items-center gap-2">
-                <input
-                  type="number" min={30} step={30}
-                  value={draft.transfer_interval_s}
-                    onChange={e => updateDraft(d => ({ ...d, transfer_interval_s: e.target.value }))}
-                  className="input w-28 text-sm py-1.5"
-                />
-                <span className="text-xs text-slate-500">
-                  {draft.transfer_interval_s >= 3600
-                    ? `${(draft.transfer_interval_s / 3600).toFixed(1)}h`
-                    : draft.transfer_interval_s >= 60
-                    ? `${Math.floor(draft.transfer_interval_s / 60)}m ${draft.transfer_interval_s % 60}s`
-                    : `${draft.transfer_interval_s}s`}
-                </span>
-              </div>
-            </SettingRow>
-            )}
-
-            {draft.reallocation_enabled && draft.reallocation_mode === 'to_stock' && (
-            <SettingRow
-              label="Indicator Refresh Interval (seconds)"
-              hint="How often bullish/bearish scores are recalculated for each stock."
-            >
-              <div className="flex items-center gap-2">
-                <input
-                  type="number" min={30} step={30}
-                  value={draft.indicator_interval_s}
-                    onChange={e => updateDraft(d => ({ ...d, indicator_interval_s: e.target.value }))}
-                  className="input w-28 text-sm py-1.5"
-                />
-                <span className="text-xs text-slate-500">
-                  {draft.indicator_interval_s >= 3600
-                    ? `${(draft.indicator_interval_s / 3600).toFixed(1)}h`
-                    : draft.indicator_interval_s >= 60
-                    ? `${Math.floor(draft.indicator_interval_s / 60)}m ${draft.indicator_interval_s % 60}s`
-                    : `${draft.indicator_interval_s}s`}
-                </span>
-              </div>
-            </SettingRow>
-            )}
-
-            {draft.reallocation_enabled && (
-            <SettingRow
-              label="Minimum Funds Mode"
-              hint="Choose whether minimum position funds use a fixed dollar amount or a percentage of total funds."
-            >
-              <div className="space-y-2">
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input
-                    type="radio" name="min_position_funds_mode" value="dollar"
-                    checked={draft.min_position_funds_mode === 'dollar'}
-                    onChange={() => updateDraft(d => ({ ...d, min_position_funds_mode: 'dollar' }))}
-                    className="mt-0.5 accent-violet-500"
-                  />
-                  <span>
-                    <span className="text-xs font-medium text-slate-200">Dollar Amount</span>
-                    <span className="text-xs text-slate-500 ml-1">&mdash; Keep at least a fixed amount in each position</span>
-                  </span>
-                </label>
-                <label className="flex items-start gap-2 cursor-pointer">
-                  <input
-                    type="radio" name="min_position_funds_mode" value="percent"
-                    checked={draft.min_position_funds_mode === 'percent'}
-                    onChange={() => updateDraft(d => ({ ...d, min_position_funds_mode: 'percent' }))}
-                    className="mt-0.5 accent-violet-500"
-                  />
-                  <span>
-                    <span className="text-xs font-medium text-slate-200">Percent of Total Funds</span>
-                    <span className="text-xs text-slate-500 ml-1">&mdash; Keep a proportional floor in each position</span>
-                  </span>
-                </label>
-              </div>
-            </SettingRow>
-            )}
-
-            {draft.reallocation_enabled && draft.min_position_funds_mode === 'dollar' && (
-            <SettingRow
-              label="Minimum Funds per Position ($)"
-              hint="Each position always keeps at least this much cash allocated, even when bearish."
-            >
-              <div className="flex items-center gap-1">
-                <span className="text-slate-400 text-sm">$</span>
-                <input
-                  type="number" min={0} step={50}
-                  value={draft.min_position_funds}
-                    onChange={e => updateDraft(d => ({ ...d, min_position_funds: e.target.value }))}
-                  className="input w-28 text-sm py-1.5"
-                />
-              </div>
-            </SettingRow>
-            )}
-
-            {draft.reallocation_enabled && draft.min_position_funds_mode === 'percent' && (
-            <SettingRow
-              label="Minimum Funds per Position (% of total funds)"
-              hint="Each position keeps at least this percentage of total account funds before cash is reallocated."
-            >
-              <div className="flex items-center gap-1">
-                <input
-                  type="number" min={0} max={100} step={0.1}
-                  value={draft.min_position_funds_pct}
-                    onChange={e => updateDraft(d => ({ ...d, min_position_funds_pct: e.target.value }))}
-                  className="input w-28 text-sm py-1.5"
-                />
-                <span className="text-slate-400 text-sm">%</span>
-              </div>
-            </SettingRow>
-            )}
-
-            <SettingRow
-              label="Deploy Available Funds"
-              hint="Automatically allocate unassigned account cash to a target position each cycle."
-            >
-              <label className="flex items-center gap-2 cursor-pointer">
-                <div
-                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.deploy_available_funds ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => {
-                    if (!editSettings) return
-                      updateDraft(d => ({ ...d, deploy_available_funds: !d.deploy_available_funds }))
-                  }}
+              {draft.reallocation_enabled && (
+                <SettingRow
+                  label="Reallocation Mode"
+                  hint="Where idle cash is moved each cycle."
                 >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.deploy_available_funds ? 'translate-x-4' : ''}`} />
-                </div>
-                <span className="text-xs text-slate-300">{draft.deploy_available_funds ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </SettingRow>
-
-            <SettingRow
-              label="Allow Buy Outside Allocation"
-              hint="Permit sandbox buy orders even if allocated position funds are insufficient."
-            >
-              <label className="flex items-center gap-2 cursor-pointer">
-                <div
-                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.allow_buy_outside_allocation ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => {
-                    if (!editSettings) return
-                      updateDraft(d => ({ ...d, allow_buy_outside_allocation: !d.allow_buy_outside_allocation }))
-                  }}
-                >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.allow_buy_outside_allocation ? 'translate-x-4' : ''}`} />
-                </div>
-                <span className="text-xs text-slate-300">{draft.allow_buy_outside_allocation ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </SettingRow>
-
-            <SettingRow
-              label="Global Stop-Loss % (0 = off)"
-              hint="Auto-sell when price drops this percent below average entry cost."
-            >
-              <div className="flex items-center gap-1">
-                <input
-                  type="number" min={0} max={100} step={0.1}
-                  value={draft.stop_loss_pct}
-                  onChange={e => updateDraft(d => ({ ...d, stop_loss_pct: e.target.value }))}
-                  className="input w-28 text-sm py-1.5"
-                />
-                <span className="text-slate-400 text-sm">%</span>
-              </div>
-            </SettingRow>
-
-            <SettingRow
-              label="Global Take-Profit % (0 = off)"
-              hint="Auto-sell when price rises this percent above average entry cost."
-            >
-              <div className="flex items-center gap-1">
-                <input
-                  type="number" min={0} max={1000} step={0.1}
-                  value={draft.take_profit_pct}
-                  onChange={e => updateDraft(d => ({ ...d, take_profit_pct: e.target.value }))}
-                  className="input w-28 text-sm py-1.5"
-                />
-                <span className="text-slate-400 text-sm">%</span>
-              </div>
-            </SettingRow>
-
-            {draft.deploy_available_funds && (
-              <SettingRow
-                label="Deploy Target"
-                hint="Which position receives the available funds each cycle."
-              >
-                <div className="space-y-2">
-                  {[
-                    { value: 'most_bearish',  label: '▼ Most Bearish',  desc: 'Lowest composite signal score' },
-                    { value: 'most_bullish',  label: '▲ Most Bullish',  desc: 'Highest composite signal score' },
-                    { value: 'most_held',     label: '📈 Most Held',    desc: 'Position with highest market value' },
-                    { value: 'least_held',    label: '📉 Least Held',   desc: 'Position with lowest market value' },
-                    { value: 'specific',      label: '🎯 Specific Stock', desc: 'Always deploy to one symbol' },
-                  ].map(opt => (
-                    <label key={opt.value} className="flex items-start gap-2 cursor-pointer group">
+                  <div className="space-y-2">
+                    <label className="flex items-start gap-2 cursor-pointer">
                       <input
-                        type="radio"
-                        name="deploy_target"
-                        value={opt.value}
-                        checked={draft.deploy_target === opt.value}
-                        onChange={() => updateDraft(d => ({ ...d, deploy_target: opt.value }))}
+                        type="radio" name="reallocation_mode" value="to_stock"
+                        checked={draft.reallocation_mode === 'to_stock'}
+                        onChange={() => updateDraft(d => ({ ...d, reallocation_mode: 'to_stock' }))}
                         className="mt-0.5 accent-violet-500"
                       />
                       <span>
-                        <span className="text-xs font-medium text-slate-200">{opt.label}</span>
-                        <span className="text-xs text-slate-500 ml-1">— {opt.desc}</span>
+                        <span className="text-xs font-medium text-slate-200">To Stock</span>
+                        <span className="text-xs text-slate-500 ml-1">&mdash; Move idle cash from bearish positions to bullish ones</span>
                       </span>
                     </label>
-                  ))}
-                  {draft.deploy_target === 'specific' && (
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="radio" name="reallocation_mode" value="to_available"
+                        checked={draft.reallocation_mode === 'to_available'}
+                        onChange={() => updateDraft(d => ({ ...d, reallocation_mode: 'to_available' }))}
+                        className="mt-0.5 accent-violet-500"
+                      />
+                      <span>
+                        <span className="text-xs font-medium text-slate-200">To Available Funds</span>
+                        <span className="text-xs text-slate-500 ml-1">&mdash; Return idle cash from all positions to account available funds</span>
+                      </span>
+                    </label>
+                  </div>
+                </SettingRow>
+              )}
+
+              {draft.reallocation_enabled && (
+                <SettingRow
+                  label="Transfer Amount (%)"
+                  hint={draft.reallocation_mode === 'to_available'
+                    ? "Percentage of each position's idle cash returned to available funds per cycle."
+                    : "Percentage of bearish positions' idle cash moved per cycle."}
+                >
+                  <div className="flex items-center gap-3">
                     <input
-                      type="text"
-                      placeholder="Symbol e.g. AAPL"
-                      value={draft.deploy_target_symbol}
-                        onChange={e => updateDraft(d => ({ ...d, deploy_target_symbol: e.target.value.toUpperCase() }))}
-                      className="input w-36 text-sm py-1.5 mt-1 font-mono uppercase"
+                      type="range" min={1} max={100} step={1}
+                      value={draft.transfer_pct}
+                      onChange={e => updateDraft(d => ({ ...d, transfer_pct: Number(e.target.value) }))}
+                      className="flex-1 accent-violet-500"
                     />
-                  )}
+                    <span className="w-10 text-right text-sm font-bold text-slate-200">{draft.transfer_pct}%</span>
+                  </div>
+                </SettingRow>
+              )}
+
+              {draft.reallocation_enabled && (
+                <SettingRow
+                  label="Transfer Interval (seconds)"
+                  hint="How often funds are redistributed between positions."
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number" min={30} step={30}
+                      value={draft.transfer_interval_s}
+                      onChange={e => updateDraft(d => ({ ...d, transfer_interval_s: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    />
+                    <span className="text-xs text-slate-500">
+                      {draft.transfer_interval_s >= 3600
+                        ? `${(draft.transfer_interval_s / 3600).toFixed(1)}h`
+                        : draft.transfer_interval_s >= 60
+                        ? `${Math.floor(draft.transfer_interval_s / 60)}m ${draft.transfer_interval_s % 60}s`
+                        : `${draft.transfer_interval_s}s`}
+                    </span>
+                  </div>
+                </SettingRow>
+              )}
+
+              {draft.reallocation_enabled && draft.reallocation_mode === 'to_stock' && (
+                <SettingRow
+                  label="Indicator Refresh Interval (seconds)"
+                  hint="How often bullish/bearish scores are recalculated for each stock."
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number" min={30} step={30}
+                      value={draft.indicator_interval_s}
+                      onChange={e => updateDraft(d => ({ ...d, indicator_interval_s: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    />
+                    <span className="text-xs text-slate-500">
+                      {draft.indicator_interval_s >= 3600
+                        ? `${(draft.indicator_interval_s / 3600).toFixed(1)}h`
+                        : draft.indicator_interval_s >= 60
+                        ? `${Math.floor(draft.indicator_interval_s / 60)}m ${draft.indicator_interval_s % 60}s`
+                        : `${draft.indicator_interval_s}s`}
+                    </span>
+                  </div>
+                </SettingRow>
+              )}
+
+              {draft.reallocation_enabled && (
+                <SettingRow
+                  label="Minimum Funds Mode"
+                  hint="Choose whether minimum position funds use a fixed dollar amount or a percentage of total funds."
+                >
+                  <div className="space-y-2">
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="radio" name="min_position_funds_mode" value="dollar"
+                        checked={draft.min_position_funds_mode === 'dollar'}
+                        onChange={() => updateDraft(d => ({ ...d, min_position_funds_mode: 'dollar' }))}
+                        className="mt-0.5 accent-violet-500"
+                      />
+                      <span>
+                        <span className="text-xs font-medium text-slate-200">Dollar Amount</span>
+                        <span className="text-xs text-slate-500 ml-1">&mdash; Keep at least a fixed amount in each position</span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="radio" name="min_position_funds_mode" value="percent"
+                        checked={draft.min_position_funds_mode === 'percent'}
+                        onChange={() => updateDraft(d => ({ ...d, min_position_funds_mode: 'percent' }))}
+                        className="mt-0.5 accent-violet-500"
+                      />
+                      <span>
+                        <span className="text-xs font-medium text-slate-200">Percent of Total Funds</span>
+                        <span className="text-xs text-slate-500 ml-1">&mdash; Keep a proportional floor in each position</span>
+                      </span>
+                    </label>
+                  </div>
+                </SettingRow>
+              )}
+
+              {draft.reallocation_enabled && draft.min_position_funds_mode === 'dollar' && (
+                <SettingRow
+                  label="Minimum Funds per Position ($)"
+                  hint="Each position always keeps at least this much cash allocated, even when bearish."
+                >
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-400 text-sm">$</span>
+                    <input
+                      type="number" min={0} step={50}
+                      value={draft.min_position_funds}
+                      onChange={e => updateDraft(d => ({ ...d, min_position_funds: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    />
+                  </div>
+                </SettingRow>
+              )}
+
+              {draft.reallocation_enabled && draft.min_position_funds_mode === 'percent' && (
+                <SettingRow
+                  label="Minimum Funds per Position (% of total funds)"
+                  hint="Each position keeps at least this percentage of total account funds before cash is reallocated."
+                >
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number" min={0} max={100} step={0.1}
+                      value={draft.min_position_funds_pct}
+                      onChange={e => updateDraft(d => ({ ...d, min_position_funds_pct: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    />
+                    <span className="text-slate-400 text-sm">%</span>
+                  </div>
+                </SettingRow>
+              )}
+
+              <SettingRow
+                label="Deploy Available Funds"
+                hint="Automatically allocate unassigned account cash to a target position each cycle."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.deploy_available_funds ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, deploy_available_funds: !d.deploy_available_funds }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.deploy_available_funds ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.deploy_available_funds ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </SettingRow>
+
+              <SettingRow
+                label="Allow Buy Outside Allocation"
+                hint="Permit sandbox buy orders even if allocated position funds are insufficient."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.allow_buy_outside_allocation ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, allow_buy_outside_allocation: !d.allow_buy_outside_allocation }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.allow_buy_outside_allocation ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.allow_buy_outside_allocation ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </SettingRow>
+
+              {draft.deploy_available_funds && (
+                <SettingRow
+                  label="Deploy Target"
+                  hint="Which position receives the available funds each cycle."
+                >
+                  <div className="space-y-2">
+                    {[
+                      { value: 'most_bearish',  label: '▼ Most Bearish',  desc: 'Lowest composite signal score' },
+                      { value: 'most_bullish',  label: '▲ Most Bullish',  desc: 'Highest composite signal score' },
+                      { value: 'most_held',     label: '📈 Most Held',    desc: 'Position with highest market value' },
+                      { value: 'least_held',    label: '📉 Least Held',   desc: 'Position with lowest market value' },
+                      { value: 'specific',      label: '🎯 Specific Stock', desc: 'Always deploy to one symbol' },
+                    ].map(opt => (
+                      <label key={opt.value} className="flex items-start gap-2 cursor-pointer group">
+                        <input
+                          type="radio"
+                          name="deploy_target"
+                          value={opt.value}
+                          checked={draft.deploy_target === opt.value}
+                          onChange={() => updateDraft(d => ({ ...d, deploy_target: opt.value }))}
+                          className="mt-0.5 accent-violet-500"
+                        />
+                        <span>
+                          <span className="text-xs font-medium text-slate-200">{opt.label}</span>
+                          <span className="text-xs text-slate-500 ml-1">— {opt.desc}</span>
+                        </span>
+                      </label>
+                    ))}
+                    {draft.deploy_target === 'specific' && (
+                      <input
+                        type="text"
+                        placeholder="Symbol e.g. AAPL"
+                        value={draft.deploy_target_symbol}
+                        onChange={e => updateDraft(d => ({ ...d, deploy_target_symbol: e.target.value.toUpperCase() }))}
+                        className="input w-36 text-sm py-1.5 mt-1 font-mono uppercase"
+                      />
+                    )}
+                  </div>
+                </SettingRow>
+              )}
+            </CollapsibleSection>
+
+            {/* ── Sentiment Analysis ── */}
+            <CollapsibleSection
+              title="Sentiment Analysis"
+              badge={`${draft.sentiment_lookback_days}d · ${draft.sentiment_data_points} bars · ${draft.sentiment_interval}`}
+              isOpen={openSections.sentiment}
+              onToggle={() => toggleSection('sentiment')}
+            >
+              <SettingRow
+                label="Sentiment Lookback Period (days)"
+                hint="Number of days of historical data used to calculate position sentiment scores (1-365 days)."
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number" min={1} max={365} step={1}
+                    value={draft.sentiment_lookback_days}
+                    onChange={e => updateDraft(d => ({ ...d, sentiment_lookback_days: e.target.value }))}
+                    className="input w-24 text-sm py-1.5"
+                  />
+                  <span className="text-xs text-slate-500">{draft.sentiment_lookback_days} day(s)</span>
                 </div>
               </SettingRow>
-            )}
 
-            <SettingRow
-              label="Sentiment Strategy Switching"
-              hint="When enabled, the portfolio manager automatically updates the strategy for each symbol based on its assigned sentiment mode."
-            >
-              <label className="flex items-center gap-2 cursor-pointer">
-                <div
-                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.sentiment_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => {
-                    if (!editSettings) return
-                    updateDraft(d => ({ ...d, sentiment_strategy_enabled: !d.sentiment_strategy_enabled }))
-                  }}
-                >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.sentiment_strategy_enabled ? 'translate-x-4' : ''}`} />
+              <SettingRow
+                label="Sentiment Data Points"
+                hint="Number of most recent bars used to determine sentiment (10-5000)."
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number" min={10} max={5000} step={1}
+                    value={draft.sentiment_data_points}
+                    onChange={e => updateDraft(d => ({ ...d, sentiment_data_points: e.target.value }))}
+                    className="input w-28 text-sm py-1.5"
+                  />
+                  <span className="text-xs text-slate-500">last {draft.sentiment_data_points} bars</span>
                 </div>
-                <span className="text-xs text-slate-300">{draft.sentiment_strategy_enabled ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </SettingRow>
+              </SettingRow>
 
-            <SettingRow
-              label="Market Sentiment Strategy"
-              hint="Choose the default strategy to use under each overall market sentiment."
+              <SettingRow
+                label="Sentiment Data Interval"
+                hint="Time interval for historical data used in sentiment calculation (e.g., 1-minute bars, 5-minute bars, daily, etc.)."
+              >
+                <select
+                  value={draft.sentiment_interval}
+                  onChange={e => updateDraft(d => ({ ...d, sentiment_interval: e.target.value }))}
+                  className="input text-sm py-1.5"
+                >
+                  {ibConnected && <option value="5s">5 seconds (IB only)</option>}
+                  {!ibConnected && draft.sentiment_interval === '5s' && (
+                    <option value="5s">5 seconds (requires IB connection)</option>
+                  )}
+                  <option value="1m">1 minute</option>
+                  <option value="5m">5 minutes</option>
+                  <option value="15m">15 minutes</option>
+                  <option value="30m">30 minutes</option>
+                  <option value="1h">1 hour</option>
+                  <option value="daily">Daily</option>
+                </select>
+              </SettingRow>
+            </CollapsibleSection>
+
+            {/* ── Sentiment Strategy Switching ── */}
+            <CollapsibleSection
+              title="Sentiment Strategy Switching"
+              badge={draft.sentiment_strategy_enabled ? 'Enabled' : 'Disabled'}
+              isOpen={openSections.sentimentStrategy}
+              onToggle={() => toggleSection('sentimentStrategy')}
             >
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {SENTIMENT_BUCKETS.map(sentiment => {
-                  const current = draft.market_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]
-                  const { type: currentType, scriptId: currentScriptId, templateFilename: currentTemplateFn } = parseStrategyValue(current)
-                  return (
-                    <div key={`market-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
-                      <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
-                      <select
-                        className="input text-xs py-1.5"
-                        value={currentType}
-                        onChange={e => {
-                          const newType = e.target.value
-                          updateDraft(d => ({
-                            ...d,
-                            market_sentiment_strategies: {
-                              ...d.market_sentiment_strategies,
-                              [sentiment]: newType,
-                            },
-                          }))
-                        }}
-                      >
-                        {strategyOptions.map(s => <option key={`market-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
-                        <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
-                        <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
-                      </select>
-                      {currentType === CUSTOM_SCRIPT_KEY && (
+              <SettingRow
+                label="Sentiment Strategy Switching"
+                hint="When enabled, the portfolio manager automatically updates the strategy for each symbol based on its assigned sentiment mode."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.sentiment_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, sentiment_strategy_enabled: !d.sentiment_strategy_enabled }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.sentiment_strategy_enabled ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.sentiment_strategy_enabled ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </SettingRow>
+
+              <SettingRow
+                label="Market Sentiment Strategy"
+                hint="Choose the default strategy to use under each overall market sentiment."
+              >
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {SENTIMENT_BUCKETS.map(sentiment => {
+                    const current = draft.market_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]
+                    const { type: currentType, scriptId: currentScriptId, templateFilename: currentTemplateFn } = parseStrategyValue(current)
+                    return (
+                      <div key={`market-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
+                        <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
                         <select
                           className="input text-xs py-1.5"
-                          value={currentScriptId ?? ''}
+                          value={currentType}
                           onChange={e => {
-                            const sid = e.target.value
+                            const newType = e.target.value
                             updateDraft(d => ({
                               ...d,
                               market_sentiment_strategies: {
                                 ...d.market_sentiment_strategies,
-                                [sentiment]: sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY,
+                                [sentiment]: newType,
                               },
                             }))
                           }}
                         >
-                          <option value="">— select script —</option>
-                          {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          {strategyOptions.map(s => <option key={`market-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
+                          <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
+                          <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
                         </select>
-                      )}
-                      {currentType === TEMPLATE_SCRIPT_KEY && (
-                        <select
-                          className="input text-xs py-1.5"
-                          value={currentTemplateFn ?? ''}
-                          onChange={e => {
-                            const fn = e.target.value
-                            updateDraft(d => ({
-                              ...d,
-                              market_sentiment_strategies: {
-                                ...d.market_sentiment_strategies,
-                                [sentiment]: fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY,
-                              },
-                            }))
-                          }}
-                        >
-                          <option value="">— select template —</option>
-                          {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
-                        </select>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </SettingRow>
+                        {currentType === CUSTOM_SCRIPT_KEY && (
+                          <select
+                            className="input text-xs py-1.5"
+                            value={currentScriptId ?? ''}
+                            onChange={e => {
+                              const sid = e.target.value
+                              updateDraft(d => ({
+                                ...d,
+                                market_sentiment_strategies: {
+                                  ...d.market_sentiment_strategies,
+                                  [sentiment]: sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY,
+                                },
+                              }))
+                            }}
+                          >
+                            <option value="">— select script —</option>
+                            {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                          </select>
+                        )}
+                        {currentType === TEMPLATE_SCRIPT_KEY && (
+                          <select
+                            className="input text-xs py-1.5"
+                            value={currentTemplateFn ?? ''}
+                            onChange={e => {
+                              const fn = e.target.value
+                              updateDraft(d => ({
+                                ...d,
+                                market_sentiment_strategies: {
+                                  ...d.market_sentiment_strategies,
+                                  [sentiment]: fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY,
+                                },
+                              }))
+                            }}
+                          >
+                            <option value="">— select template —</option>
+                            {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
+                          </select>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </SettingRow>
 
-            <SettingRow
-              label="Symbol Sentiment Strategy"
-              hint="Choose the default strategy to use under each individual symbol sentiment."
-            >
+              <SettingRow
+                label="Symbol Sentiment Strategy"
+                hint="Choose the default strategy to use under each individual symbol sentiment."
+              >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {SENTIMENT_BUCKETS.map(sentiment => {
                   const current = draft.symbol_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]
@@ -1304,228 +1335,267 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 })}
               </div>
             </SettingRow>
+            </CollapsibleSection>
 
-            <hr className="border-dark-600 my-4" />
-
-            {/* ── AI Tag Strategy Routing ───────────────────────────────── */}
-            <SettingRow
-              label="AI Tag Strategy Switching"
-              hint="When enabled, the portfolio manager automatically updates the strategy for each position based on its AI learner tag. WATCH tag always keeps the current default day-trading strategy unchanged."
+            {/* ── AI Tag Strategy Routing ── */}
+            <CollapsibleSection
+              title="AI Tag Strategy Routing"
+              badge={draft.ai_tag_strategy_enabled ? 'Enabled' : 'Disabled'}
+              isOpen={openSections.aiTag}
+              onToggle={() => toggleSection('aiTag')}
             >
-              <label className="flex items-center gap-2 cursor-pointer">
-                <div
-                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => {
-                    if (!editSettings) return
-                    updateDraft(d => ({ ...d, ai_tag_strategy_enabled: !d.ai_tag_strategy_enabled }))
-                  }}
-                >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_strategy_enabled ? 'translate-x-4' : ''}`} />
-                </div>
-                <span className="text-xs text-slate-300">{draft.ai_tag_strategy_enabled ? 'Enabled' : 'Disabled'}</span>
-              </label>
-            </SettingRow>
-
-            {draft.ai_tag_strategy_enabled && (
-              <>
-                {/* Mode toggle */}
-                <SettingRow
-                  label="Action Mode"
-                  hint="Strategy Override: PM sets the strategy name per AI tag, the engine executes trades. Direct Actions: PM directly buys/sells LONG/STRONG LONG positions without the engine — bypasses engine shutoff windows."
-                >
-                  <div className="flex gap-0.5 p-0.5 bg-dark-900 rounded-lg">
-                    {[
-                      { value: 'strategy_override', label: 'Strategy Override' },
-                      { value: 'direct', label: 'Direct Actions' },
-                    ].map(opt => (
-                      <button
-                        key={opt.value}
-                        disabled={!editSettings}
-                        onClick={() => editSettings && updateDraft(d => ({ ...d, ai_tag_action_mode: opt.value }))}
-                        className={`text-xs px-3 py-1.5 rounded-md transition-all ${
-                          draft.ai_tag_action_mode === opt.value
-                            ? 'bg-violet-600 text-white font-medium'
-                            : 'text-slate-400 hover:text-slate-300 disabled:opacity-50'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
+              <SettingRow
+                label="AI Tag Strategy Switching"
+                hint="When enabled, the portfolio manager automatically updates the strategy for each position based on its AI learner tag. WATCH tag always keeps the current default day-trading strategy unchanged."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, ai_tag_strategy_enabled: !d.ai_tag_strategy_enabled }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_strategy_enabled ? 'translate-x-4' : ''}`} />
                   </div>
-                </SettingRow>
+                  <span className="text-xs text-slate-300">{draft.ai_tag_strategy_enabled ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </SettingRow>
 
-                {/* Per-tag strategy selectors */}
-                <SettingRow
-                  label="AI Tag Strategies"
-                  hint={draft.ai_tag_action_mode === 'direct'
-                    ? 'In Direct Actions mode, LONG/STRONG LONG are managed by PM directly. Strategies below apply to NEUTRAL, SHORT, and STRONG SHORT.'
-                    : 'Choose the strategy for each AI learner tag. Leave Neutral empty to keep the existing strategy. WATCH always uses the default engine (no override).'}
-                >
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {AI_TAG_BUCKETS.map(tag => {
-                      const isLong = tag === 'LONG' || tag === 'STRONG LONG'
-                      const directManaged = draft.ai_tag_action_mode === 'direct' && isLong
-                      const current = draft.ai_tag_strategies[tag] ?? DEFAULT_AI_TAG_STRATEGIES[tag] ?? ''
-                      return (
-                        <div key={`aitag-row-${tag}`} className={`border rounded-md p-2 space-y-1 ${directManaged ? 'bg-dark-900/30 border-dark-700 opacity-60' : 'bg-dark-900/60 border-dark-600'}`}>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-[11px] font-bold" style={{ color: AI_TAG_COLORS[tag] }}>{AI_TAG_LABELS[tag]}</span>
-                            {directManaged && <span className="text-[10px] text-violet-400">PM direct</span>}
-                          </div>
-                          {directManaged ? (
-                            <span className="text-[11px] text-slate-500 italic">Bought/sold directly by PM</span>
-                          ) : (
-                            <select
-                              className="input text-xs py-1.5"
-                              disabled={!editSettings}
-                              value={current}
-                              onChange={e => updateDraft(d => ({
-                                ...d,
-                                ai_tag_strategies: { ...d.ai_tag_strategies, [tag]: e.target.value },
-                              }))}
-                            >
-                              <option value="">— no override —</option>
-                              {strategyOptions.map(s => <option key={`aitag-${tag}-${s.type}`} value={s.type}>{s.type}</option>)}
-                            </select>
-                          )}
-                        </div>
-                      )
-                    })}
-                    <div className="bg-dark-900/40 border border-dark-700 rounded-md p-2">
-                      <div className="flex items-center gap-1.5 mb-1">
-                        <span className="text-[11px] font-bold text-slate-500">Watch</span>
-                      </div>
-                      <span className="text-[11px] text-slate-500 italic">Uses default day-trading engine — no override</span>
-                    </div>
-                  </div>
-                </SettingRow>
-
-                <SettingRow
-                  label="Allow Overnight for Long Tags"
-                  hint="When enabled, LONG/STRONG LONG positions are exempt from end-of-day liquidation. In Direct mode, the PM position simply stays open. In Strategy Override mode, the engine skips EOD sell for these positions."
-                >
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <div
-                      className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_allow_overnight ? 'bg-violet-600' : 'bg-dark-600'}`}
-                      onClick={() => {
-                        if (!editSettings) return
-                        updateDraft(d => ({ ...d, ai_tag_allow_overnight: !d.ai_tag_allow_overnight }))
-                      }}
-                    >
-                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_allow_overnight ? 'translate-x-4' : ''}`} />
-                    </div>
-                    <span className="text-xs text-slate-300">{draft.ai_tag_allow_overnight ? 'Hold overnight for LONG/STRONG LONG' : 'EOD rules apply to all'}</span>
-                  </label>
-                </SettingRow>
-
-                {/* Long TP/SL — always visible when AI tags enabled (used by both modes) */}
-                <SettingRow
-                  label="Long Take Profit %"
-                  hint="Sell when price rises this % above avg cost. 0 = disabled. In Direct mode: PM sells directly. In Strategy Override + Long Hold mode: PM re-enables engine after selling."
-                >
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number" min={0} max={100} step={0.1}
-                      disabled={!editSettings}
-                      value={draft.ai_tag_long_tp_pct}
-                      onChange={e => updateDraft(d => ({ ...d, ai_tag_long_tp_pct: e.target.value }))}
-                      className="input w-28 text-sm py-1.5"
-                    />
-                    <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_tp_pct) > 0 ? '' : ' (off)'}</span>
-                  </div>
-                </SettingRow>
-                <SettingRow
-                  label="Long Stop Loss %"
-                  hint="Sell when price drops this % below avg cost. 0 = disabled."
-                >
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number" min={0} max={100} step={0.1}
-                      disabled={!editSettings}
-                      value={draft.ai_tag_long_sl_pct}
-                      onChange={e => updateDraft(d => ({ ...d, ai_tag_long_sl_pct: e.target.value }))}
-                      className="input w-28 text-sm py-1.5"
-                    />
-                    <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_sl_pct) > 0 ? '' : ' (off)'}</span>
-                  </div>
-                </SettingRow>
-
-                {/* Long Hold Mode — strategy_override only */}
-                {draft.ai_tag_action_mode !== 'direct' && (
+              {draft.ai_tag_strategy_enabled && (
+                <>
                   <SettingRow
-                    label="Long Hold Mode"
-                    hint="After a BUY fills for a LONG or STRONG LONG position, disable the strategy engine so the position is held without short-term signal interference. The engine re-enables when TP/SL is hit or the AI tag changes."
+                    label="Action Mode"
+                    hint="Strategy Override: PM sets the strategy name per AI tag, the engine executes trades. Direct Actions: PM directly buys/sells LONG/STRONG LONG positions without the engine — bypasses engine shutoff windows."
+                  >
+                    <div className="flex gap-0.5 p-0.5 bg-dark-900 rounded-lg">
+                      {[
+                        { value: 'strategy_override', label: 'Strategy Override' },
+                        { value: 'direct', label: 'Direct Actions' },
+                      ].map(opt => (
+                        <button
+                          key={opt.value}
+                          disabled={!editSettings}
+                          onClick={() => editSettings && updateDraft(d => ({ ...d, ai_tag_action_mode: opt.value }))}
+                          className={`text-xs px-3 py-1.5 rounded-md transition-all ${
+                            draft.ai_tag_action_mode === opt.value
+                              ? 'bg-violet-600 text-white font-medium'
+                              : 'text-slate-400 hover:text-slate-300 disabled:opacity-50'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="AI Tag Strategies"
+                    hint={draft.ai_tag_action_mode === 'direct'
+                      ? 'In Direct Actions mode, LONG/STRONG LONG are managed by PM directly. Strategies below apply to NEUTRAL, SHORT, and STRONG SHORT.'
+                      : 'Choose the strategy for each AI learner tag. Leave Neutral empty to keep the existing strategy. WATCH always uses the default engine (no override).'}
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {AI_TAG_BUCKETS.map(tag => {
+                        const isLong = tag === 'LONG' || tag === 'STRONG LONG'
+                        const directManaged = draft.ai_tag_action_mode === 'direct' && isLong
+                        const current = draft.ai_tag_strategies[tag] ?? DEFAULT_AI_TAG_STRATEGIES[tag] ?? ''
+                        return (
+                          <div key={`aitag-row-${tag}`} className={`border rounded-md p-2 space-y-1 ${directManaged ? 'bg-dark-900/30 border-dark-700 opacity-60' : 'bg-dark-900/60 border-dark-600'}`}>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[11px] font-bold" style={{ color: AI_TAG_COLORS[tag] }}>{AI_TAG_LABELS[tag]}</span>
+                              {directManaged && <span className="text-[10px] text-violet-400">PM direct</span>}
+                            </div>
+                            {directManaged ? (
+                              <span className="text-[11px] text-slate-500 italic">Bought/sold directly by PM</span>
+                            ) : (
+                              <select
+                                className="input text-xs py-1.5"
+                                disabled={!editSettings}
+                                value={current}
+                                onChange={e => updateDraft(d => ({
+                                  ...d,
+                                  ai_tag_strategies: { ...d.ai_tag_strategies, [tag]: e.target.value },
+                                }))}
+                              >
+                                <option value="">— no override —</option>
+                                {strategyOptions.map(s => <option key={`aitag-${tag}-${s.type}`} value={s.type}>{s.type}</option>)}
+                              </select>
+                            )}
+                          </div>
+                        )
+                      })}
+                      <div className="bg-dark-900/40 border border-dark-700 rounded-md p-2">
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span className="text-[11px] font-bold text-slate-500">Watch</span>
+                        </div>
+                        <span className="text-[11px] text-slate-500 italic">Uses default day-trading engine — no override</span>
+                      </div>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Allow Overnight for Long Tags"
+                    hint="When enabled, LONG/STRONG LONG positions are exempt from end-of-day liquidation. In Direct mode, the PM position simply stays open. In Strategy Override mode, the engine skips EOD sell for these positions."
                   >
                     <label className="flex items-center gap-2 cursor-pointer">
                       <div
-                        className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_long_engine_off ? 'bg-violet-600' : 'bg-dark-600'}`}
+                        className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_allow_overnight ? 'bg-violet-600' : 'bg-dark-600'}`}
                         onClick={() => {
                           if (!editSettings) return
-                          updateDraft(d => ({ ...d, ai_tag_long_engine_off: !d.ai_tag_long_engine_off }))
+                          updateDraft(d => ({ ...d, ai_tag_allow_overnight: !d.ai_tag_allow_overnight }))
                         }}
                       >
-                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_long_engine_off ? 'translate-x-4' : ''}`} />
+                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_allow_overnight ? 'translate-x-4' : ''}`} />
                       </div>
-                      <span className="text-xs text-slate-300">{draft.ai_tag_long_engine_off ? 'Engine paused after buy (long hold)' : 'Engine runs normally for long tags'}</span>
+                      <span className="text-xs text-slate-300">{draft.ai_tag_allow_overnight ? 'Hold overnight for LONG/STRONG LONG' : 'EOD rules apply to all'}</span>
                     </label>
                   </SettingRow>
-                )}
-              </>
-            )}
 
-            <hr className="border-dark-600 my-4" />
+                  <SettingRow
+                    label="Long Take Profit %"
+                    hint="Sell when price rises this % above avg cost. 0 = disabled. In Direct mode: PM sells directly. In Strategy Override + Long Hold mode: PM re-enables engine after selling."
+                  >
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={0} max={100} step={0.1}
+                        disabled={!editSettings}
+                        value={draft.ai_tag_long_tp_pct}
+                        onChange={e => updateDraft(d => ({ ...d, ai_tag_long_tp_pct: e.target.value }))}
+                        className="input w-28 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_tp_pct) > 0 ? '' : ' (off)'}</span>
+                    </div>
+                  </SettingRow>
 
-            <SettingRow
-              label="Hold Positions Overnight"
-              hint="When enabled, positions are held between days. When disabled, an end-of-day sell window forces liquidation."
+                  <SettingRow
+                    label="Long Stop Loss %"
+                    hint="Sell when price drops this % below avg cost. 0 = disabled."
+                  >
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={0} max={100} step={0.1}
+                        disabled={!editSettings}
+                        value={draft.ai_tag_long_sl_pct}
+                        onChange={e => updateDraft(d => ({ ...d, ai_tag_long_sl_pct: e.target.value }))}
+                        className="input w-28 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_sl_pct) > 0 ? '' : ' (off)'}</span>
+                    </div>
+                  </SettingRow>
+
+                  {draft.ai_tag_action_mode !== 'direct' && (
+                    <SettingRow
+                      label="Long Hold Mode"
+                      hint="After a BUY fills for a LONG or STRONG LONG position, disable the strategy engine so the position is held without short-term signal interference. The engine re-enables when TP/SL is hit or the AI tag changes."
+                    >
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <div
+                          className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_long_engine_off ? 'bg-violet-600' : 'bg-dark-600'}`}
+                          onClick={() => {
+                            if (!editSettings) return
+                            updateDraft(d => ({ ...d, ai_tag_long_engine_off: !d.ai_tag_long_engine_off }))
+                          }}
+                        >
+                          <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_long_engine_off ? 'translate-x-4' : ''}`} />
+                        </div>
+                        <span className="text-xs text-slate-300">{draft.ai_tag_long_engine_off ? 'Engine paused after buy (long hold)' : 'Engine runs normally for long tags'}</span>
+                      </label>
+                    </SettingRow>
+                  )}
+                </>
+              )}
+            </CollapsibleSection>
+
+            {/* ── Risk & End of Day ── */}
+            <CollapsibleSection
+              title="Risk & End of Day"
+              badge={`SL ${Number(draft.stop_loss_pct) > 0 ? draft.stop_loss_pct + '%' : 'off'} · TP ${Number(draft.take_profit_pct) > 0 ? draft.take_profit_pct + '%' : 'off'} · ${draft.hold_positions_overnight ? 'overnight' : 'EOD sell'}`}
+              isOpen={openSections.risk}
+              onToggle={() => toggleSection('risk')}
             >
-              <label className="flex items-center gap-2 cursor-pointer">
-                <div
-                  className={`relative w-9 h-5 rounded-full transition-colors ${draft.hold_positions_overnight ? 'bg-violet-600' : 'bg-dark-600'}`}
-                  onClick={() => {
-                    if (!editSettings) return
-                    updateDraft(d => ({ ...d, hold_positions_overnight: !d.hold_positions_overnight }))
-                  }}
+              <SettingRow
+                label="Engine Stop-Loss % (0 = off)"
+                hint="Auto-sell when price drops this percent below average entry cost."
+              >
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number" min={0} max={100} step={0.1}
+                    value={draft.stop_loss_pct}
+                    onChange={e => updateDraft(d => ({ ...d, stop_loss_pct: e.target.value }))}
+                    className="input w-28 text-sm py-1.5"
+                  />
+                  <span className="text-slate-400 text-sm">%</span>
+                </div>
+              </SettingRow>
+
+              <SettingRow
+                label="Engine Take-Profit % (0 = off)"
+                hint="Auto-sell when price rises this percent above average entry cost."
+              >
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number" min={0} max={1000} step={0.1}
+                    value={draft.take_profit_pct}
+                    onChange={e => updateDraft(d => ({ ...d, take_profit_pct: e.target.value }))}
+                    className="input w-28 text-sm py-1.5"
+                  />
+                  <span className="text-slate-400 text-sm">%</span>
+                </div>
+              </SettingRow>
+
+              <SettingRow
+                label="Hold Positions Overnight"
+                hint="When enabled, positions are held between days. When disabled, an end-of-day sell window forces liquidation."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.hold_positions_overnight ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, hold_positions_overnight: !d.hold_positions_overnight }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.hold_positions_overnight ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.hold_positions_overnight ? 'Hold Overnight' : 'Liquidate at EOD'}</span>
+                </label>
+              </SettingRow>
+
+              {!draft.hold_positions_overnight && (
+                <SettingRow
+                  label="Pre-Sell Engine Shutoff (minutes)"
+                  hint="Duration before the final sell window where new engine BUY entries are blocked."
                 >
-                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.hold_positions_overnight ? 'translate-x-4' : ''}`} />
-                </div>
-                <span className="text-xs text-slate-300">{draft.hold_positions_overnight ? 'Hold Overnight' : 'Liquidate at EOD'}</span>
-              </label>
-            </SettingRow>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number" min={1} max={480} step={1}
+                      value={draft.eod_engine_shutoff_minutes_before_sell}
+                      onChange={e => updateDraft(d => ({ ...d, eod_engine_shutoff_minutes_before_sell: e.target.value }))}
+                      className="input w-32 text-sm py-1.5"
+                    />
+                    <span className="text-slate-400 text-sm">minutes before final sell window</span>
+                  </div>
+                </SettingRow>
+              )}
 
-            {!draft.hold_positions_overnight && (
-              <SettingRow
-                label="Pre-Sell Engine Shutoff (minutes)"
-                hint="Duration before the final sell window where new engine BUY entries are blocked."
-              >
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" min={1} max={480} step={1}
-                    value={draft.eod_engine_shutoff_minutes_before_sell}
-                    onChange={e => updateDraft(d => ({ ...d, eod_engine_shutoff_minutes_before_sell: e.target.value }))}
-                    className="input w-32 text-sm py-1.5"
-                  />
-                  <span className="text-slate-400 text-sm">minutes before final sell window</span>
-                </div>
-              </SettingRow>
-            )}
-
-            {!draft.hold_positions_overnight && (
-              <SettingRow
-                label="End-of-Day Sell Window (minutes)"
-                hint="Duration in minutes before market close (16:00 ET) when positions are force-liquidated. The engine will only sell during this window, regardless of TP/SL."
-              >
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" min={1} max={240} step={1}
-                    value={draft.eod_sell_window_minutes}
-                    onChange={e => updateDraft(d => ({ ...d, eod_sell_window_minutes: e.target.value }))}
-                    className="input w-32 text-sm py-1.5"
-                  />
-                  <span className="text-slate-400 text-sm">minutes before 16:00 ET</span>
-                </div>
-              </SettingRow>
-            )}
+              {!draft.hold_positions_overnight && (
+                <SettingRow
+                  label="End-of-Day Sell Window (minutes)"
+                  hint="Duration in minutes before market close (16:00 ET) when positions are force-liquidated. The engine will only sell during this window, regardless of TP/SL."
+                >
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number" min={1} max={240} step={1}
+                      value={draft.eod_sell_window_minutes}
+                      onChange={e => updateDraft(d => ({ ...d, eod_sell_window_minutes: e.target.value }))}
+                      className="input w-32 text-sm py-1.5"
+                    />
+                    <span className="text-slate-400 text-sm">minutes before 16:00 ET</span>
+                  </div>
+                </SettingRow>
+              )}
+            </CollapsibleSection>
 
           </fieldset>
         </div>

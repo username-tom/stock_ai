@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState, useRef, useCallback, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { PlayIcon, StopCircleIcon } from '@heroicons/react/24/outline'
+import { PlayIcon, StopCircleIcon, ArrowDownIcon, ArrowUpIcon } from '@heroicons/react/24/outline'
 import { getScripts, getBuiltinTemplates } from '../../api/client'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
 import { fmt, fmtMoney } from './sandboxHelpers'
@@ -66,9 +66,14 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
   const minFundsDollar = minFundsMode === 'percent'
     ? ((Number(accountTotalFunds) || 0) * (Number(managerSettings?.min_position_funds_pct ?? 1) / 100))
     : Number(managerSettings?.min_position_funds ?? 0)
-  const minFundsLabel = minFundsMode === 'percent'
-    ? `Min ${Number(managerSettings?.min_position_funds_pct ?? 1).toFixed(2)}% (${fmtMoney(minFundsDollar)})`
-    : `Min ${fmtMoney(minFundsDollar)}`
+  const minFundsDisplay = minFundsMode === 'percent'
+    ? `${Number(managerSettings?.min_position_funds_pct ?? 1).toFixed(1)}%`
+    : fmtMoney(minFundsDollar)
+  const maxAllocMode = pos.max_allocation_mode ?? 'dollar'
+  const maxAllocValue = pos.max_allocation_value
+  const maxDisplay = maxAllocValue && maxAllocValue > 0
+    ? (maxAllocMode === 'percent' ? `${Number(maxAllocValue).toFixed(1)}%` : fmtMoney(maxAllocValue))
+    : null
   const learnerTag = (pos.learner_tag || '').toUpperCase()
   const learnerTagClass = LEARNER_COLORS[learnerTag] || LEARNER_COLORS.NEUTRAL
 
@@ -147,7 +152,10 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
             <span className={`font-semibold ${unrealised >= 0 ? 'text-emerald-500/80' : 'text-red-500/80'}`}>{fmt(unrealised)}</span>
           </div>
         )}
-        <div className="text-[11px] text-slate-500 mt-0.5">{minFundsLabel} per position</div>
+        <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
+          <span className="flex items-center gap-0.5"><ArrowDownIcon className="h-2.5 w-2.5" />{minFundsDisplay}</span>
+          {maxDisplay && <span className="flex items-center gap-0.5"><ArrowUpIcon className="h-2.5 w-2.5" />{maxDisplay}</span>}
+        </div>
         {pos.strategy_name && (
           <div className="mt-0.5 flex items-center gap-1.5">
             <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${pos.strategy_enabled ? 'bg-emerald-400' : 'bg-slate-600'}`} />

@@ -2,7 +2,7 @@ import {
   TrashIcon, PencilSquareIcon, CheckIcon, XMarkIcon,
   ArrowUpIcon, ArrowDownIcon, BoltIcon, PlayIcon, StopCircleIcon,
   ClockIcon, SignalIcon, ExclamationTriangleIcon, ArrowTopRightOnSquareIcon,
-  BanknotesIcon, ArrowsRightLeftIcon, ArrowPathIcon,
+  BanknotesIcon, ArrowsRightLeftIcon, ArrowPathIcon, ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
@@ -120,6 +120,7 @@ export default function PositionDetail({
   }, [openOrdersForSymbol])
   const [priceLevelIdx, setPriceLevelIdx] = useState(-1)
 
+  const [posSettingsOpen, setPosSettingsOpen] = useState(false)
   const [maxAllocMode, setMaxAllocMode] = useState(selectedPos?.max_allocation_mode ?? 'dollar')
   const [maxAllocValue, setMaxAllocValue] = useState(
     selectedPos?.max_allocation_value != null
@@ -127,6 +128,7 @@ export default function PositionDetail({
       : '',
   )
   const [capNotice, setCapNotice] = useState(null)
+  const [activityPage, setActivityPage] = useState(0)
   const [sentimentMode, setSentimentMode] = useState(selectedPos?.sentiment_mode ?? 'none')
   const minFundsMode = managerSettings?.min_position_funds_mode ?? 'dollar'
   const minFundsDollar = minFundsMode === 'percent'
@@ -430,137 +432,6 @@ export default function PositionDetail({
       </div>
 
         </div>
-
-        {/* Allocation guardrails */}
-        <div className="card mt-4">
-          <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
-            <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Allocation Guardrails</h3>
-            <span className="text-xs text-slate-500">Maximum Allocation</span>
-          </div>
-          <div className="text-xs text-slate-500 mb-2">
-            Minimum Funds per Position:{' '}
-            <span className="text-slate-300 font-semibold">
-              {minFundsMode === 'percent'
-                ? `${Number(managerSettings?.min_position_funds_pct ?? 1).toFixed(2)}% (${fmtMoney(minFundsDollar)})`
-                : fmtMoney(minFundsDollar)}
-            </span>
-          </div>
-          <p className="text-xs text-slate-500 mb-3">
-            Cap how much this symbol can hold when the portfolio manager deploys or reallocates funds.
-          </p>
-          <div className="flex flex-wrap items-end gap-3">
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-slate-400">Mode</span>
-              <select
-                className="input text-sm py-1.5 w-44"
-                value={maxAllocMode}
-                onChange={e => setMaxAllocMode(e.target.value)}
-              >
-                <option value="dollar">Dollar amount</option>
-                <option value="percent">Percent of total funds</option>
-              </select>
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-slate-400">Maximum</span>
-              <div className="flex items-center gap-1">
-                {maxAllocMode === 'dollar'
-                  ? <span className="text-slate-400 text-sm">$</span>
-                  : null}
-                <input
-                  type="number"
-                  min={0}
-                  max={maxAllocMode === 'percent' ? 100 : undefined}
-                  step={maxAllocMode === 'percent' ? 0.1 : 10}
-                  className="input text-sm py-1.5 w-32"
-                  value={maxAllocValue}
-                  onChange={e => setMaxAllocValue(e.target.value)}
-                  placeholder={maxAllocMode === 'percent' ? 'e.g. 12.5' : 'e.g. 5000'}
-                />
-                {maxAllocMode === 'percent'
-                  ? <span className="text-slate-400 text-sm">%</span>
-                  : null}
-              </div>
-            </label>
-            <button
-              className="text-xs bg-sky-700 hover:bg-sky-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
-              onClick={handleSaveCap}
-              disabled={updatePosMut.isPending || bulkCapMut?.isPending || capValueInvalid}
-            >
-              {updatePosMut.isPending ? 'Saving…' : 'Save Cap'}
-            </button>
-            <button
-              className="text-xs bg-cyan-700 hover:bg-cyan-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
-              onClick={handleSaveCapToAll}
-              disabled={updatePosMut.isPending || bulkCapMut?.isPending || capValueInvalid || positionsCount <= 0}
-            >
-              {bulkCapMut?.isPending ? 'Applying…' : 'Save to All'}
-            </button>
-          </div>
-          {capNotice && (
-            <div
-              className={`mt-2 text-xs rounded-md border px-2.5 py-1.5 ${
-                capNotice.type === 'success'
-                  ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400'
-                  : 'bg-red-900/20 border-red-700/30 text-red-400'
-              }`}
-            >
-              {capNotice.text}
-            </div>
-          )}
-          <p className="text-[11px] text-slate-600 mt-2">
-            Set to 0 for no cap.
-          </p>
-        </div>
-
-        {/* Sentiment Strategy Mode */}
-        {isSimulated && (
-          <div className="card mt-4">
-            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
-              <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Sentiment Strategy Mode</h3>
-              {selectedPos?.sentiment_mode && selectedPos.sentiment_mode !== 'none' && (
-                <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold bg-violet-900/30 text-violet-300 border border-violet-700/40 uppercase tracking-wide">
-                  {selectedPos.sentiment_mode === 'market' ? 'Market Sentiment' : 'Symbol Sentiment'}
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-slate-500 mb-3">
-              Let the portfolio manager automatically switch strategy based on sentiment signals.
-              Requires the manager to be running with sentiment strategy switching enabled.
-            </p>
-            <div className="flex flex-wrap gap-2 mb-3">
-              {[
-                { value: 'none', label: 'Manual', desc: 'Strategy is set manually, no auto-switching' },
-                { value: 'market', label: 'Market Sentiment', desc: 'Strategy follows overall market sentiment (avg of all symbols)' },
-                { value: 'symbol', label: 'Symbol Sentiment', desc: `Strategy follows ${selectedSymbol}'s own sentiment score` },
-              ].map(opt => (
-                <label key={opt.value} className={`flex items-start gap-2 cursor-pointer rounded-lg border px-3 py-2 transition-colors ${sentimentMode === opt.value ? 'border-violet-600 bg-violet-900/20' : 'border-dark-600 bg-dark-800 hover:border-dark-500'}`}>
-                  <input
-                    type="radio"
-                    name={`sentiment_mode_${selectedSymbol}`}
-                    value={opt.value}
-                    checked={sentimentMode === opt.value}
-                    onChange={() => setSentimentMode(opt.value)}
-                    className="mt-0.5 accent-violet-500"
-                  />
-                  <span>
-                    <span className="text-xs font-medium text-slate-200">{opt.label}</span>
-                    <span className="block text-[11px] text-slate-500 mt-0.5">{opt.desc}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            <button
-              className="text-xs bg-violet-700 hover:bg-violet-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
-              onClick={() => updatePosMut.mutate({
-                symbol: selectedSymbol,
-                payload: { sentiment_mode: sentimentMode },
-              })}
-              disabled={updatePosMut.isPending || sentimentMode === (selectedPos?.sentiment_mode ?? 'none')}
-            >
-              {updatePosMut.isPending ? 'Saving…' : 'Save Mode'}
-            </button>
-          </div>
-        )}
 
         {/* Main content row: SymbolDetailPanel left, rest right */}
         <div className="flex flex-row gap-6 mt-6 min-h-0">
@@ -874,6 +745,154 @@ export default function PositionDetail({
     </div>
   </div>
   </div>
+      {/* Position Settings (collapsible) */}
+      <div className="card mt-6">
+        <div
+          role="button"
+          tabIndex={0}
+          className="flex items-center justify-between cursor-pointer select-none"
+          onClick={() => setPosSettingsOpen(o => !o)}
+          onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && setPosSettingsOpen(o => !o)}
+        >
+          <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Position Settings</h3>
+          <div className="flex items-center gap-2">
+            {!posSettingsOpen && isSimulated && selectedPos?.sentiment_mode && selectedPos.sentiment_mode !== 'none' && (
+              <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold bg-violet-900/30 text-violet-300 border border-violet-700/40 uppercase tracking-wide">
+                {selectedPos.sentiment_mode === 'market' ? 'Market Sentiment' : 'Symbol Sentiment'}
+              </span>
+            )}
+            <ChevronDownIcon className={`h-4 w-4 text-slate-400 transition-transform ${posSettingsOpen ? 'rotate-180' : ''}`} />
+          </div>
+        </div>
+
+        {posSettingsOpen && (
+          <div className="mt-4 space-y-4">
+            {/* Allocation Guardrails */}
+            <div>
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                <h4 className="font-semibold text-slate-300 text-xs uppercase tracking-wider">Allocation Guardrails</h4>
+                <span className="text-xs text-slate-500">Maximum Allocation</span>
+              </div>
+              <div className="text-xs text-slate-500 mb-2">
+                Minimum Funds per Position:{' '}
+                <span className="text-slate-300 font-semibold">
+                  {minFundsMode === 'percent'
+                    ? `${Number(managerSettings?.min_position_funds_pct ?? 1).toFixed(2)}% (${fmtMoney(minFundsDollar)})`
+                    : fmtMoney(minFundsDollar)}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mb-3">
+                Cap how much this symbol can hold when the portfolio manager deploys or reallocates funds.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-slate-400">Mode</span>
+                  <select
+                    className="input text-sm py-1.5 w-44"
+                    value={maxAllocMode}
+                    onChange={e => setMaxAllocMode(e.target.value)}
+                  >
+                    <option value="dollar">Dollar amount</option>
+                    <option value="percent">Percent of total funds</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs text-slate-400">Maximum</span>
+                  <div className="flex items-center gap-1">
+                    {maxAllocMode === 'dollar' ? <span className="text-slate-400 text-sm">$</span> : null}
+                    <input
+                      type="number"
+                      min={0}
+                      max={maxAllocMode === 'percent' ? 100 : undefined}
+                      step={maxAllocMode === 'percent' ? 0.1 : 10}
+                      className="input text-sm py-1.5 w-32"
+                      value={maxAllocValue}
+                      onChange={e => setMaxAllocValue(e.target.value)}
+                      placeholder={maxAllocMode === 'percent' ? 'e.g. 12.5' : 'e.g. 5000'}
+                    />
+                    {maxAllocMode === 'percent' ? <span className="text-slate-400 text-sm">%</span> : null}
+                  </div>
+                </label>
+                <button
+                  className="text-xs bg-sky-700 hover:bg-sky-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
+                  onClick={handleSaveCap}
+                  disabled={updatePosMut.isPending || bulkCapMut?.isPending || capValueInvalid}
+                >
+                  {updatePosMut.isPending ? 'Saving…' : 'Save Cap'}
+                </button>
+                <button
+                  className="text-xs bg-cyan-700 hover:bg-cyan-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
+                  onClick={handleSaveCapToAll}
+                  disabled={updatePosMut.isPending || bulkCapMut?.isPending || capValueInvalid || positionsCount <= 0}
+                >
+                  {bulkCapMut?.isPending ? 'Applying…' : 'Save to All'}
+                </button>
+              </div>
+              {capNotice && (
+                <div className={`mt-2 text-xs rounded-md border px-2.5 py-1.5 ${
+                  capNotice.type === 'success'
+                    ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400'
+                    : 'bg-red-900/20 border-red-700/30 text-red-400'
+                }`}>
+                  {capNotice.text}
+                </div>
+              )}
+              <p className="text-[11px] text-slate-600 mt-2">Set to 0 for no cap.</p>
+            </div>
+
+            {/* Sentiment Strategy Mode */}
+            {isSimulated && (
+              <div className="border-t border-dark-700 pt-4">
+                <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                  <h4 className="font-semibold text-slate-300 text-xs uppercase tracking-wider">Sentiment Strategy Mode</h4>
+                  {selectedPos?.sentiment_mode && selectedPos.sentiment_mode !== 'none' && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold bg-violet-900/30 text-violet-300 border border-violet-700/40 uppercase tracking-wide">
+                      {selectedPos.sentiment_mode === 'market' ? 'Market Sentiment' : 'Symbol Sentiment'}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mb-3">
+                  Let the portfolio manager automatically switch strategy based on sentiment signals.
+                  Requires the manager to be running with sentiment strategy switching enabled.
+                </p>
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {[
+                    { value: 'none', label: 'Manual', desc: 'Strategy is set manually, no auto-switching' },
+                    { value: 'market', label: 'Market Sentiment', desc: 'Strategy follows overall market sentiment (avg of all symbols)' },
+                    { value: 'symbol', label: 'Symbol Sentiment', desc: `Strategy follows ${selectedSymbol}'s own sentiment score` },
+                  ].map(opt => (
+                    <label key={opt.value} className={`flex items-start gap-2 cursor-pointer rounded-lg border px-3 py-2 transition-colors ${sentimentMode === opt.value ? 'border-violet-600 bg-violet-900/20' : 'border-dark-600 bg-dark-800 hover:border-dark-500'}`}>
+                      <input
+                        type="radio"
+                        name={`sentiment_mode_${selectedSymbol}`}
+                        value={opt.value}
+                        checked={sentimentMode === opt.value}
+                        onChange={() => setSentimentMode(opt.value)}
+                        className="mt-0.5 accent-violet-500"
+                      />
+                      <span>
+                        <span className="text-xs font-medium text-slate-200">{opt.label}</span>
+                        <span className="block text-[11px] text-slate-500 mt-0.5">{opt.desc}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <button
+                  className="text-xs bg-violet-700 hover:bg-violet-600 text-white rounded-lg px-3 py-2 font-semibold transition-colors disabled:opacity-50"
+                  onClick={() => updatePosMut.mutate({
+                    symbol: selectedSymbol,
+                    payload: { sentiment_mode: sentimentMode },
+                  })}
+                  disabled={updatePosMut.isPending || sentimentMode === (selectedPos?.sentiment_mode ?? 'none')}
+                >
+                  {updatePosMut.isPending ? 'Saving…' : 'Save Mode'}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* Bottom section: Activity Log */}
       <div className="card mt-6">
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">
@@ -937,6 +956,7 @@ export default function PositionDetail({
             </div>
           </div>
         )}
+        <div className="overflow-y-auto max-h-80">
         {(() => {
           // Merge trades + fund events + allocation events into a single timeline, filtered by selectedSymbol
           const tradeEntries = trades
@@ -994,9 +1014,14 @@ export default function PositionDetail({
           if (all.length === 0) return (
             <div className="text-center text-slate-600 text-sm py-8">No activity recorded yet.</div>
           )
+          const ACT_PAGE_SIZE = 25
+          const totalPages = Math.max(1, Math.ceil(all.length / ACT_PAGE_SIZE))
+          const safePage = Math.min(activityPage, totalPages - 1)
+          const pageItems = all.slice(safePage * ACT_PAGE_SIZE, (safePage + 1) * ACT_PAGE_SIZE)
           return (
+            <>
             <div className="space-y-1">
-              {all.map(entry => (
+              {pageItems.map(entry => (
                 <div key={entry.id} className="flex items-start gap-3 py-2 border-b border-dark-700 last:border-0">
                   <div className="mt-0.5 flex-shrink-0">
                     {entry.kind === 'trade' ? (
@@ -1026,8 +1051,25 @@ export default function PositionDetail({
                 </div>
               ))}
             </div>
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-1 pt-3 border-t border-dark-700 mt-2">
+                <button
+                  onClick={() => setActivityPage(p => Math.max(0, p - 1))}
+                  disabled={safePage === 0}
+                  className="text-xs px-2.5 py-1 rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >← Prev</button>
+                <span className="text-xs text-slate-500">{safePage + 1} / {totalPages} · {all.length} total</span>
+                <button
+                  onClick={() => setActivityPage(p => Math.min(totalPages - 1, p + 1))}
+                  disabled={safePage === totalPages - 1}
+                  className="text-xs px-2.5 py-1 rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >Next →</button>
+              </div>
+            )}
+            </>
           )
         })()}
+        </div>
       </div>
     </div>
   )

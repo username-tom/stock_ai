@@ -680,6 +680,48 @@ async def _get_ib_history(symbol: str, period: str) -> dict[str, Any]:
 
     for row in result["data"]:
         row.pop("_dt", None)
+
+    # Inject a synthetic "current bar" when IB only returns completed bars and
+    # the most recent bar boundary has already started but isn't in the data yet.
+    # This is most visible on 5d/2w charts (15-min bars) where the chart would
+    # otherwise appear 15 min stale.
+    if intraday and result["data"]:
+        bar_secs = _bar_size_to_seconds(bar_size)
+        market_state = _market_state_now()
+        # For RTH-only requests only inject during the regular session;
+        # for extended-hours requests inject for any active session.
+        should_inject = (
+            bar_secs is not None
+            and bar_secs < 86_400
+            and (
+                (use_rth and market_state == "REGULAR")
+                or (not use_rth and market_state in ("REGULAR", "PRE", "POST"))
+            )
+        )
+        if should_inject:
+            now_et = datetime.now(tz=_ET)
+            ts_now = int(now_et.timestamp())
+            bar_boundary_ts = (ts_now // int(bar_secs)) * int(bar_secs)
+            current_bar_dt = datetime.fromtimestamp(bar_boundary_ts, tz=_ET)
+            current_bar_label = _format_dt_for_period(current_bar_dt, True, period)
+            if current_bar_label != result["data"][-1]["date"]:
+                try:
+                    quote = await _get_ib_quote_deduped(symbol)
+                    last_price = quote.get("last_price")
+                    if last_price is not None:
+                        prev_bar_close = float(result["data"][-1]["close"])
+                        lp = float(last_price)
+                        result["data"].append({
+                            "date": current_bar_label,
+                            "open": round(prev_bar_close, 4),
+                            "high": round(max(lp, prev_bar_close), 4),
+                            "low": round(min(lp, prev_bar_close), 4),
+                            "close": round(lp, 4),
+                            "volume": None,
+                        })
+                except Exception as exc:
+                    logger.debug("IB current bar injection failed for %s: %s", symbol, exc)
+
     result["ib_telemetry"] = _ib_hist_telemetry(bar_size, "TRADES", use_rth)
     return result
 

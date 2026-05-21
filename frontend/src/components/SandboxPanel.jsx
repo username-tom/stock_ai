@@ -337,6 +337,7 @@ export default function SandboxPanel() {
       label: `Open ${o.side} ${o.remaining ?? o.quantity} / ${o.quantity} ${o.symbol}`,
       sub: `Order #${o.ib_order_id} · ${o.status ?? 'Submitted'} · ${getIbOrderExpiryLabel(o)}`,
       time: o.created_at ? new Date(o.created_at).toLocaleTimeString() : now,
+      ts: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
       syncFromIb: true,
     }))
 
@@ -349,6 +350,7 @@ export default function SandboxPanel() {
         label: `Position ${p.symbol} ${Number(p.quantity).toFixed(2)} @ $${Number(p.avg_cost || 0).toFixed(2)}`,
         sub: `Market Value: $${Number(p.market_value || 0).toFixed(2)}`,
         time: now,
+        ts: Date.now(),
       }))
 
     const entries = [...orderEntries, ...positionEntries]
@@ -356,7 +358,7 @@ export default function SandboxPanel() {
     setActivities(prev => {
       const keep = prev.filter(a => !((a.profile ?? 'simulated') === activeProfile && a.syncFromIb))
       const synced = entries.map(e => ({ ...e, syncFromIb: true }))
-      return [...synced, ...keep].slice(0, 100)
+      return [...synced, ...keep].slice(0, 500)
     })
   }, [ibConnected, ibMode, ibOrdersData, ibPositionsData])
 
@@ -382,8 +384,9 @@ export default function SandboxPanel() {
           }`,
           sub: t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined,
           time: t.created_at ? new Date(t.created_at).toLocaleTimeString() : '',
+          ts: t.created_at ? new Date(t.created_at).getTime() : Date.now(),
         }))
-      return [...newEntries, ...prev].slice(0, 100)
+      return [...newEntries, ...prev].slice(0, 500)
     })
   }, [allTrades, ibConnected])
 
@@ -450,7 +453,8 @@ export default function SandboxPanel() {
           label: `Order submitted ${d.side} ${d.quantity} ${d.symbol}`,
           sub: `IB #${d.ib_order_id ?? 'n/a'} · ${d.status ?? 'Submitted'}${d.limit_price != null ? ` · LMT $${Number(d.limit_price).toFixed(2)}` : ''}`,
           time: new Date().toLocaleTimeString(),
-        }, ...prev].slice(0, 100))
+          ts: Date.now(),
+        }, ...prev].slice(0, 500))
       }
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
@@ -468,6 +472,8 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-trades'] })
+      setActivities(prev => prev.filter(a => (a.profile ?? 'simulated') !== 'simulated'))
+      prevTradeIdRef.current = null
       setSelectedSymbol(null); setResetConfirm(false)
     },
   })
@@ -477,6 +483,8 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-trades'] })
+      setActivities(prev => prev.filter(a => (a.profile ?? 'simulated') !== 'simulated'))
+      prevTradeIdRef.current = null
       setSelectedSymbol(null); setResetSoftConfirm(false)
     },
   })
@@ -492,7 +500,8 @@ export default function SandboxPanel() {
         label: `${symbol} engine ${nowEnabled ? 'started' : 'stopped'}`,
         sub: pos?.strategy_name?.split(':')[0],
         time: new Date().toLocaleTimeString(),
-      }, ...prev].slice(0, 100))
+        ts: Date.now(),
+      }, ...prev].slice(0, 500))
     },
   })
   const toggleAllEnginesMut = useMutation({
@@ -505,7 +514,8 @@ export default function SandboxPanel() {
         profile: activeProfileRef.current,
         label: 'All sandbox engines toggled',
         time: new Date().toLocaleTimeString(),
-      }, ...prev].slice(0, 100))
+        ts: Date.now(),
+      }, ...prev].slice(0, 500))
     },
   })
   const toggleManagerMut = useMutation({
@@ -518,7 +528,8 @@ export default function SandboxPanel() {
         profile: activeProfileRef.current,
         label: `Portfolio Manager ${enabled ? 'enabled' : 'disabled'}`,
         time: new Date().toLocaleTimeString(),
-      }, ...prev].slice(0, 100))
+        ts: Date.now(),
+      }, ...prev].slice(0, 500))
     },
   })
   const setIbModeMut = useMutation({
@@ -577,7 +588,7 @@ export default function SandboxPanel() {
     mutationFn: () => resetIBPaperPortfolio(),
     onSuccess: (data) => {
       setPaperResetConfirm(false)
-      setActivities([])
+      setActivities(prev => prev.filter(a => (a.profile ?? 'simulated') !== 'paper'))
       prevTradeIdRef.current = null
       setImportMsg({
         type: 'success',
@@ -605,7 +616,8 @@ export default function SandboxPanel() {
         label: `Strategy updated for all ${data.updated} position${data.updated !== 1 ? 's' : ''}`,
         sub: data.strategy_name ?? 'none',
         time: new Date().toLocaleTimeString(),
-      }, ...prev].slice(0, 100))
+        ts: Date.now(),
+      }, ...prev].slice(0, 500))
     },
   })
   const bulkCapMut = useMutation({
@@ -619,7 +631,8 @@ export default function SandboxPanel() {
         label: `Allocation cap updated for all ${data.updated} position${data.updated !== 1 ? 's' : ''}`,
         sub: `${data.max_allocation_mode} ${data.max_allocation_mode === 'percent' ? `${Number(data.max_allocation_value).toFixed(2)}%` : `$${Number(data.max_allocation_value).toFixed(2)}`}`,
         time: new Date().toLocaleTimeString(),
-      }, ...prev].slice(0, 100))
+        ts: Date.now(),
+      }, ...prev].slice(0, 500))
     },
   })
 
@@ -687,6 +700,27 @@ export default function SandboxPanel() {
     return { added: true, downgraded: true, replaced: oldest }
   }
   async function handleExport() {
+    // In IB mode (paper or live): export the in-memory activity log as CSV
+    if (ibConnected) {
+      const mode = ibMode ?? 'paper'
+      const rows = activities.filter(a => (a.profile ?? 'simulated') === activeProfile)
+      const escape = v => `"${String(v ?? '').replace(/"/g, '""')}"`
+      const header = 'Time,Type,Side,Label,Sub'
+      const body = rows.map(a =>
+        [escape(a.time), escape(a.type), escape(a.side ?? ''), escape(a.label), escape(a.sub ?? '')].join(',')
+      ).join('\n')
+      const csv = header + '\n' + body
+      const blob = new Blob([csv], { type: 'text/csv' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `ib_${mode}_activity_${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+      return
+    }
+
+    // Simulated mode: export full sandbox JSON snapshot
     setExportLoading(true)
     try {
       const response = await exportSandbox()
@@ -886,8 +920,9 @@ export default function SandboxPanel() {
                 )
               })()}
               <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50"
-                onClick={handleExport} disabled={exportLoading} title="Export sandbox as JSON">
-                <ArrowDownTrayIcon className="h-3.5 w-3.5" />{exportLoading ? 'Exporting…' : 'Export'}
+                onClick={handleExport} disabled={exportLoading}
+                title={ibConnected ? `Export ${(ibMode ?? 'paper').toUpperCase()} activity log as CSV` : 'Export sandbox as JSON'}>
+                <ArrowDownTrayIcon className="h-3.5 w-3.5" />{exportLoading ? 'Exporting…' : ibConnected ? 'Export Activity' : 'Export'}
               </button>
               <button className="flex items-center gap-1.5 text-xs border border-dark-500 text-slate-400 hover:text-slate-200 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
                 onClick={() => importInputRef.current?.click()} title="Import sandbox from JSON">
@@ -997,7 +1032,7 @@ export default function SandboxPanel() {
           </div>
         )}
 
-        <div className="p-6 space-y-6">
+        <div className="p-6 pb-28 space-y-6">
           {activeMainTab === 'manager' ? (
             <PortfolioManagerPanel
               profile={activeProfile}

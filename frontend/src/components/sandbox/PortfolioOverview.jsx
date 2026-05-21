@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   Cell, Tooltip, ResponsiveContainer, Treemap,
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
@@ -76,6 +77,7 @@ export default function PortfolioOverview({
     enabled: isSimulated,
   })
   const fundEvents = isSimulated ? (fundEventsData?.events ?? []) : []
+  const [activityPage, setActivityPage] = useState(0)
   const netDepositedFromEvents = fundEvents.reduce((sum, event) => {
     if (event.event_type === 'deposit') return sum + (event.amount ?? 0)
     if (event.event_type === 'withdrawal') return sum - (event.amount ?? 0)
@@ -639,8 +641,8 @@ export default function PortfolioOverview({
                   <AreaChart data={analytics.cumulative_pnl} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
                     <defs>
                       <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                        <stop offset="5%" stopColor={latestCumulative >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
+                        <stop offset="95%" stopColor={latestCumulative >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0} />
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
@@ -654,7 +656,7 @@ export default function PortfolioOverview({
                       labelStyle={{ color: '#94a3b8' }}
                       formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Cumulative P&L']}
                     />
-                    <Area type="monotone" dataKey="value" stroke="#10b981" strokeWidth={2} fill="url(#pnlGrad)" dot={false} activeDot={{ r: 4, fill: '#10b981' }} />
+                    <Area type="monotone" dataKey="value" stroke={latestCumulative >= 0 ? '#10b981' : '#ef4444'} strokeWidth={2} fill="url(#pnlGrad)" dot={false} activeDot={{ r: 4, fill: latestCumulative >= 0 ? '#10b981' : '#ef4444' }} />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
@@ -858,10 +860,15 @@ export default function PortfolioOverview({
           if (all.length === 0) return (
             <div className="text-center text-slate-600 text-sm py-8">No activity yet</div>
           )
+          const ACT_PAGE_SIZE = 25
+          const totalPages = Math.max(1, Math.ceil(all.length / ACT_PAGE_SIZE))
+          const safePage = Math.min(activityPage, totalPages - 1)
+          const pageItems = all.slice(safePage * ACT_PAGE_SIZE, (safePage + 1) * ACT_PAGE_SIZE)
           return (
-            <div className="overflow-x-auto overflow-y-auto max-h-96 pr-1">
+            <>
+            <div className="overflow-x-auto pr-1">
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-dark-800">
                   <tr className="text-slate-500 border-b border-dark-600">
                     <th className="text-left pb-2 font-medium">Time</th>
                     <th className="text-left pb-2 font-medium">Type</th>
@@ -874,7 +881,7 @@ export default function PortfolioOverview({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-dark-700">
-                  {all.map(entry => {
+                  {pageItems.map(entry => {
                     const ts = entry.date ? new Date(entry.date) : null
                     // Use system/browser timezone (no timeZone option specified)
                     const timeStr = ts ? ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
@@ -930,6 +937,22 @@ export default function PortfolioOverview({
                 </tbody>
               </table>
             </div>
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-1 pt-3 border-t border-dark-600 mt-2">
+                <button
+                  onClick={() => setActivityPage(p => Math.max(0, p - 1))}
+                  disabled={safePage === 0}
+                  className="text-xs px-2.5 py-1 rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >← Prev</button>
+                <span className="text-xs text-slate-500">{safePage + 1} / {totalPages} · {all.length} total</span>
+                <button
+                  onClick={() => setActivityPage(p => Math.min(totalPages - 1, p + 1))}
+                  disabled={safePage === totalPages - 1}
+                  className="text-xs px-2.5 py-1 rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                >Next →</button>
+              </div>
+            )}
+            </>
           )
         })()}
       </div>
