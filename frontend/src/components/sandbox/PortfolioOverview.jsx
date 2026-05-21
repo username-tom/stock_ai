@@ -415,8 +415,7 @@ export default function PortfolioOverview({
                 <thead>
                   <tr className="text-slate-500 border-b border-dark-600">
                     <th className="text-left pb-2 font-medium">Symbol</th>
-                    <th className="text-left pb-2 font-medium">PM Sentiment</th>
-                    <th className="text-left pb-2 font-medium">AI Sentiment</th>
+                    <th className="text-left pb-2 font-medium">Sentiment</th>
                     <th className="text-left pb-2 font-medium">Strategy</th>
                     <th className="text-right pb-2 font-medium">Limits</th>
                     <th className="text-right pb-2 font-medium">Shares</th>
@@ -425,10 +424,8 @@ export default function PortfolioOverview({
                     <th className="text-right pb-2 font-medium">Mkt Value</th>
                     <th className="text-right pb-2 font-medium">Cash</th>
                     <th className="text-right pb-2 font-medium">Alloc</th>
-                    <th className="text-right pb-2 font-medium">Unrealised</th>
-                    <th className="text-right pb-2 font-medium">Unrealised %</th>
-                    <th className="text-right pb-2 font-medium">Realised</th>
-                    <th className="text-right pb-2 font-medium">Realised %</th>
+                    <th className="text-right pb-2 font-medium">Unrealised Gain</th>
+                    <th className="text-right pb-2 font-medium">Realised Gain</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-dark-700">
@@ -462,21 +459,22 @@ export default function PortfolioOverview({
                           {q?.company_name && <div className="text-slate-600 truncate max-w-[100px] pl-4">{q.company_name}</div>}
                         </td>
                         <td className="py-2 pl-2">
-                          {pmScores[pos.symbol] ? (
-                            <div title={`Score: ${pmScores[pos.symbol].score} — Updated: ${pmScores[pos.symbol].updated_at ? new Date(pmScores[pos.symbol].updated_at).toLocaleTimeString() : '?'}`}>
-                              <span className="text-xs font-semibold" style={{ color: classColor(pmScores[pos.symbol].classification) }}>
-                                {classLabel(pmScores[pos.symbol].classification)}
-                              </span>
-                              <div className="text-xs text-slate-500 mt-0.5">
-                                ({pmScores[pos.symbol].score > 0 ? '+' : ''}{pmScores[pos.symbol].score})
-                              </div>
+                          <div className="leading-tight" title={pmScores[pos.symbol] ? `Score: ${pmScores[pos.symbol].score} — Updated: ${pmScores[pos.symbol].updated_at ? new Date(pmScores[pos.symbol].updated_at).toLocaleTimeString() : '?'}` : undefined}>
+                            <div>
+                              <span className="text-[11px] text-slate-500">PM: </span>
+                              {pmScores[pos.symbol] ? (
+                                <span className="text-xs font-semibold" style={{ color: classColor(pmScores[pos.symbol].classification) }}>
+                                  {classLabel(pmScores[pos.symbol].classification)}
+                                </span>
+                              ) : (
+                                <span className="text-xs text-slate-600">—</span>
+                              )}
                             </div>
-                          ) : (
-                            <span className="text-xs text-slate-600">—</span>
-                          )}
-                        </td>
-                        <td className="py-2 pl-2">
-                          <span className={`text-xs font-semibold ${aiStyle}`}>{aiTag}</span>
+                            <div className="mt-0.5">
+                              <span className="text-[11px] text-slate-500">AI: </span>
+                              <span className={`text-xs font-semibold ${aiStyle}`}>{aiTag}</span>
+                            </div>
+                          </div>
                         </td>
                         <td className="py-2 pl-2">
                           {pos.strategy_name ? (
@@ -500,16 +498,12 @@ export default function PortfolioOverview({
                         <td className="text-right text-blue-300 font-mono">{cashRemaining > 0 ? fmtMoney(cashRemaining) : '—'}</td>
                         <td className="text-right text-slate-400">{pd ? `${pd.pct}%` : '—'}</td>
                         <td className={`text-right font-semibold font-mono ${unreal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {pos.shares > 0 ? fmt(unreal) : '—'}
-                        </td>
-                        <td className={`text-right font-semibold font-mono ${unrealPct == null ? 'text-slate-600' : unrealPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {unrealPct == null ? '—' : `${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%`}
+                          {pos.shares > 0
+                            ? `${fmt(unreal)} (${unrealPct == null ? '—' : `${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%`})`
+                            : '—'}
                         </td>
                         <td className={`text-right font-semibold font-mono ${pos.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {fmt(pos.realized_pnl)}
-                        </td>
-                        <td className={`text-right font-semibold font-mono ${realizedPct == null ? 'text-slate-600' : realizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {realizedPct == null ? '—' : `${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%`}
+                          {`${fmt(pos.realized_pnl)} (${realizedPct == null ? '—' : `${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%`})`}
                         </td>
                       </tr>
                     )
@@ -524,17 +518,14 @@ export default function PortfolioOverview({
                     <td />
                     <td />
                     <td />
-                    <td />
                     <td className="text-right pt-2 font-mono text-slate-200">{fmtMoney(totalEquity)}</td>
                     <td />
                     <td className="text-right pt-2">100%</td>
-                    <td className={`text-right pt-2 font-mono ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalUnrealizedPnl)}</td>
                     <td className={`text-right pt-2 font-mono ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {totalEquity > 0 ? `${totalUnrealizedPnl >= 0 ? '+' : ''}${((totalUnrealizedPnl / totalEquity) * 100).toFixed(2)}%` : '—'}
+                      {`${fmt(totalUnrealizedPnl)} (${totalEquity > 0 ? `${totalUnrealizedPnl >= 0 ? '+' : ''}${((totalUnrealizedPnl / totalEquity) * 100).toFixed(2)}%` : '—'})`}
                     </td>
-                    <td className={`text-right pt-2 font-mono ${totalRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalRealizedPnl)}</td>
                     <td className={`text-right pt-2 font-mono ${realizedPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {totalDeposited > 0 && realizedPnlPct != null ? `${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%` : '—'}
+                      {`${fmt(totalRealizedPnl)} (${totalDeposited > 0 && realizedPnlPct != null ? `${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%` : '—'})`}
                     </td>
                   </tr>
                 </tfoot>

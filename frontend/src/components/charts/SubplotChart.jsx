@@ -115,18 +115,17 @@ function OneDayTooltip({ active, payload, label, prevClose }) {
   )
 }
 
-function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 }) {
+function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, height = 240 }) {
   if (!data.length) return null
 
-  // Only show bars from the most recent calendar day present in the data.
-  // This ensures the 1D chart never mixes yesterday's full session with
-  // today's bars (even when today already has many bars), while still
-  // preserving today's pre-market and after-hours bars.
+  // Keep only the latest day(s) based on selected short period.
+  // 1D -> latest day, 2D -> latest two days.
   const _dayOf = (d) => d.date?.slice(0, 5) ?? ''
-  const _allDays = data.map(_dayOf).filter(Boolean)
-  const _latestDay = _allDays.length ? _allDays.reduce((a, b) => (a >= b ? a : b)) : ''
+  const _allDays = [...new Set(data.map(_dayOf).filter(Boolean))].sort()
+  const _daysToKeep = period === '2d' ? 2 : 1
+  const _keepDays = new Set(_allDays.slice(-_daysToKeep))
   const filtered = data.filter(d =>
-    _dayOf(d) === _latestDay &&
+    _keepDays.has(_dayOf(d)) &&
     d.open != null && d.high != null && d.low != null && d.close != null
   )
   if (!filtered.length) return null
@@ -590,7 +589,7 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
 
   // 1D and 2D get the Yahoo-style pre/regular/post chart
   if (period === '1d' || period === '2d') {
-    return <OneDayChart data={data} height={height} indicators={indicators} prevClose={prevClose} syncId={syncId} />
+    return <OneDayChart data={data} period={period} height={height} indicators={indicators} prevClose={prevClose} syncId={syncId} />
   }
 
   const enriched = enrichData(data)
