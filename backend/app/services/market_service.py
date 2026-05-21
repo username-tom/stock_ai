@@ -1041,9 +1041,15 @@ def _merge_ib_onto_yf(ib_result: dict, yf_result: dict) -> dict:
         merged.append(ib_by_date.get(d, bar))
         seen.add(d)
 
-    # Append any IB bars that YF didn't have at all (edge-case).
+    # Append any IB bars that YF didn't have at all (edge-case: IB emitted
+    # a bar that YF hasn't published yet for the current minute).
+    # Guard: only include bars whose calendar-day prefix is already present
+    # in the YF data.  This prevents a new day's pre-market bar from being
+    # tacked onto the previous session's candles when YF hasn't rolled over
+    # to the new day yet (visible as a rogue candle at the end of the chart).
+    seen_days = {d[:5] for d in seen}
     for bar in ib_bars:
-        if bar["date"] not in seen:
+        if bar["date"] not in seen and bar["date"][:5] in seen_days:
             merged.append(bar)
 
     result: dict = {"data": merged}

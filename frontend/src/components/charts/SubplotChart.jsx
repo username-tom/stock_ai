@@ -118,7 +118,20 @@ function OneDayTooltip({ active, payload, label, prevClose }) {
 function OneDayChart({ data, prevClose, syncId, indicators = {}, height = 240 }) {
   if (!data.length) return null
 
-  const enriched = enrichData(data)
+  // Only show bars from the most recent calendar day present in the data.
+  // This ensures the 1D chart never mixes yesterday's full session with
+  // today's bars (even when today already has many bars), while still
+  // preserving today's pre-market and after-hours bars.
+  const _dayOf = (d) => d.date?.slice(0, 5) ?? ''
+  const _allDays = data.map(_dayOf).filter(Boolean)
+  const _latestDay = _allDays.length ? _allDays.reduce((a, b) => (a >= b ? a : b)) : ''
+  const filtered = data.filter(d =>
+    _dayOf(d) === _latestDay &&
+    d.open != null && d.high != null && d.low != null && d.close != null
+  )
+  if (!filtered.length) return null
+
+  const enriched = enrichData(filtered)
 
   const lastClose = enriched[enriched.length - 1]?.close
   const isUp = prevClose == null || lastClose >= prevClose
