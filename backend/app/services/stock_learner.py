@@ -23,6 +23,10 @@ from app.services.market_service import get_history
 _CACHE_TTL_S = 2 * 60  # refresh every 2 minutes — intraday data changes quickly
 _MIN_HISTORY_ROWS = 40
 _LEARNER_PERIOD = "2d"  # 2 days of 1-minute bars for intraday day-trading context
+_TAG_SCORE_THRESHOLD = 0.18
+_STRONG_TAG_SCORE_THRESHOLD = 0.55
+_TAG_CONFIDENCE_THRESHOLD = 0.45
+_STRONG_TAG_CONFIDENCE_THRESHOLD = 0.65
 _cache: dict[str, tuple[dict[str, Any], float]] = {}
 # Store historical tags for each symbol
 _history_cache: dict[str, list[dict[str, Any]]] = {}
@@ -210,16 +214,19 @@ def _predict_knn(model: tuple[np.ndarray, np.ndarray], x: np.ndarray, k: int = 7
     return max(0.0, min(1.0, weighted_vote))
 
 
+def _directional_agreement(probs: list[float]) -> float:
+    long_votes = float(np.mean([1.0 if p >= 0.5 else 0.0 for p in probs]))
+    return max(long_votes, 1.0 - long_votes)
+
+
 def _tag_from_score(score: float, confidence: float) -> str:
-    if confidence < 0.55:
-        return "WATCH"
-    if score >= 0.55:
+    if score >= _STRONG_TAG_SCORE_THRESHOLD and confidence >= _STRONG_TAG_CONFIDENCE_THRESHOLD:
         return "STRONG LONG"
-    if score >= 0.18:
+    if score >= _TAG_SCORE_THRESHOLD and confidence >= _TAG_CONFIDENCE_THRESHOLD:
         return "LONG"
-    if score <= -0.55:
+    if score <= -_STRONG_TAG_SCORE_THRESHOLD and confidence >= _STRONG_TAG_CONFIDENCE_THRESHOLD:
         return "STRONG SHORT"
-    if score <= -0.18:
+    if score <= -_TAG_SCORE_THRESHOLD and confidence >= _TAG_CONFIDENCE_THRESHOLD:
         return "SHORT"
     return "WATCH"
 
@@ -297,7 +304,7 @@ async def classify_symbol(symbol: str, period: str = _LEARNER_PERIOD) -> dict[st
         ]
         avg_long_prob = float(np.mean(probs))
         score = (avg_long_prob - 0.5) * 2.0
-        agreement = float(np.mean([1.0 if p >= 0.5 else 0.0 for p in probs]))
+        agreement = _directional_agreement(probs)
         confidence = float(min(1.0, 0.6 * abs(score) + 0.4 * agreement))
         tag = _tag_from_score(score, confidence)
         direction = "long" if "LONG" in tag else "short" if "SHORT" in tag else "neutral"
@@ -309,7 +316,7 @@ async def classify_symbol(symbol: str, period: str = _LEARNER_PERIOD) -> dict[st
             "learner_direction": direction,
             "learner_confidence": round(confidence, 3),
             "learner_model": "logistic_regression+naive_bayes+knn",
-            "learner_reason": f"long_prob={avg_long_prob:.3f}",
+            "learner_reason": f"long_prob={avg_long_prob:.3f}; agreement={agreement:.3f}",
         }
     except Exception as exc:
         result = _make_watch_result(sym, f"model error: {exc}")
