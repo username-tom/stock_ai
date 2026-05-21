@@ -337,8 +337,44 @@ async def place_order(req: OrderRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/order/{ib_order_id}")
-async def cancel_order(ib_order_id: int):
-    return await ib_service.cancel_order(ib_order_id)
+async def cancel_order(ib_order_id: int, db: AsyncSession = Depends(get_db)):
+    # Snapshot open-order details before cancellation so we can persist
+    # a cancellation event in trade history for activity feeds.
+    prior_orders = await ib_service.get_open_orders() if ib_service.is_connected else []
+    order_info = next(
+        (o for o in prior_orders if int(o.get("ib_order_id") or 0) == int(ib_order_id)),
+        None,
+    )
+
+    result = await ib_service.cancel_order(ib_order_id)
+    if result.get("status") != "ok":
+        return result
+
+    try:
+        symbol = str((order_info or {}).get("symbol") or "UNKNOWN").upper()
+        side_raw = str((order_info or {}).get("side") or "BUY").upper()
+        side = OrderSide.BUY if side_raw != "SELL" else OrderSide.SELL
+        qty = float((order_info or {}).get("remaining") or (order_info or {}).get("quantity") or 0.0)
+        price = float((order_info or {}).get("limit_price") or 0.0)
+        mode = TradingMode.LIVE if settings.TRADING_MODE == "live" else TradingMode.PAPER
+
+        cancel_evt = Trade(
+            symbol=symbol,
+            side=side,
+            quantity=max(0.0, qty),
+            price=max(0.0, price),
+            status=OrderStatus.CANCELLED,
+            mode=mode,
+            ib_order_id=int(ib_order_id),
+            strategy_name="ib_cancel",
+            filled_at=None,
+        )
+        db.add(cancel_evt)
+        await db.commit()
+    except Exception as exc:
+        logger.warning("Failed to persist cancel event for order %s: %s", ib_order_id, exc)
+
+    return result
 
 
 # --------------------------------------------------------------------------- #

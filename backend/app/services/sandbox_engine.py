@@ -588,6 +588,7 @@ async def _execute_trade(
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
         from app.models.sandbox import SandboxAccount
+        from app.services.ib_service import ib_service
         result = await db.execute(
             sa_select(SandboxPosition).where(SandboxPosition.id == pos.id)
         )
@@ -674,6 +675,26 @@ async def _execute_trade(
                 db.add(trade)
                 await db.commit()
                 _log_trade_activity(pos.symbol, "BUY", quantity, price, reason)
+                if ib_service.is_connected:
+                    ib_result = await ib_service.place_order(
+                        symbol=position.symbol,
+                        side="BUY",
+                        quantity=quantity,
+                        order_type="MKT",
+                    )
+                    if ib_result.get("error"):
+                        logger.error(
+                            "Engine IB BUY failed for %s: %s",
+                            position.symbol,
+                            ib_result.get("error"),
+                        )
+                        _notify_manager_activity(
+                            f"Engine IB BUY failed for {position.symbol}: {ib_result.get('error')}"
+                        )
+                    else:
+                        _notify_manager_activity(
+                            f"Engine IB BUY submitted for {position.symbol} x{float(quantity):.4f}"
+                        )
             return
 
         elif side == "SELL":
@@ -712,6 +733,27 @@ async def _execute_trade(
         await db.commit()
         if side != "BUY":
             _log_trade_activity(pos.symbol, side, quantity, price, reason)
+        if ib_service.is_connected:
+            ib_result = await ib_service.place_order(
+                symbol=position.symbol,
+                side=side,
+                quantity=quantity,
+                order_type="MKT",
+            )
+            if ib_result.get("error"):
+                logger.error(
+                    "Engine IB %s failed for %s: %s",
+                    side,
+                    position.symbol,
+                    ib_result.get("error"),
+                )
+                _notify_manager_activity(
+                    f"Engine IB {side} failed for {position.symbol}: {ib_result.get('error')}"
+                )
+            else:
+                _notify_manager_activity(
+                    f"Engine IB {side} submitted for {position.symbol} x{float(quantity):.4f}"
+                )
 
 
 # ── pending-order settlement ─────────────────────────────────────────────── #

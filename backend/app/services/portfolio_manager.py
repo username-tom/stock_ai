@@ -103,6 +103,7 @@ _state: dict[str, Any] = {
 
 # Prevent repeated IB profit-take submissions every PM loop tick.
 _ib_profit_take_last_attempt: dict[str, datetime] = {}
+_ib_eod_liq_last_attempt: dict[str, datetime] = {}
 
 
 def get_manager_settings() -> dict:
@@ -535,6 +536,23 @@ async def _apply_ai_tag_strategies() -> None:
         for sym, info in insights.items()
     }
 
+    # In IB mode, use real broker positions to keep PM engine control aligned
+    # even if local sandbox shares temporarily diverge from broker holdings.
+    ib_pos_map: dict[str, dict[str, float]] = {}
+    try:
+        from app.services.ib_service import ib_service
+        if ib_service.is_connected:
+            ib_rows = await ib_service.get_positions()
+            for row in ib_rows:
+                sym = str(row.get("symbol") or "").upper()
+                if not sym:
+                    continue
+                qty = max(0.0, float(row.get("quantity") or 0.0))
+                avg = max(0.0, float(row.get("avg_cost") or 0.0))
+                ib_pos_map[sym] = {"qty": qty, "avg_cost": avg}
+    except Exception as exc:
+        logger.warning("AI tag IB position sync failed: %s", exc)
+
     # ── 3. Determine which symbols need current prices ─────────────────── #
     if action_mode == "direct":
         # Need prices for all LONG/STRONG LONG positions (buy + TP/SL) and
@@ -545,7 +563,8 @@ async def _apply_ai_tag_strategies() -> None:
             old_tag = old_tags.get(p.symbol, "WATCH").upper()
             is_long = new_tag in ("LONG", "STRONG LONG")
             was_long = old_tag in ("LONG", "STRONG LONG")
-            if is_long or (was_long and p.shares > 0):
+            ib_qty = float(ib_pos_map.get(p.symbol.upper(), {}).get("qty", 0.0))
+            if is_long or (was_long and (p.shares > 0 or ib_qty > 0)):
                 needs_price_set.add(p.symbol)
         needs_price = list(needs_price_set)
     else:
@@ -553,7 +572,7 @@ async def _apply_ai_tag_strategies() -> None:
         needs_price = [
             p.symbol for p in snap
             if engine_off_mode
-            and p.shares > 0
+            and (p.shares > 0 or float(ib_pos_map.get(p.symbol.upper(), {}).get("qty", 0.0)) > 0)
             and not p.strategy_enabled
             and (insights.get(p.symbol, {}).get("learner_tag") or "WATCH").upper() in ("LONG", "STRONG LONG")
             and (long_tp > 0 or long_sl > 0)
@@ -575,6 +594,7 @@ async def _apply_ai_tag_strategies() -> None:
     # ── 4. Apply all changes in a single session ──────────────────────── #
     strategy_changes: list[str] = []
     engine_changes: list[str] = []
+    ib_orders: list[dict[str, Any]] = []
     hold_modes: dict[str, bool] = {}
 
     async with AsyncSessionLocal() as db:
@@ -590,6 +610,10 @@ async def _apply_ai_tag_strategies() -> None:
             old_tag = old_tags.get(pos.symbol, "WATCH").upper()
             is_long = new_tag in ("LONG", "STRONG LONG")
             was_long = old_tag in ("LONG", "STRONG LONG")
+            ib_info = ib_pos_map.get(pos.symbol.upper(), {})
+            ib_qty = float(ib_info.get("qty", 0.0))
+            ib_avg_cost = float(ib_info.get("avg_cost", 0.0))
+            has_ib_long = ib_qty > 0
 
             # ── Strategy name override ────────────────────────────────────
             # direct mode: only apply for non-LONG tags (LONG positions managed by PM).
@@ -612,7 +636,7 @@ async def _apply_ai_tag_strategies() -> None:
 
                     cp = price_map.get(pos.symbol, 0.0)
 
-                    if pos.shares == 0 and pos.pending_shares == 0:
+                    if pos.shares == 0 and pos.pending_shares == 0 and not has_ib_long:
                         # Buy candidate: check market open and not in final sell window.
                         if cp >= 1.0 and pos.allocated_funds >= cp:
                             from app.services.sandbox_engine import (
@@ -643,33 +667,164 @@ async def _apply_ai_tag_strategies() -> None:
                                         reason=f"ai_direct_buy ({new_tag})",
                                         pnl=None,
                                     ))
+                                    ib_orders.append({
+                                        "symbol": pos.symbol,
+                                        "side": "BUY",
+                                        "quantity": float(qty),
+                                        "reason": f"ai_direct_buy ({new_tag})",
+                                    })
                                     engine_changes.append(
                                         f"{pos.symbol}: direct BUY {qty}@${cp:.2f} ({new_tag})"
                                     )
-                    elif pos.shares > 0:
+                    elif pos.shares > 0 or has_ib_long:
                         # Position already held — ensure pm_managed is set (survive restarts).
                         if not pos.pm_managed:
                             pos.pm_managed = True
 
-                        if cp > 0 and pos.avg_cost > 0:
+                        if pos.shares <= 0:
+                            # Real broker position exists even when local sandbox shares are flat.
+                            # Keep hold-mode active and engine off; TP/SL still evaluated from IB basis.
+                            hold_modes[pos.symbol] = True
+
+                        effective_qty = float(pos.shares) if pos.shares > 0 else float(ib_qty)
+                        effective_avg_cost = float(pos.avg_cost) if (pos.shares > 0 and pos.avg_cost > 0) else float(ib_avg_cost)
+
+                        if cp > 0 and effective_avg_cost > 0 and effective_qty > 0:
                             # TP/SL check for held position.
-                            hit_sl = long_sl > 0 and cp <= pos.avg_cost * (1.0 - long_sl / 100.0)
-                            hit_tp = long_tp > 0 and cp >= pos.avg_cost * (1.0 + long_tp / 100.0)
+                            hit_sl = long_sl > 0 and cp <= effective_avg_cost * (1.0 - long_sl / 100.0)
+                            hit_tp = long_tp > 0 and cp >= effective_avg_cost * (1.0 + long_tp / 100.0)
                             if hit_sl or hit_tp:
                                 reason = (
                                     f"ai_long_sl ({long_sl:.2f}% @ ${cp:.2f})"
                                     if hit_sl
                                     else f"ai_long_tp ({long_tp:.2f}% @ ${cp:.2f})"
                                 )
-                                qty = pos.shares
+                                qty = effective_qty
+                                pnl = round((cp - effective_avg_cost) * qty, 4)
+                                had_local_shares = pos.shares > 0
+                                if had_local_shares:
+                                    total = qty * cp
+                                    pos.shares = 0.0
+                                    pos.allocated_funds += total
+                                    pos.realized_pnl += pnl
+                                    pos.avg_cost = 0.0
+                                else:
+                                    total = 0.0
+                                pos.pm_managed = False  # PM releasing control
+                                hold_modes[pos.symbol] = False
+                                if had_local_shares:
+                                    acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+                                    acct = acct_res.scalar_one_or_none()
+                                    if acct:
+                                        acct.total_funds += pnl
+                                    db.add(_ST(
+                                        symbol=pos.symbol,
+                                        side="SELL",
+                                        quantity=qty,
+                                        price=cp,
+                                        total=round(total, 4),
+                                        strategy_name=pos.strategy_name,
+                                        reason=reason,
+                                        pnl=pnl,
+                                    ))
+                                ib_orders.append({
+                                    "symbol": pos.symbol,
+                                    "side": "SELL",
+                                    "quantity": float(qty),
+                                    "reason": reason,
+                                })
+                                engine_changes.append(
+                                    f"{pos.symbol}: {reason.split('(')[0].strip()} PnL ${pnl:+.2f}"
+                                )
+                            else:
+                                hold_modes[pos.symbol] = True  # still holding
+
+                elif was_long and (pos.shares > 0 or has_ib_long):
+                    # Tag changed from LONG/STRONG LONG → other: sell directly.
+                    cp = price_map.get(pos.symbol, 0.0)
+                    if cp > 0:
+                        qty = float(pos.shares) if pos.shares > 0 else float(ib_qty)
+                        cost_basis = float(pos.avg_cost) if (pos.shares > 0 and pos.avg_cost > 0) else float(ib_avg_cost)
+                        total = qty * cp
+                        pnl = round((cp - cost_basis) * qty, 4) if cost_basis > 0 else 0.0
+                        had_local_shares = pos.shares > 0
+                        if had_local_shares:
+                            pos.shares = 0.0
+                            pos.allocated_funds += total
+                            pos.realized_pnl += pnl
+                            pos.avg_cost = 0.0
+                        pos.pm_managed = False  # PM releasing control
+                        hold_modes[pos.symbol] = False
+                        if had_local_shares:
+                            acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+                            acct = acct_res.scalar_one_or_none()
+                            if acct:
+                                acct.total_funds += pnl
+                            db.add(_ST(
+                                symbol=pos.symbol,
+                                side="SELL",
+                                quantity=qty,
+                                price=cp,
+                                total=round(total, 4),
+                                strategy_name=pos.strategy_name,
+                                reason=f"ai_tag_change ({old_tag}→{new_tag})",
+                                pnl=pnl,
+                            ))
+                        ib_orders.append({
+                            "symbol": pos.symbol,
+                            "side": "SELL",
+                            "quantity": float(qty),
+                            "reason": f"ai_tag_change ({old_tag}->{new_tag})",
+                        })
+                        engine_changes.append(
+                            f"{pos.symbol}: sold on tag change ({old_tag}→{new_tag}) PnL ${pnl:+.2f}"
+                        )
+                    # Re-enable engine so the new tag's strategy can run.
+                    if not pos.strategy_enabled:
+                        pos.strategy_enabled = True
+                        engine_changes.append(f"{pos.symbol}: engine re-enabled ({new_tag})")
+
+            # ── Strategy override mode: long-hold engine control ───────────
+            elif engine_off_mode:
+                has_open = pos.shares > 0 or pos.pending_shares > 0 or has_ib_long
+
+                if is_long and has_open and pos.strategy_enabled:
+                    pos.strategy_enabled = False
+                    pos.pm_managed = True   # PM holds; skip day-start re-enable
+                    hold_modes[pos.symbol] = True
+                    engine_changes.append(f"{pos.symbol}: engine off (long hold, {new_tag})")
+
+                elif is_long and (pos.shares > 0 or has_ib_long) and not pos.strategy_enabled:
+                    # Ensure pm_managed survives a backend restart.
+                    if not pos.pm_managed:
+                        pos.pm_managed = True
+                    cp = price_map.get(pos.symbol, 0.0)
+                    effective_qty = float(pos.shares) if pos.shares > 0 else float(ib_qty)
+                    effective_avg_cost = float(pos.avg_cost) if (pos.shares > 0 and pos.avg_cost > 0) else float(ib_avg_cost)
+                    if cp > 0 and effective_avg_cost > 0 and effective_qty > 0:
+                        hit_sl = long_sl > 0 and cp <= effective_avg_cost * (1.0 - long_sl / 100.0)
+                        hit_tp = long_tp > 0 and cp >= effective_avg_cost * (1.0 + long_tp / 100.0)
+                        if hit_sl or hit_tp:
+                            reason = (
+                                f"ai_long_sl ({long_sl:.2f}% @ ${cp:.2f})"
+                                if hit_sl
+                                else f"ai_long_tp ({long_tp:.2f}% @ ${cp:.2f})"
+                            )
+                            qty = effective_qty
+                            pnl = round((cp - effective_avg_cost) * qty, 4)
+                            had_local_shares = pos.shares > 0
+                            if had_local_shares:
                                 total = qty * cp
-                                pnl = round((cp - pos.avg_cost) * qty, 4)
                                 pos.shares = 0.0
                                 pos.allocated_funds += total
                                 pos.realized_pnl += pnl
                                 pos.avg_cost = 0.0
-                                pos.pm_managed = False  # PM releasing control
-                                hold_modes[pos.symbol] = False
+                            else:
+                                total = 0.0
+                            pos.strategy_enabled = True
+                            pos.pm_managed = False  # PM releasing control
+                            hold_modes[pos.symbol] = False
+                            if had_local_shares:
                                 acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
                                 acct = acct_res.scalar_one_or_none()
                                 if acct:
@@ -684,95 +839,12 @@ async def _apply_ai_tag_strategies() -> None:
                                     reason=reason,
                                     pnl=pnl,
                                 ))
-                                engine_changes.append(
-                                    f"{pos.symbol}: {reason.split('(')[0].strip()} PnL ${pnl:+.2f}"
-                                )
-                            else:
-                                hold_modes[pos.symbol] = True  # still holding
-
-                elif was_long and pos.shares > 0:
-                    # Tag changed from LONG/STRONG LONG → other: sell directly.
-                    cp = price_map.get(pos.symbol, 0.0)
-                    if cp > 0:
-                        qty = pos.shares
-                        total = qty * cp
-                        pnl = round((cp - pos.avg_cost) * qty, 4)
-                        pos.shares = 0.0
-                        pos.allocated_funds += total
-                        pos.realized_pnl += pnl
-                        pos.avg_cost = 0.0
-                        pos.pm_managed = False  # PM releasing control
-                        hold_modes[pos.symbol] = False
-                        acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
-                        acct = acct_res.scalar_one_or_none()
-                        if acct:
-                            acct.total_funds += pnl
-                        db.add(_ST(
-                            symbol=pos.symbol,
-                            side="SELL",
-                            quantity=qty,
-                            price=cp,
-                            total=round(total, 4),
-                            strategy_name=pos.strategy_name,
-                            reason=f"ai_tag_change ({old_tag}→{new_tag})",
-                            pnl=pnl,
-                        ))
-                        engine_changes.append(
-                            f"{pos.symbol}: sold on tag change ({old_tag}→{new_tag}) PnL ${pnl:+.2f}"
-                        )
-                    # Re-enable engine so the new tag's strategy can run.
-                    if not pos.strategy_enabled:
-                        pos.strategy_enabled = True
-                        engine_changes.append(f"{pos.symbol}: engine re-enabled ({new_tag})")
-
-            # ── Strategy override mode: long-hold engine control ───────────
-            elif engine_off_mode:
-                has_open = pos.shares > 0 or pos.pending_shares > 0
-
-                if is_long and has_open and pos.strategy_enabled:
-                    pos.strategy_enabled = False
-                    pos.pm_managed = True   # PM holds; skip day-start re-enable
-                    hold_modes[pos.symbol] = True
-                    engine_changes.append(f"{pos.symbol}: engine off (long hold, {new_tag})")
-
-                elif is_long and pos.shares > 0 and not pos.strategy_enabled:
-                    # Ensure pm_managed survives a backend restart.
-                    if not pos.pm_managed:
-                        pos.pm_managed = True
-                    cp = price_map.get(pos.symbol, 0.0)
-                    if cp > 0 and pos.avg_cost > 0:
-                        hit_sl = long_sl > 0 and cp <= pos.avg_cost * (1.0 - long_sl / 100.0)
-                        hit_tp = long_tp > 0 and cp >= pos.avg_cost * (1.0 + long_tp / 100.0)
-                        if hit_sl or hit_tp:
-                            reason = (
-                                f"ai_long_sl ({long_sl:.2f}% @ ${cp:.2f})"
-                                if hit_sl
-                                else f"ai_long_tp ({long_tp:.2f}% @ ${cp:.2f})"
-                            )
-                            qty = pos.shares
-                            total = qty * cp
-                            pnl = round((cp - pos.avg_cost) * qty, 4)
-                            pos.shares = 0.0
-                            pos.allocated_funds += total
-                            pos.realized_pnl += pnl
-                            pos.avg_cost = 0.0
-                            pos.strategy_enabled = True
-                            pos.pm_managed = False  # PM releasing control
-                            hold_modes[pos.symbol] = False
-                            acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
-                            acct = acct_res.scalar_one_or_none()
-                            if acct:
-                                acct.total_funds += pnl
-                            db.add(_ST(
-                                symbol=pos.symbol,
-                                side="SELL",
-                                quantity=qty,
-                                price=cp,
-                                total=round(total, 4),
-                                strategy_name=pos.strategy_name,
-                                reason=reason,
-                                pnl=pnl,
-                            ))
+                            ib_orders.append({
+                                "symbol": pos.symbol,
+                                "side": "SELL",
+                                "quantity": float(qty),
+                                "reason": reason,
+                            })
                             engine_changes.append(
                                 f"{pos.symbol}: {reason.split('(')[0].strip()} PnL ${pnl:+.2f}"
                             )
@@ -791,6 +863,26 @@ async def _apply_ai_tag_strategies() -> None:
                 _log_activity(f"AI tag strategy: {', '.join(strategy_changes)}")
             if engine_changes:
                 _log_activity(f"AI tag engine: {', '.join(engine_changes)}")
+
+    if ib_orders:
+        from app.services.ib_service import ib_service
+
+        if ib_service.is_connected:
+            for order in ib_orders:
+                result = await ib_service.place_order(
+                    symbol=order["symbol"],
+                    side=order["side"],
+                    quantity=float(order["quantity"]),
+                    order_type="MKT",
+                )
+                if result.get("error"):
+                    _log_activity(
+                        f"IB PM {order['side']} failed for {order['symbol']}: {result['error']}"
+                    )
+                else:
+                    _log_activity(
+                        f"IB PM {order['side']} submitted for {order['symbol']} x{float(order['quantity']):.4f}"
+                    )
 
     # Propagate hold_mode flags into the live state so the frontend can display them.
     for sym, info in _state["ai_tags"].items():
@@ -1190,6 +1282,203 @@ async def _attempt_ib_profit_take_for_unwatched_owned() -> None:
             )
 
 
+async def _attempt_ib_eod_liquidation() -> None:
+    """Best-effort IB EOD liquidation for non-overnight mode.
+
+    When hold_positions_overnight is disabled and we are inside the final sell
+    window, submit DAY market SELL orders for all owned long IB positions,
+    except symbols explicitly exempted by AI overnight-tag rules.
+    """
+    from app.services.ib_service import ib_service
+    from app.services.sandbox_engine import _is_in_eod_sell_window
+
+    if not ib_service.is_connected:
+        return
+
+    hold_overnight = bool(_settings.get("hold_positions_overnight", True))
+    if hold_overnight:
+        return
+
+    eod_mins = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+    if not _is_in_eod_sell_window(eod_mins):
+        return
+
+    ib_positions = await ib_service.get_positions()
+    owned = [p for p in ib_positions if float(p.get("quantity") or 0.0) > 0]
+    if not owned:
+        return
+
+    open_orders = await ib_service.get_open_orders()
+    active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
+    open_sell_symbols = {
+        str(o.get("symbol") or "").upper()
+        for o in open_orders
+        if str(o.get("side") or "").upper() == "SELL"
+        and float(o.get("remaining") or 0.0) > 0
+        and str(o.get("status") or "") in active_status
+    }
+
+    ai_allow_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
+    now = datetime.now(timezone.utc)
+    cooldown_s = 30
+
+    liquidated: list[str] = []
+    for row in owned:
+        symbol = str(row.get("symbol") or "").upper()
+        qty = float(row.get("quantity") or 0.0)
+        if not symbol or qty <= 0:
+            continue
+
+        # Optional per-symbol overnight exemption for LONG / STRONG LONG tags.
+        if ai_allow_overnight:
+            tag = (
+                _state.get("ai_tags", {}).get(symbol, {}).get("learner_tag") or ""
+            ).upper()
+            if tag in ("LONG", "STRONG LONG"):
+                continue
+
+        if symbol in open_sell_symbols:
+            continue
+
+        last_try = _ib_eod_liq_last_attempt.get(symbol)
+        if last_try and (now - last_try).total_seconds() < cooldown_s:
+            continue
+
+        result = await ib_service.place_order(
+            symbol=symbol,
+            side="SELL",
+            quantity=qty,
+            order_type="MKT",
+        )
+        _ib_eod_liq_last_attempt[symbol] = now
+
+        if result.get("error"):
+            _log_activity(
+                f"IB PM EOD liquidation failed for {symbol}: {result['error']}"
+            )
+        else:
+            liquidated.append(f"{symbol} x{qty:.4f}")
+
+    if liquidated:
+        _log_activity(
+            f"IB PM EOD liquidation submitted ({eod_mins}m window): {', '.join(liquidated)}"
+        )
+
+
+async def _cancel_ib_pending_orders_price_moved() -> None:
+    """Cancel open IB BUY limit orders when market price has moved below limit.
+
+    Mirrors sandbox pending-cancel behavior where a BUY is cancelled if current
+    price has already dropped below the intended pending fill price.
+    """
+    from app.services.ib_service import ib_service
+
+    if not ib_service.is_connected:
+        return
+
+    open_orders = await ib_service.get_open_orders()
+    active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
+
+    candidates: list[dict[str, Any]] = []
+    symbols: set[str] = set()
+    for o in open_orders:
+        side = str(o.get("side") or "").upper()
+        status = str(o.get("status") or "")
+        order_type = str(o.get("order_type") or "").upper()
+        remaining = float(o.get("remaining") or 0.0)
+        limit_price = float(o.get("limit_price") or 0.0)
+        symbol = str(o.get("symbol") or "").upper()
+        if (
+            side == "BUY"
+            and order_type == "LMT"
+            and status in active_status
+            and remaining > 0
+            and limit_price > 0
+            and symbol
+        ):
+            candidates.append(o)
+            symbols.add(symbol)
+
+    if not candidates:
+        return
+
+    price_map: dict[str, float] = {}
+    try:
+        from app.services.market_service import get_bulk_quotes
+        quotes = await get_bulk_quotes(list(symbols))
+        price_map = {
+            sym: float(q["last_price"])
+            for sym, q in quotes.items()
+            if q and q.get("last_price")
+        }
+    except Exception as exc:
+        logger.warning("PM IB pending-cancel price fetch failed: %s", exc)
+        return
+
+    cancelled: list[str] = []
+    cancel_events: list[dict[str, Any]] = []
+    for o in candidates:
+        symbol = str(o.get("symbol") or "").upper()
+        side_raw = str(o.get("side") or "BUY").upper()
+        side = "SELL" if side_raw == "SELL" else "BUY"
+        qty = float(o.get("remaining") or o.get("quantity") or 0.0)
+        limit_price = float(o.get("limit_price") or 0.0)
+        cp = float(price_map.get(symbol, 0.0))
+        if cp <= 0 or limit_price <= 0:
+            continue
+
+        # Price moved away from intended pending buy fill (same semantics as sandbox).
+        if cp >= limit_price:
+            continue
+
+        oid = int(o.get("ib_order_id") or 0)
+        if oid <= 0:
+            continue
+
+        result = await ib_service.cancel_order(oid)
+        if result.get("error"):
+            _log_activity(
+                f"IB PM pending BUY cancel failed {symbol} id={oid}: {result['error']}"
+            )
+        else:
+            cancelled.append(f"{symbol} id={oid} (${cp:.2f}<${limit_price:.2f})")
+            cancel_events.append({
+                "symbol": symbol,
+                "side": side,
+                "quantity": max(0.0, qty),
+                "price": max(0.0, limit_price),
+                "ib_order_id": oid,
+            })
+
+    if cancel_events:
+        try:
+            from app.config import settings
+            from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
+
+            mode = TradingMode.LIVE if settings.TRADING_MODE == "live" else TradingMode.PAPER
+            async with AsyncSessionLocal() as db:
+                for ev in cancel_events:
+                    db.add(Trade(
+                        symbol=ev["symbol"],
+                        side=OrderSide.SELL if ev["side"] == "SELL" else OrderSide.BUY,
+                        quantity=ev["quantity"],
+                        price=ev["price"],
+                        status=OrderStatus.CANCELLED,
+                        mode=mode,
+                        ib_order_id=ev["ib_order_id"],
+                        strategy_name="pm_ib_pending_cancel",
+                        filled_at=None,
+                    ))
+                await db.commit()
+        except Exception as exc:
+            logger.warning("PM IB pending-cancel event persistence failed: %s", exc)
+
+    if cancelled:
+        _log_activity(
+            f"IB PM cancelled pending BUY(s) price moved away: {', '.join(cancelled)}"
+        )
+
+
 async def _cancel_bearish_pending_orders() -> None:
     """Cancel unsettled pending BUY orders when any of the following is true:
 
@@ -1197,7 +1486,8 @@ async def _cancel_bearish_pending_orders() -> None:
     2. Current price has dropped below the pending order's fill price
        (already underwater before the order even settles).
     3. AI learner tag for the symbol is SHORT or STRONG SHORT.
-    4. We are in the EOD sell window and overnight holding is disabled.
+     4. We are in the EOD sell window and overnight holding is disabled,
+         unless AI tag is LONG or STRONG LONG.
 
     Cancelled funds are returned to the position's allocated_funds pool.
     """
@@ -1250,8 +1540,12 @@ async def _cancel_bearish_pending_orders() -> None:
                 _state.get("ai_tags", {}).get(pos.symbol, {}).get("learner_tag") or ""
             ).upper()
             ai_short = ai_tag in ("SHORT", "STRONG SHORT")
+            ai_long = ai_tag in ("LONG", "STRONG LONG")
 
-            if not bearish_sentiment and not price_dropped and not ai_short and not (in_eod_window and not pos.pm_managed):
+            # EOD policy: cancel all pending orders unless AI tag is LONG/STRONG LONG.
+            cancel_for_eod = in_eod_window and not ai_long
+
+            if not bearish_sentiment and not price_dropped and not ai_short and not cancel_for_eod:
                 continue
 
             # ── Build cancel reason ───────────────────────────────────────
@@ -1262,7 +1556,7 @@ async def _cancel_bearish_pending_orders() -> None:
                 reasons.append(f"price ${cp:.2f}<fill ${fill_price:.2f}")
             if ai_short:
                 reasons.append(f"ai_tag {ai_tag}")
-            if in_eod_window and not pos.pm_managed:
+            if cancel_for_eod:
                 reasons.append("eod_window")
             reason = "pm_cancel: " + ", ".join(reasons)
 
@@ -1297,6 +1591,19 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
     holding those through its own AI-tag logic (direct buy or long-hold mode)
     and will handle the exit itself via TP/SL or tag change.
     """
+    ib_owned_symbols: set[str] = set()
+    try:
+        from app.services.ib_service import ib_service
+        if ib_service.is_connected:
+            ib_rows = await ib_service.get_positions()
+            ib_owned_symbols = {
+                str(r.get("symbol") or "").upper()
+                for r in ib_rows
+                if float(r.get("quantity") or 0.0) > 0
+            }
+    except Exception as exc:
+        logger.warning("PM day-start IB position sync failed: %s", exc)
+
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
 
@@ -1310,6 +1617,11 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
         positions: list[SandboxPosition] = res.scalars().all()
         if not positions:
             return 0
+
+        if ib_owned_symbols:
+            positions = [p for p in positions if p.symbol.upper() not in ib_owned_symbols]
+            if not positions:
+                return 0
 
         for pos in positions:
             pos.strategy_enabled = True
@@ -1377,6 +1689,18 @@ async def run_portfolio_manager() -> None:
             await _cancel_bearish_pending_orders()
         except Exception as exc:
             logger.warning("PM pending cancel check error: %s", exc)
+
+        # Cancel open IB pending BUYs when price has moved away from limit.
+        try:
+            await _cancel_ib_pending_orders_price_moved()
+        except Exception as exc:
+            logger.warning("PM IB pending cancel check error: %s", exc)
+
+        # Enforce end-of-day exits for live IB holdings when overnight is disabled.
+        try:
+            await _attempt_ib_eod_liquidation()
+        except Exception as exc:
+            logger.warning("PM IB EOD liquidation error: %s", exc)
 
         # Refresh scores on interval
         if now - last_score >= _settings["indicator_interval_s"]:

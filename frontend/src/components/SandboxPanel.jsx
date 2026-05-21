@@ -383,15 +383,16 @@ export default function SandboxPanel() {
     const newest = activeTrades[0]
     if (newest.id === prevTradeIdRef.current) return
     prevTradeIdRef.current = newest.id
-    // add new trades that aren't yet in activities
+    // Rebuild trade entries for the active profile so status transitions
+    // (e.g. PENDING -> FILLED/CANCELLED) are reflected in-place.
     setActivities(prev => {
-      const existingIds = new Set(prev.filter(a => a.tradeId).map(a => a.tradeId))
-      const newEntries = activeTrades
-        .filter(t => !existingIds.has(t.id))
+      const tradeEntries = activeTrades
         .map(t => {
           const profile = ibConnected ? (t.mode ?? 'PAPER').toLowerCase() : activeProfile
+          const status = String(t.status ?? '').toUpperCase()
+          const isCancelled = status === 'CANCELLED'
           const sub = ibConnected && t.ib_order_id != null
-            ? `IB #${t.ib_order_id} · ${t.status ?? 'Submitted'}`
+            ? `IB #${t.ib_order_id} · ${status || 'Submitted'}`
             : (t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined)
           return {
             type: 'trade',
@@ -403,7 +404,8 @@ export default function SandboxPanel() {
             price: t.price ?? null,
             pnl: t.pnl ?? null,
             reason: t.reason ?? null,
-            label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}${
+            label: `${isCancelled ? 'CANCEL' : t.side} ${t.quantity} ${t.symbol}${
+              t.price != null ? ` @ $${Number(t.price).toFixed(2)}` : ''}${
               t.pnl != null ? ` · PnL: ${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : ''
             }`,
             sub,
@@ -411,7 +413,11 @@ export default function SandboxPanel() {
             ts: t.created_at ? new Date(t.created_at).getTime() : Date.now(),
           }
         })
-      return [...newEntries, ...prev].slice(0, 500)
+
+      const retained = prev.filter(a => !(a.type === 'trade' && (a.profile ?? 'simulated') === activeProfile))
+      return [...tradeEntries, ...retained]
+        .sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
+        .slice(0, 500)
     })
   }, [activeTrades, activeProfile, ibConnected])
 
