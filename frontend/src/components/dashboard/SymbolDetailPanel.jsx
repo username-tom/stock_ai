@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowUpIcon, ArrowDownIcon } from '@heroicons/react/24/solid'
 import {
@@ -7,6 +8,24 @@ import {
 } from '../../utils/sentiment'
 import { getQuote } from '../../api/client'
 import { isMarketHours } from '../../utils/marketHours'
+
+const QUOTE_CACHE_KEY = 'dashboard_quote_cache_v1'
+const QUOTE_CACHE_TTL_MS = 15 * 60_000
+
+function readCachedQuote(symbol) {
+  if (!symbol) return null
+  try {
+    const raw = localStorage.getItem(QUOTE_CACHE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    const entry = parsed?.[symbol]
+    if (!entry?.quote || !entry?.ts) return null
+    if (Date.now() - entry.ts > QUOTE_CACHE_TTL_MS) return null
+    return entry.quote
+  } catch {
+    return null
+  }
+}
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -193,9 +212,11 @@ function Skeleton() {
 // ─── main component ───────────────────────────────────────────────────────────
 
 export default function SymbolDetailPanel({ symbol, quoteData, isLoading, ownedShares = null, averagePrice = null }) {
+  const cachedQuote = useMemo(() => readCachedQuote(symbol), [symbol])
+
   // Fallback: if the selected symbol isn't in the watchlist quotesMap
   // (e.g. a preset list symbol), fetch it individually
-  const needsFetch = !isLoading && !quoteData && !!symbol
+  const needsFetch = !isLoading && !quoteData && !cachedQuote && !!symbol
   const { data: fetchedQuote, isLoading: fetchLoading } = useQuery({
     queryKey: ['quote', symbol],
     queryFn: () => getQuote(symbol),
@@ -204,8 +225,8 @@ export default function SymbolDetailPanel({ symbol, quoteData, isLoading, ownedS
     enabled: needsFetch,
   })
 
-  const q = quoteData ?? fetchedQuote ?? null
-  const loading = isLoading || (needsFetch && fetchLoading)
+  const q = quoteData ?? cachedQuote ?? fetchedQuote ?? null
+  const loading = !q && (isLoading || (needsFetch && fetchLoading))
   if (loading) return <div className="card h-full p-4"><Skeleton /></div>
 
   if (!q) {

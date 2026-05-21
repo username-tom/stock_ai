@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getBulkQuotes, getHistory } from '../api/client'
@@ -18,6 +18,132 @@ const TABS = [
   { key: 'news',     label: 'News' },
   { key: 'earnings', label: 'Earnings' },
 ]
+
+const QUOTE_CACHE_KEY = 'dashboard_quote_cache_v1'
+const QUOTE_CACHE_TTL_MS = 15 * 60_000
+const QUOTE_CACHE_MAX_SYMBOLS = 300
+const HISTORY_CACHE_KEY = 'dashboard_history_cache_v1'
+const HISTORY_CACHE_SHORT_TTL_MS = 10 * 60_000
+const HISTORY_CACHE_LONG_TTL_MS = 6 * 60 * 60_000
+const HISTORY_CACHE_MAX_ENTRIES = 200
+
+function readQuoteCache() {
+  try {
+    const raw = localStorage.getItem(QUOTE_CACHE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeQuoteCache(quotesMap) {
+  if (!quotesMap || typeof quotesMap !== 'object') return
+
+  const now = Date.now()
+  const merged = readQuoteCache()
+
+  for (const [symbol, quote] of Object.entries(quotesMap)) {
+    if (!symbol || !quote) continue
+    merged[symbol] = { ts: now, quote }
+  }
+
+  for (const [symbol, entry] of Object.entries(merged)) {
+    if (!entry?.ts || now - entry.ts > QUOTE_CACHE_TTL_MS) {
+      delete merged[symbol]
+    }
+  }
+
+  const entries = Object.entries(merged)
+  if (entries.length > QUOTE_CACHE_MAX_SYMBOLS) {
+    entries.sort((a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0))
+    const trimmed = Object.fromEntries(entries.slice(0, QUOTE_CACHE_MAX_SYMBOLS))
+    try { localStorage.setItem(QUOTE_CACHE_KEY, JSON.stringify(trimmed)) } catch {}
+    return
+  }
+
+  try { localStorage.setItem(QUOTE_CACHE_KEY, JSON.stringify(merged)) } catch {}
+}
+
+function getCachedQuotesForSymbols(symbols) {
+  if (!symbols?.length) return undefined
+
+  const now = Date.now()
+  const cache = readQuoteCache()
+  const out = {}
+
+  for (const symbol of symbols) {
+    const entry = cache?.[symbol]
+    if (entry?.quote && entry?.ts && (now - entry.ts) <= QUOTE_CACHE_TTL_MS) {
+      out[symbol] = entry.quote
+    }
+  }
+
+  return Object.keys(out).length ? out : undefined
+}
+
+function readHistoryCache() {
+  try {
+    const raw = localStorage.getItem(HISTORY_CACHE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function getHistoryCacheTTL(period) {
+  return ['1d', '2d', '5d', '2w'].includes(period)
+    ? HISTORY_CACHE_SHORT_TTL_MS
+    : HISTORY_CACHE_LONG_TTL_MS
+}
+
+function historyCacheKey(symbol, period) {
+  return `${symbol || ''}|${period || ''}`
+}
+
+function getCachedHistory(symbol, period) {
+  if (!symbol || !period) return undefined
+
+  const cache = readHistoryCache()
+  const key = historyCacheKey(symbol, period)
+  const entry = cache?.[key]
+  if (!entry?.data || !entry?.ts) return undefined
+
+  if (Date.now() - entry.ts > getHistoryCacheTTL(period)) {
+    return undefined
+  }
+
+  return entry.data
+}
+
+function writeHistoryCache(symbol, period, data) {
+  if (!symbol || !period || !data) return
+
+  const now = Date.now()
+  const cache = readHistoryCache()
+  cache[historyCacheKey(symbol, period)] = { ts: now, data }
+
+  for (const [key, entry] of Object.entries(cache)) {
+    const parts = key.split('|')
+    const entryPeriod = parts[1] || ''
+    if (!entry?.ts || now - entry.ts > getHistoryCacheTTL(entryPeriod)) {
+      delete cache[key]
+    }
+  }
+
+  const entries = Object.entries(cache)
+  if (entries.length > HISTORY_CACHE_MAX_ENTRIES) {
+    entries.sort((a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0))
+    const trimmed = Object.fromEntries(entries.slice(0, HISTORY_CACHE_MAX_ENTRIES))
+    try { localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(trimmed)) } catch {}
+    return
+  }
+
+  try { localStorage.setItem(HISTORY_CACHE_KEY, JSON.stringify(cache)) } catch {}
+}
 
 export default function Dashboard() {
   const appSettings = useAppSettings()
@@ -57,14 +183,21 @@ export default function Dashboard() {
   const [quotesMapForHook, setQuotesMapForHook] = useState(null)
   const marketOpen = useMarketOpen(quotesMapForHook)
 
+  const cachedQuotesMap = useMemo(() => getCachedQuotesForSymbols(watchlist), [watchlist])
+
   const { data: quotesMap, isLoading: quotesLoading } = useQuery({
     queryKey: ['bulk-quotes', watchlist],
     queryFn: () => getBulkQuotes(watchlist),
+    initialData: cachedQuotesMap,
     staleTime: 30_000,
     refetchInterval: marketOpen ? appSettings.quotes_refresh_ms : 5 * 60_000,
     refetchIntervalInBackground: true,
     enabled: watchlist.length > 0,
   })
+
+  useEffect(() => {
+    if (quotesMap) writeQuoteCache(quotesMap)
+  }, [quotesMap])
 
   // Feed quotesMap back into the hook so market_state signals are used
   useEffect(() => { setQuotesMapForHook(quotesMap ?? null) }, [quotesMap])
@@ -72,15 +205,23 @@ export default function Dashboard() {
   const shortPeriod = ['1d', '2d', '5d', '2w'].includes(chartPeriod)
   const histRefetchInterval = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms : 5 * 60_000) : 15 * 60_000
   const histStaleTime       = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms - 5_000 : 4 * 60_000) : 840_000
+  const cachedHistory = useMemo(() => getCachedHistory(chartSymbol, chartPeriod), [chartSymbol, chartPeriod])
 
   const { data: histData, isLoading: histLoading } = useQuery({
     queryKey: ['history', chartSymbol, chartPeriod],
     queryFn: () => getHistory(chartSymbol, chartPeriod),
+    initialData: cachedHistory,
     staleTime: histStaleTime,
     refetchInterval: histRefetchInterval,
     refetchIntervalInBackground: true,
     enabled: !!chartSymbol,
   })
+
+  useEffect(() => {
+    if (histData && chartSymbol && chartPeriod) {
+      writeHistoryCache(chartSymbol, chartPeriod, histData)
+    }
+  }, [histData, chartSymbol, chartPeriod])
 
   const chartPrevClose =
     quotesMap?.[chartSymbol]?.previous_close ??
