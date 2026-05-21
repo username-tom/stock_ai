@@ -92,10 +92,15 @@ class _IBApiApp(EWrapper, EClient):
         advancedOrderRejectJson: str = "",
     ) -> None:
         msg = f"[{errorCode}] {errorString}"
-        with self._lock:
-            self.request_errors.setdefault(int(reqId), []).append(msg)
-        if errorCode not in (2104, 2106, 2158):
+        # Codes >= 2000 are informational warnings from IB (not hard rejections).
+        # Only store genuine errors (< 2000) in request_errors so they can
+        # surface to callers.  Still log all non-noise codes for visibility.
+        _noise_codes = {2104, 2106, 2158}
+        if errorCode not in _noise_codes:
             logger.warning("IB error reqId=%s: %s", reqId, msg)
+        if errorCode < 2000:
+            with self._lock:
+                self.request_errors.setdefault(int(reqId), []).append(msg)
 
     def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency: str) -> None:
         with self._lock:

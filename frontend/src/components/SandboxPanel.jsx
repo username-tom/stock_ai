@@ -12,7 +12,7 @@ import {
   getSandboxTrades, placeSandboxTrade,
   exportSandbox, importSandbox, resetSandbox, resetSandboxSoft,
   getBulkQuotes, getIBStatus, connectIB, disconnectIB, setIBMode,
-  placeOrder,
+  placeOrder, getTradeHistory,
   getSymbolSectors,
   resetIBPaperPortfolio,
   getIBPositions, getIBOrders,
@@ -237,10 +237,9 @@ export default function SandboxPanel() {
   const { data: tradesData } = useQuery({
     queryKey: ['sandbox-trades', selectedSymbol],
     queryFn: () => getSandboxTrades(selectedSymbol),
-    enabled: !!selectedSymbol,
+    enabled: !!selectedSymbol && !ibConnected,
     refetchInterval: appSettings.sandbox_trades_ms,
   })
-  const trades = tradesData?.trades ?? []
   const selectedPos = positions.find(p => p.symbol === selectedSymbol)
   const selectedPrice = quotes[selectedSymbol]?.last_price ?? selectedPos?.avg_cost ?? 0
 
@@ -298,6 +297,22 @@ export default function SandboxPanel() {
   const allTrades = allTradesData?.trades ?? []
   const engineTrades = allTrades.filter(t => t.strategy_name)
   const latestEngineTrade = engineTrades[0] ?? null
+
+  // IB trade history – PAPER / LIVE orders persisted in the Trade table
+  const { data: ibTradeHistoryData } = useQuery({
+    queryKey: ['ib-trade-history'],
+    queryFn: () => getTradeHistory(200),
+    enabled: ibConnected,
+    refetchInterval: appSettings.sandbox_trades_ms,
+  })
+  const ibTradeHistory = ibTradeHistoryData?.trades ?? []
+
+  // Use IB history when connected, sandbox trades when simulated
+  const activeTrades = ibConnected ? ibTradeHistory : allTrades
+  // Per-symbol trades: IB history filtered by symbol, or sandbox trades
+  const trades = ibConnected
+    ? ibTradeHistory.filter(t => t.symbol === selectedSymbol)
+    : (tradesData?.trades ?? [])
 
   // On first IB connect (or paper/live mode switch), clear sandbox activity state.
   useEffect(() => {
@@ -364,30 +379,41 @@ export default function SandboxPanel() {
 
   // build activity log entries from trades + mutations
   useEffect(() => {
-    if (!allTrades.length) return
-    const newest = allTrades[0]
+    if (!activeTrades.length) return
+    const newest = activeTrades[0]
     if (newest.id === prevTradeIdRef.current) return
     prevTradeIdRef.current = newest.id
     // add new trades that aren't yet in activities
     setActivities(prev => {
       const existingIds = new Set(prev.filter(a => a.tradeId).map(a => a.tradeId))
-      const newEntries = allTrades
+      const newEntries = activeTrades
         .filter(t => !existingIds.has(t.id))
-        .map(t => ({
-          type: 'trade',
-          profile: activeProfile,
-          tradeId: t.id,
-          side: t.side,
-          label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}${
-            t.pnl != null ? ` · PnL: ${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : ''
-          }`,
-          sub: t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined,
-          time: t.created_at ? new Date(t.created_at).toLocaleTimeString() : '',
-          ts: t.created_at ? new Date(t.created_at).getTime() : Date.now(),
-        }))
+        .map(t => {
+          const profile = ibConnected ? (t.mode ?? 'PAPER').toLowerCase() : activeProfile
+          const sub = ibConnected && t.ib_order_id != null
+            ? `IB #${t.ib_order_id} · ${t.status ?? 'Submitted'}`
+            : (t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined)
+          return {
+            type: 'trade',
+            profile,
+            tradeId: t.id,
+            side: t.side,
+            symbol: t.symbol,
+            shares: t.quantity ?? null,
+            price: t.price ?? null,
+            pnl: t.pnl ?? null,
+            reason: t.reason ?? null,
+            label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}${
+              t.pnl != null ? ` · PnL: ${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : ''
+            }`,
+            sub,
+            time: t.created_at ? new Date(t.created_at).toLocaleTimeString() : '',
+            ts: t.created_at ? new Date(t.created_at).getTime() : Date.now(),
+          }
+        })
       return [...newEntries, ...prev].slice(0, 500)
     })
-  }, [allTrades, activeProfile])
+  }, [activeTrades, activeProfile, ibConnected])
 
   // mutations
   const removeSymbolMut = useMutation({
@@ -448,6 +474,7 @@ export default function SandboxPanel() {
         setActivities(prev => [{
           type: 'trade',
           profile: activeProfileRef.current,
+          tradeId: d.id,
           side: d.side,
           label: `Order submitted ${d.side} ${d.quantity} ${d.symbol}`,
           sub: `IB #${d.ib_order_id ?? 'n/a'} · ${d.status ?? 'Submitted'}${d.limit_price != null ? ` · LMT $${Number(d.limit_price).toFixed(2)}` : ''}`,
@@ -459,6 +486,7 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       qc.invalidateQueries({ queryKey: ['ib-orders'] })
       qc.invalidateQueries({ queryKey: ['ib-positions'] })
+      qc.invalidateQueries({ queryKey: ['ib-trade-history'] })
       qc.invalidateQueries({ queryKey: ['sandbox-trades', selectedSymbol] })
       qc.invalidateQueries({ queryKey: ['sandbox-trades-all'] })
       setTradeForm(f => ({ ...f, quantity: '', reason: 'manual' }))
@@ -1050,7 +1078,8 @@ export default function SandboxPanel() {
               pieData={pieData}
               analytics={analytics}
               realizedMetrics={realizedMetrics}
-              allTrades={allTrades}
+              allTrades={activeTrades}
+              activities={activities}
               pmScores={managerState?.scores ?? {}}
               managerSettings={managerState?.settings ?? null}
               onOpenManager={activeMainTab === 'summary' ? () => setActiveMainTab('manager') : null}
@@ -1070,6 +1099,7 @@ export default function SandboxPanel() {
               accountData={accountData}
               quotes={quotes}
               trades={trades}
+              activities={activities}
               engineState={engineState}
               editingStrategy={editingStrategy}
               setEditingStrategy={setEditingStrategy}

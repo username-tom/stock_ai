@@ -25,6 +25,7 @@ export default function PositionDetail({
   selectedUnrealised,
   quotes,
   trades,
+  activities = [],
   engineState,
   editingStrategy,
   setEditingStrategy,
@@ -957,18 +958,16 @@ export default function PositionDetail({
         <div className="overflow-y-auto max-h-80">
         {(() => {
           // Merge trades + fund events + allocation events into a single timeline, filtered by selectedSymbol
-          const tradeEntries = trades
-            .filter(t => t.symbol === selectedSymbol)
-            .map(t => ({
-              id: `t-${t.id}`,
-              kind: 'trade',
-              side: t.side,
-              date: t.created_at,
-              label: `${t.side} ${t.quantity} ${t.symbol} @ $${t.price?.toFixed(2)}`,
-              sub: t.strategy_name ? `${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || null,
-              pnl: t.pnl ?? null,
-              total: t.total,
-            }))
+          const tradeEntries = activities.filter(a => a.type === 'trade' && a.tradeId && a.symbol === selectedSymbol).map(a => ({
+            id: `t-${a.tradeId}`,
+            kind: 'trade',
+            side: a.side,
+            date: new Date(a.ts).toISOString(),
+            label: a.label,
+            sub: a.sub,
+            pnl: a.pnl,
+            total: (a.shares ?? 0) * (a.price ?? 0),
+          }))
           // Only show fund events that are not allocations and are not tied to a symbol (global deposits/withdrawals)
           const fundEntries = fundEvents
             .filter(e => !e.from_symbol && !e.to_symbol)

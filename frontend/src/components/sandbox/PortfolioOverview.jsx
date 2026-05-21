@@ -62,6 +62,7 @@ export default function PortfolioOverview({
   analytics,
   realizedMetrics,
   allTrades = [],
+  activities = [],
   pmScores = {},
   managerSettings = null,
   onOpenManager = null,
@@ -825,23 +826,23 @@ export default function PortfolioOverview({
           <ClockIcon className="h-4 w-4 text-slate-400" />
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Activity Log</h2>
           {(() => {
-            const total = allTrades.length + fundEvents.length
+            const total = activities.filter(a => a.type === 'trade' && a.tradeId).length + fundEvents.length
             return total > 0 && <span className="ml-auto text-xs text-slate-500">{total} event{total !== 1 ? 's' : ''}</span>
           })()}
         </div>
         {(() => {
-          const tradeEntries = allTrades.map(t => ({
-            id: `t-${t.id}`,
+          const tradeEntries = activities.filter(a => a.type === 'trade' && a.tradeId).map(a => ({
+            id: `t-${a.tradeId}`,
             kind: 'trade',
-            side: t.side,
-            date: t.created_at,
-            symbol: t.symbol,
-            shares: t.quantity ?? null,
-            price: t.price ?? null,
-            label: `${t.side} ${(t.quantity ?? 0).toFixed(3)} ${t.symbol} @ $${(t.price ?? 0).toFixed(2)}`,
-            total: (t.quantity ?? 0) * (t.price ?? 0),
-            pnl: t.pnl ?? null,
-            reason: t.reason ?? null,
+            side: a.side,
+            date: new Date(a.ts).toISOString(),
+            symbol: a.symbol,
+            shares: a.shares,
+            price: a.price,
+            label: a.label,
+            total: (a.shares ?? 0) * (a.price ?? 0),
+            pnl: a.pnl,
+            reason: a.reason,
           }))
           const fundEntries = fundEvents.map(e => ({
             id: `f-${e.id}`,
