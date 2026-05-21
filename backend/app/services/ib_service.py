@@ -136,6 +136,8 @@ class _IBApiApp(EWrapper, EClient):
                 data["last"] = price
             elif tickType == 9:
                 data["close"] = price
+            elif tickType == 14:
+                data["open"] = price
 
     def tickSize(self, reqId: TickerId, tickType: int, size: int) -> None:
         if tickType == 8:

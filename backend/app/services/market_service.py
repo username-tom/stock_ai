@@ -46,7 +46,7 @@ _YF_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 
 # period string → Yahoo "range" param ("2w" fetched as 1mo then trimmed)
 _PERIOD_RANGE_MAP: dict[str, str] = {
-    "1d":  "5d",  "2d":  "5d",  "5d":  "5d",  "2w":  "5d",
+    "1d":  "5d",  "2d":  "5d",  "5d":  "5d",  "2w":  "1mo",
     "1mo": "1mo", "3mo": "3mo", "6mo": "6mo",
     "1y":  "1y",  "2y":  "2y",  "5y":  "5y",  "max": "max",
 }
@@ -70,6 +70,7 @@ _HISTORY_TTL_MAP: dict[str, float] = {
 # ---------------------------------------------------------------------------
 
 _DISK_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "market_cache"
+_IB_HIST_DISK_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "ib_hist_cache"
 
 def _key_to_filename(key: str) -> Path:
     """Convert a cache key like 'quote:AAPL' to a safe filename."""
@@ -146,6 +147,11 @@ _ib_hist_last_restriction_by_profile: dict[str, dict[str, Any]] = {}
 # In-flight quote dedupe so concurrent callers for one symbol share one IB fetch.
 _ib_quote_inflight: dict[str, asyncio.Task] = {}
 _ib_quote_inflight_lock = asyncio.Lock()
+
+# IB history background overlay — updated every 15 min; YF is the instant base.
+_IB_HIST_OVERLAY_TTL = 900.0  # seconds (15 minutes)
+_ib_hist_overlay_inflight: dict[str, asyncio.Task] = {}
+_ib_hist_overlay_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # Persistent HTTP client – reuses connections for lower latency
@@ -447,6 +453,127 @@ def _bar_size_to_seconds(bar_size: str) -> float | None:
     return fixed.get(text)
 
 
+# ---------------------------------------------------------------------------
+# IB historical data — persistent disk cache
+# Completed (past) bars never change, so we persist them and only fetch
+# the incremental gap on each request.  This turns a full "1 Y" IB pull
+# into a single-day fetch after the first load.
+# ---------------------------------------------------------------------------
+
+def _ib_disk_cache_path(symbol: str, bar_size: str, what_to_show: str, use_rth: bool) -> Path:
+    safe_bar = bar_size.strip().lower().replace(" ", "_")
+    return _IB_HIST_DISK_CACHE_DIR / f"{symbol.upper()}__{safe_bar}__{what_to_show.upper()}__{int(use_rth)}.json"
+
+
+def _ib_disk_cache_load(symbol: str, bar_size: str, what_to_show: str, use_rth: bool) -> list[dict]:
+    """Return persisted bars from disk, or [] on any error."""
+    path = _ib_disk_cache_path(symbol, bar_size, what_to_show, use_rth)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        bars = data.get("bars", [])
+        if not isinstance(bars, list):
+            return []
+        return bars
+    except Exception:
+        return []
+
+
+def _ib_disk_cache_save(
+    symbol: str, bar_size: str, what_to_show: str, use_rth: bool, bars: list[dict]
+) -> None:
+    """Persist *bars* to disk (runs in executor — must be thread-safe)."""
+    try:
+        _IB_HIST_DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _ib_disk_cache_path(symbol, bar_size, what_to_show, use_rth)
+        payload = {
+            "symbol": symbol.upper(),
+            "bar_size": bar_size,
+            "what_to_show": what_to_show.upper(),
+            "use_rth": int(use_rth),
+            "saved_at": time.time(),
+            "bars": bars,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("IB hist disk cache write failed (%s %s): %s", symbol, bar_size, exc)
+
+
+def _ib_filter_completed_bars(bars: list[dict]) -> list[dict]:
+    """Return bars that are safe to persist to the disk cache.
+
+    Only bars from *before* today are considered fully settled.  Today's bars
+    may still be in-progress or pacing-delayed, so we never write them to disk.
+    This prevents stale/synthetic prices from being baked into the cache.
+    """
+    today_et = datetime.now(tz=_ET).date()
+    past: list[dict] = []
+    for bar in bars:
+        dt = _parse_ib_bar_datetime(bar.get("date"))
+        if dt is None:
+            continue
+        if dt.astimezone(_ET).date() < today_et:
+            past.append(bar)
+    return past
+
+
+def _ib_merge_bars(cached: list[dict], fresh: list[dict]) -> list[dict]:
+    """Merge two bar lists, deduplicating by raw date string; *fresh* wins on conflict."""
+    merged: dict[str, dict] = {bar["date"]: bar for bar in cached}
+    for bar in fresh:
+        merged[bar["date"]] = bar
+    return sorted(merged.values(), key=lambda b: b["date"])
+
+
+def _ib_compute_incremental_duration(
+    cached_bars: list[dict], full_duration: str, bar_size: str
+) -> str:
+    """Return the shortest IB duration string needed to top-up cached data.
+
+    For example, if we have daily bars up to yesterday and the full request is
+    "1 Y", this returns "3 D" (gap to cover yesterday→today + 2-day buffer)
+    instead of the full year — cutting the IB wait dramatically.
+    """
+    if not cached_bars:
+        return full_duration
+
+    latest_dt: datetime | None = None
+    for bar in cached_bars:
+        dt = _parse_ib_bar_datetime(bar.get("date"))
+        if dt is not None and (latest_dt is None or dt > latest_dt):
+            latest_dt = dt
+
+    if latest_dt is None:
+        return full_duration
+
+    now_et = datetime.now(tz=_ET)
+    gap_seconds = max(0.0, (now_et - latest_dt).total_seconds())
+
+    bar_secs = _bar_size_to_seconds(bar_size)
+    is_intraday = bar_secs is not None and bar_secs < 86_400
+
+    if is_intraday:
+        # For intraday charts, always re-fetch at least today's full session
+        # from IB so the live chart stays current.  The disk cache already
+        # holds all previous sessions, so this is the only IB work needed.
+        needed = max(gap_seconds + (bar_secs or 60) * 10, 86_400.0)
+    else:
+        # For daily/weekly/monthly bars a 2-day buffer around the gap is enough.
+        needed = gap_seconds + 2 * 86_400.0
+
+    full_s = _duration_to_seconds(full_duration)
+    if full_s is not None:
+        needed = min(needed, full_s)
+
+    incremental = _seconds_to_duration(needed)
+    logger.debug(
+        "IB disk cache: using incremental duration %s instead of %s for %s",
+        incremental, full_duration, bar_size,
+    )
+    return incremental
+
+
 def _expand_duration_for_gap(duration: str, bar_size: str, min_gap_s: float) -> str:
     current_s = _duration_to_seconds(duration)
     bar_s = _bar_size_to_seconds(bar_size)
@@ -496,7 +623,7 @@ async def _get_ib_quote(symbol: str) -> dict[str, Any]:
 
     last_price = quote.get("last") if isinstance(quote, dict) else None
     prev_close = quote.get("close") if isinstance(quote, dict) else None
-    open_price = None
+    open_price = quote.get("open") if isinstance(quote, dict) else None
     day_high = None
     day_low = None
     day_volume = quote.get("volume") if isinstance(quote, dict) else None
@@ -541,11 +668,13 @@ async def _get_ib_quote(symbol: str) -> dict[str, Any]:
                         if vols:
                             day_volume = sum(vols)
 
-                    if prev_close is None and len(all_days) >= 2:
-                        prev_day = all_days[-2]
-                        prev_day_bars = [b for dt, b in parsed if dt.astimezone(_ET).date() == prev_day]
-                        if prev_day_bars:
-                            prev_close = prev_day_bars[-1].get("close")
+                    if prev_close is None:
+                        past_days = [d for d in all_days if d < today_et]
+                        if past_days:
+                            prev_day = past_days[-1]
+                            prev_day_bars = [b for dt, b in parsed if dt.astimezone(_ET).date() == prev_day]
+                            if prev_day_bars:
+                                prev_close = prev_day_bars[-1].get("close")
         except Exception as exc:
             logger.debug("IB intraday quote fallback failed for %s: %s", symbol, exc)
 
@@ -560,8 +689,14 @@ async def _get_ib_quote(symbol: str) -> dict[str, Any]:
                 what_to_show="TRADES",
                 use_rth=True,
             )
-            if bars and len(bars) >= 2:
-                prev_close = bars[-2].get("close")
+            if bars:
+                _today = datetime.now(tz=_ET).date()
+                _last_dt = _parse_ib_bar_datetime(bars[-1].get("date"))
+                _last_date = _last_dt.astimezone(_ET).date() if _last_dt else None
+                if _last_date == _today and len(bars) >= 2:
+                    prev_close = bars[-2].get("close")
+                elif _last_date != _today and bars[-1].get("close") is not None:
+                    prev_close = bars[-1].get("close")
         except Exception as exc:
             logger.debug("IB daily previous-close fallback failed for %s: %s", symbol, exc)
 
@@ -626,14 +761,54 @@ def _format_dt_for_period(dt: datetime, intraday: bool, period: str) -> str:
 
 async def _get_ib_history(symbol: str, period: str) -> dict[str, Any]:
     duration, bar_size, use_rth = _ib_period_request(period)
-    bars = await _ib_historical_request(
+
+    # ------------------------------------------------------------------
+    # Disk-cache layer: historical (past) bars never change, so load what
+    # we already have and only request the incremental gap from IB.
+    # ------------------------------------------------------------------
+    cached_raw = _ib_disk_cache_load(symbol, bar_size, "TRADES", use_rth)
+    # Strip today's bars from the disk cache before merging.  Old cache files
+    # may have been written when the injection code was active, so today's
+    # entries could carry stale/synthetic prices.  Fresh IB data always covers
+    # today, so this is safe.
+    today_et = datetime.now(tz=_ET).date()
+    cached_raw = [
+        b for b in cached_raw
+        if (_parse_ib_bar_datetime(b.get("date")) or datetime.fromtimestamp(0, tz=_ET)).astimezone(_ET).date() < today_et
+    ]
+    incremental_duration = _ib_compute_incremental_duration(cached_raw, duration, bar_size)
+
+    fresh_bars = await _ib_historical_request(
         symbol=symbol,
         end_datetime="",
-        duration=duration,
+        duration=incremental_duration,
         bar_size=bar_size,
         what_to_show="TRADES",
         use_rth=use_rth,
     )
+
+    # Merge fresh IB bars into cached bars; fresh always wins on overlap.
+    if fresh_bars or cached_raw:
+        merged_raw = _ib_merge_bars(cached_raw, fresh_bars)
+        # Persist only completed (past) bars back to disk, non-blocking.
+        completed = _ib_filter_completed_bars(merged_raw)
+        if completed:
+            asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _ib_disk_cache_save(symbol, bar_size, "TRADES", use_rth, completed),
+            )
+        # Trim to the originally requested duration before formatting.
+        full_s = _duration_to_seconds(duration)
+        if full_s is not None and len(merged_raw) > 0:
+            cutoff = datetime.now(tz=_ET).timestamp() - full_s
+            merged_raw = [
+                b for b in merged_raw
+                if (_parse_ib_bar_datetime(b.get("date")) or datetime.fromtimestamp(0, tz=_ET)).timestamp() >= cutoff
+            ]
+        bars = merged_raw
+    else:
+        bars = []
+
     if not bars:
         raise ValueError(f"No IB OHLCV data returned for {symbol}")
 
@@ -680,47 +855,6 @@ async def _get_ib_history(symbol: str, period: str) -> dict[str, Any]:
 
     for row in result["data"]:
         row.pop("_dt", None)
-
-    # Inject a synthetic "current bar" when IB only returns completed bars and
-    # the most recent bar boundary has already started but isn't in the data yet.
-    # This is most visible on 5d/2w charts (15-min bars) where the chart would
-    # otherwise appear 15 min stale.
-    if intraday and result["data"]:
-        bar_secs = _bar_size_to_seconds(bar_size)
-        market_state = _market_state_now()
-        # For RTH-only requests only inject during the regular session;
-        # for extended-hours requests inject for any active session.
-        should_inject = (
-            bar_secs is not None
-            and bar_secs < 86_400
-            and (
-                (use_rth and market_state == "REGULAR")
-                or (not use_rth and market_state in ("REGULAR", "PRE", "POST"))
-            )
-        )
-        if should_inject:
-            now_et = datetime.now(tz=_ET)
-            ts_now = int(now_et.timestamp())
-            bar_boundary_ts = (ts_now // int(bar_secs)) * int(bar_secs)
-            current_bar_dt = datetime.fromtimestamp(bar_boundary_ts, tz=_ET)
-            current_bar_label = _format_dt_for_period(current_bar_dt, True, period)
-            if current_bar_label != result["data"][-1]["date"]:
-                try:
-                    quote = await _get_ib_quote_deduped(symbol)
-                    last_price = quote.get("last_price")
-                    if last_price is not None:
-                        prev_bar_close = float(result["data"][-1]["close"])
-                        lp = float(last_price)
-                        result["data"].append({
-                            "date": current_bar_label,
-                            "open": round(prev_bar_close, 4),
-                            "high": round(max(lp, prev_bar_close), 4),
-                            "low": round(min(lp, prev_bar_close), 4),
-                            "close": round(lp, 4),
-                            "volume": None,
-                        })
-                except Exception as exc:
-                    logger.debug("IB current bar injection failed for %s: %s", symbol, exc)
 
     result["ib_telemetry"] = _ib_hist_telemetry(bar_size, "TRADES", use_rth)
     return result
@@ -803,33 +937,14 @@ def _fmt_ts(ts: int, intraday: bool, period: str) -> str:
     return dt.strftime("%m/%d %H:%M")
 
 
-async def get_history(symbol: str, period: str = "1y") -> list[dict]:
-    """Return OHLCV records list for *symbol*, served from cache when fresh."""
-    sym = symbol.upper()
-    source = "ib" if _ib_data_pull_allowed_now() else "yf"
-    cache_key = f"history:{source}:{sym}:{period}"
-    if source == "ib":
-        _, bar_size, use_rth = _ib_period_request(period)
-        ttl = max(1.0, _ib_effective_hist_gap(bar_size, "TRADES", use_rth))
-    else:
-        ttl = _HISTORY_TTL_MAP.get(period, 900)
-    cached = await _cache.get(cache_key, ttl)
-    if cached is not None:
-        if source == "ib" and isinstance(cached, dict) and "ib_telemetry" not in cached:
-            _, bar_size, use_rth = _ib_period_request(period)
-            cached["ib_telemetry"] = _ib_hist_telemetry(bar_size, "TRADES", use_rth)
-        return cached
-
-    if source == "ib":
-        result = await _get_ib_history(sym, period)
-        await _cache.set(cache_key, result)
-        return result
-
+async def _fetch_yf_history(sym: str, period: str) -> dict:
+    """Fetch OHLCV history from Yahoo Finance and return the formatted result dict."""
     yf_range    = _PERIOD_RANGE_MAP.get(period, "1y")
     yf_interval = _PERIOD_INTERVAL_MAP.get(period, "1d")
     intraday    = "m" in yf_interval or "h" in yf_interval
 
-    chart = await _yf_chart(sym, range_=yf_range, interval=yf_interval, include_pre_post=(period in ("1d", "2d")))
+    chart = await _yf_chart(sym, range_=yf_range, interval=yf_interval,
+                            include_pre_post=(period in ("1d", "2d")))
 
     timestamps = chart.get("timestamp", [])
     indicators  = chart.get("indicators", {}).get("quote", [{}])[0]
@@ -859,21 +974,14 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     if not records:
         raise ValueError(f"No OHLCV data returned for {sym}")
 
-    # "1d"/"2d" are fetched as 5d at 1m with pre/post – keep only the last
-    # N trading days. Yahoo never returns weekend bars, so on Saturday/Sunday
-    # this naturally surfaces the most recent trading day(s).
     if period in ("1d", "2d"):
         n_days = 1 if period == "1d" else 2
         days_seen: list[str] = []
         for r in records:
-            day = r["date"][:5]  # "MM/DD"
+            day = r["date"][:5]
             if day not in days_seen:
                 days_seen.append(day)
         keep = set(days_seen[-n_days:])
-        # Derive prev_close from the last regular-session bar of the trading day
-        # just before the displayed window.  Pre/post data is fetched for 1d/2d,
-        # so we must restrict to bars at or before 16:00 ET to avoid using an
-        # after-hours bar as the "previous close".
         prev_day_records = [r for r in records if r["date"][:5] not in keep]
         regular_prev = [r for r in prev_day_records if "09:30" <= r["date"][6:] <= "16:00"]
         prev_day_close_records = regular_prev if regular_prev else prev_day_records
@@ -881,14 +989,119 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
             prev_close = prev_day_close_records[-1]["close"]
         records = [r for r in records if r["date"][:5] in keep]
 
-    # "2w" is fetched as 1mo – trim to the last 260 bars (10 trading days × 26 fifteen-minute bars)
     if period == "2w":
         records = records[-260:]
 
-    result = {"data": records}
+    result: dict = {"data": records}
     if period in ("1d", "2d") and prev_close is not None:
         result["prev_close"] = round(float(prev_close), 4)
+    return result
 
+
+def _merge_ib_onto_yf(ib_result: dict, yf_result: dict) -> dict:
+    """Merge IB-verified bars onto the YF base.
+
+    IB wins for any bar both sources share (more accurate prices).
+    YF bars that IB does not cover (typically the last ~15 min due to IB
+    pacing) are kept so no candles are ever erased.
+    """
+    ib_bars = ib_result.get("data", [])
+    yf_bars = yf_result.get("data", [])
+
+    if not ib_bars:
+        return yf_result
+    if not yf_bars:
+        return ib_result
+
+    ib_by_date: dict[str, dict] = {b["date"]: b for b in ib_bars}
+
+    # Walk YF bars in order; replace with IB where available, keep YF otherwise.
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for bar in yf_bars:
+        d = bar["date"]
+        merged.append(ib_by_date.get(d, bar))
+        seen.add(d)
+
+    # Append any IB bars that YF didn't have at all (edge-case).
+    for bar in ib_bars:
+        if bar["date"] not in seen:
+            merged.append(bar)
+
+    result: dict = {"data": merged}
+    prev_close = ib_result.get("prev_close") or yf_result.get("prev_close")
+    if prev_close is not None:
+        result["prev_close"] = prev_close
+    if "ib_telemetry" in ib_result:
+        result["ib_telemetry"] = ib_result["ib_telemetry"]
+    return result
+
+
+async def _ib_history_overlay_task(sym: str, period: str) -> None:
+    """Background task: fetch IB history and cache the raw IB result only.
+
+    We deliberately do NOT merge with YF here.  The merge happens on every
+    get_history() call so the chart always reflects the latest YF bars —
+    storing a pre-merged snapshot would freeze the chart for the full TTL.
+    """
+    ib_cache_key = f"history:ib:{sym}:{period}"
+    try:
+        ib_result = await _get_ib_history(sym, period)
+        await _cache.set(ib_cache_key, ib_result)
+        logger.debug("IB history overlay refreshed for %s %s", sym, period)
+    except Exception as exc:
+        logger.debug("IB history overlay failed for %s %s: %s", sym, period, exc)
+    finally:
+        async with _ib_hist_overlay_lock:
+            _ib_hist_overlay_inflight.pop(f"{sym}:{period}", None)
+
+
+async def get_history(symbol: str, period: str = "1y") -> list[dict]:
+    """Return OHLCV records list for *symbol*, served from cache when fresh.
+
+    In IB mode Yahoo Finance is always the instant base source.  An IB fetch
+    runs in the background and its result replaces the YF data once available,
+    refreshing every 15 minutes.  This eliminates IB pacing delays on page load
+    while still surfacing IB-verified data shortly after.
+    """
+    sym = symbol.upper()
+
+    if _ib_data_pull_allowed_now():
+        # ---- IB mode: YF always fresh; IB merged per-request ----
+        # Always serve current YF data so the chart never shows a stale
+        # snapshot.  IB bars (cached separately) are merged on every call,
+        # providing price verification for historical bars while YF covers
+        # the most recent candles that IB hasn't emitted yet.
+        yf_cache_key = f"history:yf:{sym}:{period}"
+        ttl = _HISTORY_TTL_MAP.get(period, 900)
+        yf_data = await _cache.get(yf_cache_key, ttl)
+        if yf_data is None:
+            yf_data = await _fetch_yf_history(sym, period)
+            await _cache.set(yf_cache_key, yf_data)
+
+        # Check IB cache and fire a background refresh when stale.
+        ib_cache_key = f"history:ib:{sym}:{period}"
+        ib_cached = await _cache.get(ib_cache_key, _IB_HIST_OVERLAY_TTL)
+        inflight_key = f"{sym}:{period}"
+        async with _ib_hist_overlay_lock:
+            if ib_cached is None and inflight_key not in _ib_hist_overlay_inflight:
+                task = asyncio.create_task(_ib_history_overlay_task(sym, period))
+                _ib_hist_overlay_inflight[inflight_key] = task
+
+        # Re-merge IB-verified bars onto current YF data every request.
+        if ib_cached is not None:
+            return _merge_ib_onto_yf(ib_cached, yf_data)
+
+        return yf_data
+
+    # ---- Pure YF mode ----
+    cache_key = f"history:yf:{sym}:{period}"
+    ttl = _HISTORY_TTL_MAP.get(period, 900)
+    cached = await _cache.get(cache_key, ttl)
+    if cached is not None:
+        return cached
+
+    result = await _fetch_yf_history(sym, period)
     await _cache.set(cache_key, result)
     return result
 
@@ -1306,10 +1519,10 @@ async def get_symbol_sectors(symbols: list[str]) -> dict[str, str | None]:
 
 
 INTRADAY_DF_TTL = 55   # seconds – just under the 60 s engine tick so each tick gets a fresh bar
-IB_INTRADAY_DF_TTL = 5
+IB_INTRADAY_DF_TTL = 60
 
 async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
-                          include_pre_post: bool = False) -> Any:
+                          include_pre_post: bool = False, force_yf: bool = False) -> Any:
     """Return a pandas DataFrame of recent OHLCV bars for *symbol*.
 
     This is a shared helper used by the sandbox engine and portfolio manager
@@ -1321,7 +1534,7 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
     import pandas as pd  # optional heavy import – kept local
 
     sym = symbol.upper()
-    source = "ib" if _ib_data_pull_allowed_now() else "yf"
+    source = "yf" if force_yf else ("ib" if _ib_data_pull_allowed_now() else "yf")
     # Yahoo does not support second-level bars; gracefully degrade to 1m when
     # callers persist an IB-only interval like "5s".
     resolved_interval = interval

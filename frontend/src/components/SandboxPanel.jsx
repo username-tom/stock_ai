@@ -760,7 +760,7 @@ export default function SandboxPanel() {
   )
 
   return (
-    <div className="flex h-screen max-h-screen overflow-hidden">
+    <div className="flex h-[calc(100vh-2rem)] max-h-[calc(100vh-2rem)] overflow-hidden">
       <TradeNotificationBanner latestEngineTrade={latestEngineTrade} />
       <ActivityLog activities={visibleActivities} />
 

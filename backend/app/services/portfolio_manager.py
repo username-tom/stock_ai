@@ -294,7 +294,9 @@ async def _fetch_bars(symbol: str) -> pd.DataFrame:
     data_points = max(1, int(_settings.get("sentiment_data_points", 10) or 10))
     interval = _settings.get("sentiment_interval", "1m")
     range_str = f"{lookback_days}d"
-    df = await get_intraday_df(symbol, range_=range_str, interval=interval, include_pre_post=False)
+    # Force YF for sentiment scoring – IB pacing is preserved for trading
+    # signals and scoring doesn't need tick-level data accuracy.
+    df = await get_intraday_df(symbol, range_=range_str, interval=interval, include_pre_post=False, force_yf=True)
     bars = df[["Close", "Volume"]]
     return bars.tail(data_points)
 

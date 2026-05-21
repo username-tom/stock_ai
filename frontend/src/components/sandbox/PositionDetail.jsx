@@ -756,7 +756,7 @@ export default function PositionDetail({
         >
           <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Position Settings</h3>
           <div className="flex items-center gap-2">
-            {!posSettingsOpen && isSimulated && selectedPos?.sentiment_mode && selectedPos.sentiment_mode !== 'none' && (
+            {!posSettingsOpen && selectedPos?.sentiment_mode && selectedPos.sentiment_mode !== 'none' && (
               <span className="text-[11px] px-2 py-0.5 rounded-full font-semibold bg-violet-900/30 text-violet-300 border border-violet-700/40 uppercase tracking-wide">
                 {selectedPos.sentiment_mode === 'market' ? 'Market Sentiment' : 'Symbol Sentiment'}
               </span>
@@ -841,8 +841,7 @@ export default function PositionDetail({
             </div>
 
             {/* Sentiment Strategy Mode */}
-            {isSimulated && (
-              <div className="border-t border-dark-700 pt-4">
+            <div className="border-t border-dark-700 pt-4">
                 <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
                   <h4 className="font-semibold text-slate-300 text-xs uppercase tracking-wider">Sentiment Strategy Mode</h4>
                   {selectedPos?.sentiment_mode && selectedPos.sentiment_mode !== 'none' && (
@@ -888,7 +887,6 @@ export default function PositionDetail({
                   {updatePosMut.isPending ? 'Saving…' : 'Save Mode'}
                 </button>
               </div>
-            )}
           </div>
         )}
       </div>
