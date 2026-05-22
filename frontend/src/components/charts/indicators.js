@@ -285,6 +285,11 @@ export function enrichData(data) {
   const bbValues    = hasBB               ? null : computeBollingerBands(closes)
   const fastMA      = hasFastMA           ? null : computeEMA(closes, 20)
   const slowMA      = hasSlowMA           ? null : computeEMA(closes, 50)
+  const ma9Values   = computeSMA(closes, 9)
+  const ma20Values  = computeSMA(closes, 20)
+  const ma50Values  = computeSMA(closes, 50)
+  const ma100Values = computeSMA(closes, 100)
+  const ma200Values = computeSMA(closes, 200)
   const stochValues = hasStoch || !hasHighLow ? null : computeStochastic(highs, lows, closes)
   const atrValues   = hasATR   || !hasHighLow ? null : computeATR(highs, lows, closes)
   const obvValues   = hasOBV   || !hasVol     ? null : computeOBV(closes, volumes)
@@ -310,6 +315,11 @@ export function enrichData(data) {
       : {}),
     ...(fastMA ? { fast_ma: roundTo(fastMA[i]) } : {}),
     ...(slowMA ? { slow_ma: roundTo(slowMA[i]) } : {}),
+    ma_9:   roundTo(ma9Values[i]),
+    ma_20:  roundTo(ma20Values[i]),
+    ma_50:  roundTo(ma50Values[i]),
+    ma_100: roundTo(ma100Values[i]),
+    ma_200: roundTo(ma200Values[i]),
     ...(stochValues
       ? {
           stoch_k: roundTo(stochValues.stoch_k[i]),
@@ -319,4 +329,30 @@ export function enrichData(data) {
     ...(atrValues ? { atr: roundTo(atrValues[i], 4) } : {}),
     ...(obvValues ? { obv: obvValues[i] != null ? Math.round(obvValues[i]) : null } : {}),
   }))
+}
+
+/**
+ * Compute indicators using `warmupData` for seeding, returning only the
+ * enriched `visibleData` portion.  Useful when the visible window is too
+ * short to fully seed long-period indicators (e.g. MA(200) on a 1-month chart).
+ *
+ * @param {{ close: number, date: string }[]} warmupData
+ * @param {{ close: number, date: string }[]} visibleData
+ * @returns {object[]}
+ */
+export function enrichDataWithWarmup(warmupData, visibleData) {
+  if (!warmupData?.length || !visibleData?.length) return enrichData(visibleData)
+  const firstDate = visibleData[0]?.date
+  // Intraday bars use "MM/DD HH:MM" format; daily warmup bars use "YYYY-MM-DD".
+  // String comparison between the two formats is unreliable ("2025-..." > "05/..."),
+  // so for intraday visible data we include ALL daily warmup bars — they are always
+  // from prior calendar days and simply seed the rolling indicator windows.
+  const isIntraday = firstDate && firstDate.includes('/') && firstDate.includes(':')
+  const warmup = isIntraday
+    ? warmupData
+    : (firstDate ? warmupData.filter(d => d.date < firstDate) : warmupData)
+  if (!warmup.length) return enrichData(visibleData)
+  const combined = [...warmup, ...visibleData]
+  const enriched = enrichData(combined)
+  return enriched.slice(warmup.length)
 }

@@ -130,4 +130,6 @@ class PortfolioManagerSettings(Base):
     ai_tag_long_sl_pct = Column(Float, default=0.0, nullable=False)
     ai_tag_no_loss_sell = Column(Boolean, default=True, nullable=False)
     pending_price_drift_cancel_pct = Column(Float, default=0.75, nullable=False)
+    auto_trade_buy_price_offset_pct = Column(Float, default=0.1, nullable=False)
+    auto_trade_sell_price_offset_pct = Column(Float, default=0.1, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

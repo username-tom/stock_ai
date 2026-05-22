@@ -101,6 +101,8 @@ function buildDraftFromSettings(settings) {
     ai_tag_long_sl_pct: settings.ai_tag_long_sl_pct ?? 0,
     ai_tag_no_loss_sell: settings.ai_tag_no_loss_sell ?? true,
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.75,
+    auto_trade_buy_price_offset_pct: settings.auto_trade_buy_price_offset_pct ?? 0.1,
+    auto_trade_sell_price_offset_pct: settings.auto_trade_sell_price_offset_pct ?? 0.1,
   }
 }
 
@@ -473,6 +475,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       ai_tag_long_sl_pct: Number(draft.ai_tag_long_sl_pct),
       ai_tag_no_loss_sell: draft.ai_tag_no_loss_sell,
       pending_price_drift_cancel_pct: Number(draft.pending_price_drift_cancel_pct),
+      auto_trade_buy_price_offset_pct: Number(draft.auto_trade_buy_price_offset_pct),
+      auto_trade_sell_price_offset_pct: Number(draft.auto_trade_sell_price_offset_pct),
     })
   }
 
@@ -700,6 +704,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
           Risk exits: SL {Number(settings.stop_loss_pct ?? 0).toFixed(1)}% | TP {Number(settings.take_profit_pct ?? 0).toFixed(1)}%
+        </span>
+        <span className="flex items-center gap-1">
+          <ChartBarIcon className="h-3.5 w-3.5" />
+          Auto pricing: BUY +{Number(settings.auto_trade_buy_price_offset_pct ?? 0.1).toFixed(2)}%
+          {' / '}
+          SELL -{Number(settings.auto_trade_sell_price_offset_pct ?? 0.1).toFixed(2)}%
+          {' (prev OHLC mid)'}
         </span>
         <span className={`flex items-center gap-1 ${settings.hold_positions_overnight ? 'text-slate-600' : 'text-orange-400'}`}>
           <ClockIcon className="h-3.5 w-3.5" />
@@ -1709,6 +1720,36 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     className="input w-28 text-sm py-1.5"
                   />
                   <span className="text-slate-400 text-sm">%</span>
+                </div>
+              </SettingRow>
+
+              <SettingRow
+                label="Automated BUY Price Offset %"
+                hint="Automated trades only: BUY limit uses previous OHLC midpoint plus this percentage (default 0.10%)."
+              >
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range" min={0} max={2} step={0.01}
+                    value={Number(draft.auto_trade_buy_price_offset_pct ?? 0.1)}
+                    onChange={e => updateDraft(d => ({ ...d, auto_trade_buy_price_offset_pct: Number(e.target.value) }))}
+                    className="flex-1 accent-violet-500"
+                  />
+                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_buy_price_offset_pct ?? 0.1).toFixed(2)}%</span>
+                </div>
+              </SettingRow>
+
+              <SettingRow
+                label="Automated SELL Price Offset %"
+                hint="Automated trades only: SELL limit uses previous OHLC midpoint minus this percentage (default 0.10%)."
+              >
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range" min={0} max={2} step={0.01}
+                    value={Number(draft.auto_trade_sell_price_offset_pct ?? 0.1)}
+                    onChange={e => updateDraft(d => ({ ...d, auto_trade_sell_price_offset_pct: Number(e.target.value) }))}
+                    className="flex-1 accent-violet-500"
+                  />
+                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_sell_price_offset_pct ?? 0.1).toFixed(2)}%</span>
                 </div>
               </SettingRow>
 

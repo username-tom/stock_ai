@@ -80,6 +80,8 @@ _settings: dict[str, Any] = {
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
     "pending_price_drift_cancel_pct": 0.75,  # cancel pending BUY when market drifts >= this % from pending fill/limit
+    "auto_trade_buy_price_offset_pct": 0.1,   # BUY price = prev OHLC midpoint + this % (IB automated orders)
+    "auto_trade_sell_price_offset_pct": 0.1,  # SELL price = prev OHLC midpoint - this % (IB automated orders)
     "stop_loss_pct": 0.0,
     "take_profit_pct": 0.0,
     "hold_positions_overnight": True,     # whether to hold positions between days
@@ -209,6 +211,10 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_long_sl_pct"] = float(getattr(row, "ai_tag_long_sl_pct", 0.0) or 0.0)
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.75) or 0.75)
+            _buy_offset = getattr(row, "auto_trade_buy_price_offset_pct", None)
+            _sell_offset = getattr(row, "auto_trade_sell_price_offset_pct", None)
+            _settings["auto_trade_buy_price_offset_pct"] = 0.1 if _buy_offset is None else float(_buy_offset)
+            _settings["auto_trade_sell_price_offset_pct"] = 0.1 if _sell_offset is None else float(_sell_offset)
 
 
 async def _save_settings_to_db() -> None:
@@ -261,6 +267,8 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_long_sl_pct = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.75)
+        row.auto_trade_buy_price_offset_pct = float(_settings.get("auto_trade_buy_price_offset_pct", 0.1))
+        row.auto_trade_sell_price_offset_pct = float(_settings.get("auto_trade_sell_price_offset_pct", 0.1))
         await db.commit()
 
 
@@ -276,7 +284,8 @@ def update_manager_settings(new: dict) -> dict:
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
               "ai_tag_action_mode",
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
-              "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct"}
+              "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
+              "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -549,16 +558,33 @@ async def _apply_ai_tag_strategies() -> None:
         frenzy_end = open_mins + 180
         return open_mins <= mins < frenzy_end
 
-    def _ai_period_for_current_phase() -> str:
-        # Use a longer learner horizon near end-of-day when overnight holds are enabled,
-        # so AI tags lean toward next-session bias instead of minute-scale noise.
-        if not bool(_settings.get("hold_positions_overnight", True)):
+    def _ai_period_for_current_phase(positions: list[SandboxPosition]) -> str:
+        # Use a longer learner horizon in EOD shut-off/sell periods or when engines
+        # are already off on active positions, so AI tags lean toward next-session
+        # bias instead of minute-scale noise.
+        hold_overnight = bool(_settings.get("hold_positions_overnight", True))
+        ai_overwrite_enabled = bool(_settings.get("ai_tag_strategy_enabled", False))
+        ai_allows_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
+        effective_overnight_behavior = hold_overnight or (ai_overwrite_enabled and ai_allows_overnight)
+
+        if not effective_overnight_behavior:
             return "2d"
         try:
-            from app.services.sandbox_engine import _is_in_pre_sell_engine_shutoff_window
+            from app.services.sandbox_engine import _is_in_pre_sell_engine_shutoff_window, _is_in_eod_sell_window
             eod_mins = int(_settings.get("eod_sell_window_minutes", 30) or 30)
             shutoff_mins = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
-            if _is_in_pre_sell_engine_shutoff_window(eod_mins, shutoff_mins):
+            in_shutoff_window = _is_in_pre_sell_engine_shutoff_window(eod_mins, shutoff_mins)
+            in_final_sell_window = _is_in_eod_sell_window(eod_mins)
+            engine_already_off = any(
+                (not bool(getattr(p, "strategy_enabled", True)))
+                and (
+                    float(getattr(p, "shares", 0.0) or 0.0) > 0.0
+                    or float(getattr(p, "pending_shares", 0.0) or 0.0) > 0.0
+                    or bool(getattr(p, "pm_managed", False))
+                )
+                for p in positions
+            )
+            if in_shutoff_window or in_final_sell_window or engine_already_off:
                 return "30d"
         except Exception:
             pass
@@ -582,7 +608,7 @@ async def _apply_ai_tag_strategies() -> None:
     # ── 2. Classify symbols ───────────────────────────────────────────── #
     try:
         from app.services.stock_learner import classify_symbols
-        insights = await classify_symbols(symbols, period=_ai_period_for_current_phase())
+        insights = await classify_symbols(symbols, period=_ai_period_for_current_phase(snap))
     except Exception as exc:
         logger.warning("AI tag classification failed: %s", exc)
         return
@@ -1800,6 +1826,45 @@ async def _process_ib_engine_signals() -> None:
     risk_symbols_needing_quote: set[str] = set()
     risk_rows: list[tuple[str, float, float]] = []
     buy_signal_rows: list[tuple[SandboxPosition, str, float, str, str]] = []
+    quote_price_map: dict[str, float] = {}
+
+    def _auto_limit_price_from_reference(reference_price: float, side: str) -> float:
+        if reference_price <= 0:
+            return 0.0
+        side_u = str(side or "").upper()
+        if side_u == "BUY":
+            offset = max(0.0, float(_settings.get("auto_trade_buy_price_offset_pct", 0.1) or 0.0))
+            return round(reference_price * (1.0 + offset / 100.0), 4)
+        offset = max(0.0, float(_settings.get("auto_trade_sell_price_offset_pct", 0.1) or 0.0))
+        return round(reference_price * (1.0 - offset / 100.0), 4)
+
+    async def _fetch_prev_ohlc_mid_map(symbols: set[str]) -> dict[str, float]:
+        if not symbols:
+            return {}
+        from app.services.market_service import get_intraday_df
+
+        async def _one(sym: str) -> tuple[str, float]:
+            try:
+                df = await get_intraday_df(sym, range_="2d", interval="1m", include_pre_post=False)
+                if df is None or df.empty:
+                    return sym, 0.0
+                idx = -2 if len(df.index) >= 2 else -1
+                row = df.iloc[idx]
+                o = float(row.get("Open") or 0.0)
+                h = float(row.get("High") or 0.0)
+                l = float(row.get("Low") or 0.0)
+                c = float(row.get("Close") or 0.0)
+                if c <= 0.0:
+                    return sym, 0.0
+                # Previous OHLC midpoint reference for automated IB limit pricing.
+                ref = (o + h + l + c) / 4.0 if (o > 0 and h > 0 and l > 0 and c > 0) else c
+                return sym, float(ref)
+            except Exception as exc:
+                logger.debug("PM IB prev OHLC midpoint fetch failed for %s: %s", sym, exc)
+                return sym, 0.0
+
+        pairs = await asyncio.gather(*[_one(sym) for sym in sorted(symbols)])
+        return {sym: px for sym, px in pairs if px > 0.0}
 
     for pos in positions:
         symbol = str(pos.symbol or "").upper()
@@ -1881,6 +1946,7 @@ async def _process_ib_engine_signals() -> None:
                 for sym, q in quotes.items()
                 if q and q.get("last_price")
             }
+            quote_price_map = dict(price_map)
         except Exception as exc:
             logger.warning("PM IB signal quote fetch failed: %s", exc)
 
@@ -1911,6 +1977,7 @@ async def _process_ib_engine_signals() -> None:
                 "symbol": symbol,
                 "side": "BUY",
                 "quantity": float(qty),
+                "alloc": float(alloc),
                 "price": cp,
                 "reason": f"pm_engine_signal_buy (signal=1, score={score:+.3f}, tag={tag or 'WATCH'})",
                 "processed_key": process_key,
@@ -1942,6 +2009,9 @@ async def _process_ib_engine_signals() -> None:
     if not order_candidates:
         return
 
+    ref_symbols = {str(o.get("symbol") or "").upper() for o in order_candidates if o.get("symbol")}
+    prev_mid_map = await _fetch_prev_ohlc_mid_map(ref_symbols)
+
     from app.config import settings
     from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
 
@@ -1956,11 +2026,38 @@ async def _process_ib_engine_signals() -> None:
             float(order["quantity"]),
             order.get("reason", ""),
         )
+        reference_price = float(
+            prev_mid_map.get(symbol)
+            or quote_price_map.get(symbol)
+            or order.get("price")
+            or 0.0
+        )
+        limit_price = _auto_limit_price_from_reference(reference_price, side)
+        if limit_price <= 0.0:
+            _log_activity(f"IB PM {side} skipped for {symbol}: no reference price")
+            processed_key = order.get("processed_key")
+            if processed_key:
+                _ib_signal_last_processed_at[symbol] = str(processed_key)
+            continue
+
+        qty_to_submit = float(order.get("quantity") or 0.0)
+        if side == "BUY":
+            alloc = float(order.get("alloc") or 0.0)
+            if alloc > 0.0:
+                qty_to_submit = float(math.floor(alloc / limit_price))
+        if qty_to_submit <= 0.0:
+            _log_activity(f"IB PM {side} skipped for {symbol}: zero quantity at ${limit_price:.4f}")
+            processed_key = order.get("processed_key")
+            if processed_key:
+                _ib_signal_last_processed_at[symbol] = str(processed_key)
+            continue
+
         result = await ib_service.place_order(
             symbol=symbol,
             side=side,
-            quantity=float(order["quantity"]),
-            order_type="MKT",
+            quantity=qty_to_submit,
+            order_type="LMT",
+            limit_price=limit_price,
         )
         if result.get("error"):
             _log_activity(f"IB PM {side} failed for {symbol}: {result['error']}")
@@ -1971,18 +2068,18 @@ async def _process_ib_engine_signals() -> None:
 
         ib_status = str(result.get("status") or "").upper()
         is_filled = ib_status == "FILLED"
-        submitted_price = float(order.get("price") or 0.0)
+        submitted_price = float(limit_price)
         est_pnl = None
         if side == "SELL" and submitted_price > 0:
             avg_cost = float(ib_avg_cost_by_symbol.get(symbol, 0.0) or 0.0)
             if avg_cost > 0:
-                est_pnl = round((submitted_price - avg_cost) * float(order["quantity"]), 4)
+                est_pnl = round((submitted_price - avg_cost) * qty_to_submit, 4)
         async with AsyncSessionLocal() as db:
             db.add(Trade(
                 symbol=symbol,
                 side=OrderSide.BUY if side == "BUY" else OrderSide.SELL,
-                quantity=float(order["quantity"]),
-                price=float(order.get("price") or 0.0),
+                quantity=qty_to_submit,
+                price=submitted_price,
                 status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
                 mode=mode,
                 ib_order_id=result.get("ib_order_id"),
@@ -1993,7 +2090,7 @@ async def _process_ib_engine_signals() -> None:
             await db.commit()
 
         _log_activity(
-            f"IB PM {side} submitted from engine signal for {symbol} x{float(order['quantity']):.4f}"
+            f"IB PM {side} submitted from engine signal for {symbol} x{qty_to_submit:.4f} @ ${submitted_price:.4f}"
         )
         processed_key = order.get("processed_key")
         if processed_key:

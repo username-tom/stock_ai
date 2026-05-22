@@ -3,7 +3,7 @@ import {
   ComposedChart, Line, Bar, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
-import { enrichData } from './indicators'
+import { enrichData, enrichDataWithWarmup } from './indicators'
 
 const PRICE_COLOR = '#94a3b8'
 const BB_UPPER = '#60a5fa'
@@ -20,6 +20,11 @@ const STOCH_K = '#34d399'
 const STOCH_D = '#f59e0b'
 const ATR_COLOR = '#c084fc'
 const OBV_COLOR = '#38bdf8'
+const MA_9   = '#22d3ee'
+const MA_20  = '#facc15'
+const MA_50  = '#4ade80'
+const MA_100 = '#fb923c'
+const MA_200 = '#c084fc'
 
 // Custom dot renderer: draws triangle up (buy) or down (sell) on signal bars
 const SignalDot = (props) => {
@@ -75,7 +80,7 @@ function TTDivider() {
   return <div className="border-t border-[#1e293b] my-1" />
 }
 
-function OneDayTooltip({ active, payload, label, prevClose }) {
+function OneDayTooltip({ active, payload, label, prevClose, indicators = {} }) {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
@@ -111,6 +116,11 @@ function OneDayTooltip({ active, payload, label, prevClose }) {
       {d.lower   != null && <TTRow label="BB Lower" value={`$${d.lower.toFixed(2)}`}   className="text-pink-400" />}
       {d.fast_ma != null && <TTRow label="Fast MA"  value={`$${d.fast_ma.toFixed(2)}`} className="text-yellow-300" />}
       {d.slow_ma != null && <TTRow label="Slow MA"  value={`$${d.slow_ma.toFixed(2)}`} className="text-orange-400" />}
+      {indicators.ma9   !== false && d.ma_9   != null && <TTRow label="MA(9)"   value={`$${d.ma_9.toFixed(2)}`}   className="text-cyan-400" />}
+      {indicators.ma20  !== false && d.ma_20  != null && <TTRow label="MA(20)"  value={`$${d.ma_20.toFixed(2)}`}  className="text-yellow-300" />}
+      {indicators.ma50  !== false && d.ma_50  != null && <TTRow label="MA(50)"  value={`$${d.ma_50.toFixed(2)}`}  className="text-green-400" />}
+      {indicators.ma100 !== false && d.ma_100 != null && <TTRow label="MA(100)" value={`$${d.ma_100.toFixed(2)}`} className="text-orange-400" />}
+      {indicators.ma200 !== false && d.ma_200 != null && <TTRow label="MA(200)" value={`$${d.ma_200.toFixed(2)}`} className="text-purple-400" />}
     </div>
   )
 }
@@ -202,6 +212,11 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
   const hasBB     = (indicators.bb     !== false) && segmented.some(d => d.upper   != null)
   const hasFastMA = (indicators.fastMa !== false) && segmented.some(d => d.fast_ma != null)
   const hasSlowMA = (indicators.slowMa !== false) && segmented.some(d => d.slow_ma != null)
+  const hasMA9    = (indicators.ma9    !== false) && segmented.some(d => d.ma_9   != null)
+  const hasMA20   = (indicators.ma20   !== false) && segmented.some(d => d.ma_20  != null)
+  const hasMA50   = (indicators.ma50   !== false) && segmented.some(d => d.ma_50  != null)
+  const hasMA100  = (indicators.ma100  !== false) && segmented.some(d => d.ma_100 != null)
+  const hasMA200  = (indicators.ma200  !== false) && segmented.some(d => d.ma_200 != null)
   const hasStoch  = (indicators.stoch  !== false) && segmented.some(d => d.stoch_k != null)
   const hasATR    = (indicators.atr    !== false) && segmented.some(d => d.atr     != null)
   const hasOBV    = (indicators.obv    !== false) && segmented.some(d => d.obv     != null)
@@ -245,7 +260,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
             tickFormatter={v => `$${v.toFixed(2)}`}
           />
           <YAxis yAxisId="vol" orientation="left" domain={[0, maxVol * 5]} hide />
-          <Tooltip content={<OneDayTooltip prevClose={prevClose} />} />
+          <Tooltip content={<OneDayTooltip prevClose={prevClose} indicators={indicators} />} />
 
           {/* Subtle off-hours background tint */}
           {sessionAreas.map((a, i) => (
@@ -319,6 +334,11 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
           {hasBB && <Line yAxisId="price" type="monotone" dataKey="mid"     stroke={BB_MID}   strokeWidth={0.8} strokeDasharray="2 2" dot={false} isAnimationActive={false} />}
           {hasFastMA && <Line yAxisId="price" type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
           {hasSlowMA && <Line yAxisId="price" type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
+          {hasMA9   && <Line yAxisId="price" type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} name="MA(9)"   isAnimationActive={false} />}
+          {hasMA20  && <Line yAxisId="price" type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} name="MA(20)"  isAnimationActive={false} />}
+          {hasMA50  && <Line yAxisId="price" type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} name="MA(50)"  isAnimationActive={false} />}
+          {hasMA100 && <Line yAxisId="price" type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} name="MA(100)" isAnimationActive={false} />}
+          {hasMA200 && <Line yAxisId="price" type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} name="MA(200)" isAnimationActive={false} />}
         </ComposedChart>
       </ResponsiveContainer>
 
@@ -465,7 +485,7 @@ const sharedXAxis = (
   />
 )
 
-function PriceTooltip({ active, payload, label, prevClose }) {
+function PriceTooltip({ active, payload, label, prevClose, indicators = {} }) {
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
@@ -500,6 +520,11 @@ function PriceTooltip({ active, payload, label, prevClose }) {
       {d.lower   != null && <TTRow label="BB Lower" value={`$${d.lower.toFixed(2)}`}   className="text-pink-400" />}
       {d.fast_ma != null && <TTRow label="Fast MA"  value={`$${d.fast_ma.toFixed(2)}`} className="text-yellow-300" />}
       {d.slow_ma != null && <TTRow label="Slow MA"  value={`$${d.slow_ma.toFixed(2)}`} className="text-orange-400" />}
+      {indicators.ma9   !== false && d.ma_9   != null && <TTRow label="MA(9)"   value={`$${d.ma_9.toFixed(2)}`}   className="text-cyan-400" />}
+      {indicators.ma20  !== false && d.ma_20  != null && <TTRow label="MA(20)"  value={`$${d.ma_20.toFixed(2)}`}  className="text-yellow-300" />}
+      {indicators.ma50  !== false && d.ma_50  != null && <TTRow label="MA(50)"  value={`$${d.ma_50.toFixed(2)}`}  className="text-green-400" />}
+      {indicators.ma100 !== false && d.ma_100 != null && <TTRow label="MA(100)" value={`$${d.ma_100.toFixed(2)}`} className="text-orange-400" />}
+      {indicators.ma200 !== false && d.ma_200 != null && <TTRow label="MA(200)" value={`$${d.ma_200.toFixed(2)}`} className="text-purple-400" />}
     </div>
   )
 }
@@ -578,7 +603,7 @@ function OBVTooltip({ active, payload }) {
   )
 }
 
-export default function SubplotChart({ data = [], height = 240, indicators = {}, period = '', prevClose }) {
+export default function SubplotChart({ data = [], warmupData, height = 240, indicators = {}, period = '', prevClose }) {
   const syncId = useId()
 
   if (!data.length) return (
@@ -592,7 +617,7 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
     return <OneDayChart data={data} period={period} height={height} indicators={indicators} prevClose={prevClose} syncId={syncId} />
   }
 
-  const enriched = enrichData(data)
+  const enriched = warmupData?.length ? enrichDataWithWarmup(warmupData, data) : enrichData(data)
   const step = Math.max(1, Math.floor(enriched.length / 300))
   // Always keep signal bars so buy/sell markers are never dropped
   const sampled = enriched.filter((_, i) => i % step === 0 || enriched[i].signal !== 0)
@@ -604,6 +629,11 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
   const hasBB   = (indicators.bb     !== false) && sampled.some(d => d.upper   != null)
   const hasFastMA = (indicators.fastMa !== false) && sampled.some(d => d.fast_ma != null)
   const hasSlowMA = (indicators.slowMa !== false) && sampled.some(d => d.slow_ma != null)
+  const hasMA9    = (indicators.ma9    !== false) && sampled.some(d => d.ma_9   != null)
+  const hasMA20   = (indicators.ma20   !== false) && sampled.some(d => d.ma_20  != null)
+  const hasMA50   = (indicators.ma50   !== false) && sampled.some(d => d.ma_50  != null)
+  const hasMA100  = (indicators.ma100  !== false) && sampled.some(d => d.ma_100 != null)
+  const hasMA200  = (indicators.ma200  !== false) && sampled.some(d => d.ma_200 != null)
   const hasStoch  = (indicators.stoch  !== false) && sampled.some(d => d.stoch_k != null)
   const hasATR    = (indicators.atr    !== false) && sampled.some(d => d.atr     != null)
   const hasOBV    = (indicators.obv    !== false) && sampled.some(d => d.obv     != null)
@@ -626,7 +656,7 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
             width={60}
             tickFormatter={v => `$${v.toFixed(0)}`}
           />
-          <Tooltip content={<PriceTooltip prevClose={prevClose} />} />
+          <Tooltip content={<PriceTooltip prevClose={prevClose} indicators={indicators} />} />
           {sessionAreas.map((a, i) => (
             <ReferenceArea key={`off-p-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
           ))}
@@ -639,6 +669,11 @@ export default function SubplotChart({ data = [], height = 240, indicators = {},
           {hasBB && <Line type="monotone" dataKey="mid" stroke={BB_MID} strokeWidth={0.8} strokeDasharray="2 2" dot={false} name="BB Mid" isAnimationActive={false} />}
           {hasFastMA && <Line type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} name="Fast MA" isAnimationActive={false} />}
           {hasSlowMA && <Line type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} name="Slow MA" isAnimationActive={false} />}
+          {hasMA9   && <Line type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} name="MA(9)"   isAnimationActive={false} />}
+          {hasMA20  && <Line type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} name="MA(20)"  isAnimationActive={false} />}
+          {hasMA50  && <Line type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} name="MA(50)"  isAnimationActive={false} />}
+          {hasMA100 && <Line type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} name="MA(100)" isAnimationActive={false} />}
+          {hasMA200 && <Line type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} name="MA(200)" isAnimationActive={false} />}
         </ComposedChart>
       </ResponsiveContainer>
 

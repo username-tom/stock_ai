@@ -88,8 +88,11 @@ const PERIOD_OPTIONS = [
 
 const INDICATOR_OPTIONS = [
   { key: 'bb',     label: 'BB' },
-  { key: 'fastMa', label: 'Fast MA' },
-  { key: 'slowMa', label: 'Slow MA' },
+  { key: 'ma9',    label: 'MA(9)' },
+  { key: 'ma20',   label: 'MA(20)' },
+  { key: 'ma50',   label: 'MA(50)' },
+  { key: 'ma100',  label: 'MA(100)' },
+  { key: 'ma200',  label: 'MA(200)' },
   { key: 'rsi',    label: 'RSI' },
   { key: 'macd',   label: 'MACD' },
 ]
@@ -99,6 +102,7 @@ export default function PriceChartPanel({
   indicators, toggleIndicator,
   histData, histLoading,
   chartPrevClose,
+  warmupData = null,
   quoteTelemetry = null,
   isInWatchlist = false,
 }) {
@@ -186,6 +190,7 @@ export default function PriceChartPanel({
       ) : (
         <SubplotChart
           data={histData?.data ?? []}
+          warmupData={warmupData ?? undefined}
           height={220}
           indicators={indicators}
           period={chartPeriod}

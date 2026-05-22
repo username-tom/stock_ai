@@ -119,12 +119,35 @@ function getCachedHistory(symbol, period) {
   return entry.data
 }
 
+/**
+ * Merge two histData objects by their `.data` OHLCV arrays.
+ * For bars with the same date, the fresh value wins (handles intraday updates).
+ * Bars present only in cached are preserved (prior history).
+ * Result `.data` is sorted ascending by date.
+ */
+function mergeHistoryData(cachedObj, freshObj) {
+  if (!cachedObj) return freshObj
+  if (!freshObj)  return cachedObj
+  const cachedRows = Array.isArray(cachedObj.data) ? cachedObj.data : []
+  const freshRows  = Array.isArray(freshObj.data)  ? freshObj.data  : []
+  if (!cachedRows.length) return freshObj
+  if (!freshRows.length)  return cachedObj
+  const map = new Map(cachedRows.map(d => [d.date, d]))
+  for (const d of freshRows) map.set(d.date, d)
+  const sorted = Array.from(map.values()).sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : 0
+  )
+  return { ...freshObj, data: sorted }
+}
+
 function writeHistoryCache(symbol, period, data) {
   if (!symbol || !period || !data) return
 
   const now = Date.now()
   const cache = readHistoryCache()
-  cache[historyCacheKey(symbol, period)] = { ts: now, data }
+  const existing = cache[historyCacheKey(symbol, period)]?.data
+  const merged   = mergeHistoryData(existing, data)
+  cache[historyCacheKey(symbol, period)] = { ts: now, data: merged }
 
   for (const [key, entry] of Object.entries(cache)) {
     const parts = key.split('|')
@@ -163,7 +186,7 @@ export default function Dashboard() {
       setSearchParams({}, { replace: true })
     }
   }, [searchParams])
-  const [indicators, setIndicators] = useState({ bb: true, fastMa: true, slowMa: true, rsi: true, macd: true })
+  const [indicators, setIndicators] = useState({ bb: true, ma9: false, ma20: true, ma50: true, ma100: false, ma200: true, rsi: true, macd: true })
   const [activeTab, setActiveTab] = useState('charts')
 
   const toggleIndicator = (key) => setIndicators(prev => ({ ...prev, [key]: !prev[key] }))
@@ -217,11 +240,36 @@ export default function Dashboard() {
     enabled: !!chartSymbol,
   })
 
+  // Fetch 1Y daily data as warmup for indicator seeding on short-period charts.
+  // MA(200) needs ~200 trading days; 1Y gives ~252.  Only needed for periods
+  // where the visible data alone is too short to seed the indicators.
+  const needsWarmup = ['5d', '2w', '1mo', '3mo', '6mo'].includes(chartPeriod)
+  // Warmup shares the '1y' localStorage slot; serves as initialData so the
+  // chart renders immediately on load without a network round-trip.
+  const cachedWarmup = useMemo(() => getCachedHistory(chartSymbol, '1y'), [chartSymbol])
+  const { data: warmupHistData } = useQuery({
+    // Reuse the same key as the 1Y chart view so they share React Query's cache.
+    queryKey: ['history', chartSymbol, '1y'],
+    queryFn: () => getHistory(chartSymbol, '1y'),
+    initialData: cachedWarmup,
+    staleTime: 24 * 60 * 60_000,  // 24h — daily bars don’t change retroactively
+    refetchIntervalInBackground: false,
+    enabled: !!chartSymbol && needsWarmup,
+  })
+  const warmupData = needsWarmup ? (warmupHistData?.data ?? null) : null
+
   useEffect(() => {
     if (histData && chartSymbol && chartPeriod) {
       writeHistoryCache(chartSymbol, chartPeriod, histData)
     }
   }, [histData, chartSymbol, chartPeriod])
+
+  // Persist warmup data so the next page load skips the 1Y fetch entirely
+  useEffect(() => {
+    if (warmupHistData && chartSymbol) {
+      writeHistoryCache(chartSymbol, '1y', warmupHistData)
+    }
+  }, [warmupHistData, chartSymbol])
 
   const chartPrevClose =
     quotesMap?.[chartSymbol]?.previous_close ??
@@ -310,6 +358,7 @@ export default function Dashboard() {
               histData={histData}
               histLoading={histLoading}
               chartPrevClose={chartPrevClose}
+              warmupData={warmupData}
               quoteTelemetry={quotesMap?.[chartSymbol]?.ib_telemetry ?? null}
               isInWatchlist={watchlist.includes(chartSymbol)}
             />
