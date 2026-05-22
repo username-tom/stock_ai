@@ -172,11 +172,18 @@ export default function SandboxPanel() {
     }
   }, [ibConnected])
 
+  // Always include all IB position symbols in the symbols array for quote fetching
   const symbols = useMemo(() => {
     const baseSymbols = rawPositions.map(p => p.symbol)
-    const merged = ibConnected ? [...baseSymbols, ...ibWatchlistSymbols] : baseSymbols
-    return [...new Set(merged)]
-  }, [ibConnected, rawPositions, ibWatchlistSymbols])
+    let ibSymbols = []
+    if (ibConnected && ibPositionsData?.positions) {
+      ibSymbols = ibPositionsData.positions.map(p => p.symbol)
+    }
+    const merged = ibConnected
+      ? [...baseSymbols, ...ibWatchlistSymbols, ...ibSymbols]
+      : baseSymbols
+    return [...new Set(merged.filter(Boolean))]
+  }, [ibConnected, rawPositions, ibWatchlistSymbols, ibPositionsData])
 
   const { data: learnerData } = useQuery({
     queryKey: ['sandbox-learner-insights', symbols.join(',')],
@@ -227,6 +234,16 @@ export default function SandboxPanel() {
     refetchInterval: appSettings.sandbox_quotes_ms,
   })
   const quotes = quotesData ?? {}
+  const getOwnedMarketPrice = pos => {
+    const quotePrice = quotes[pos.symbol]?.last_price
+    if (quotePrice != null) return quotePrice
+    const storedMarketPrice = pos.market_price ?? pos.last_price
+    if (storedMarketPrice != null) return storedMarketPrice
+    const shares = Number(pos.shares ?? 0)
+    const marketValue = Number(pos.market_value ?? 0)
+    if (shares > 0 && marketValue > 0) return marketValue / shares
+    return pos.shares > 0 ? pos.avg_cost : null
+  }
   const { data: sectorsData } = useQuery({
     queryKey: ['sandbox-sectors', symbols.join(',')],
     queryFn: () => symbols.length ? getSymbolSectors(symbols) : Promise.resolve({}),
@@ -241,16 +258,15 @@ export default function SandboxPanel() {
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const selectedPos = positions.find(p => p.symbol === selectedSymbol)
-  const selectedPrice = quotes[selectedSymbol]?.last_price ?? selectedPos?.avg_cost ?? 0
+  const selectedPrice = selectedPos ? (getOwnedMarketPrice(selectedPos) ?? 0) : 0
 
   // portfolio calcs
   const totalEquity = useMemo(() => {
     if (ibConnected && Number.isFinite(Number(accountData?.equity))) {
       return Number(accountData.equity)
     }
-    return rawPositions.reduce((s, p) => s + (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares, 0)
-  }, [ibConnected, accountData?.equity, rawPositions, quotes])
-
+    return rawPositions.reduce((s, p) => s + (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares, 0)
+  }, [ibConnected, accountData?.equity, rawPositions, quotesData])
   const totalRealizedPnl = useMemo(() => {
     if (ibConnected && Number.isFinite(Number(accountData?.realized_pnl))) {
       return Number(accountData.realized_pnl)
@@ -262,23 +278,23 @@ export default function SandboxPanel() {
     if (ibConnected && Number.isFinite(Number(accountData?.unrealized_pnl))) {
       return Number(accountData.unrealized_pnl)
     }
-    return rawPositions.reduce((s, p) => s + ((quotes[p.symbol]?.last_price ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
-  }, [ibConnected, accountData?.unrealized_pnl, rawPositions, quotes])
+    return rawPositions.reduce((s, p) => s + ((getOwnedMarketPrice(p) ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
+  }, [ibConnected, accountData?.unrealized_pnl, rawPositions, quotesData])
   const pieData = useMemo(() => {
     const active = rawPositions.filter(p => p.shares > 0 || p.allocated_funds > 0)
     const total = active.reduce((s, p) => {
-      const mv = (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares
+      const mv = (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares
       const cashRemaining = Math.max(0, p.allocated_funds - p.avg_cost * p.shares)
       return s + mv + cashRemaining
     }, 0)
     if (total === 0) return []
     return active.map(p => {
-      const mv = (quotes[p.symbol]?.last_price ?? p.avg_cost) * p.shares
+      const mv = (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares
       const cashRemaining = Math.max(0, p.allocated_funds - p.avg_cost * p.shares)
       const sliceValue = mv + cashRemaining
       return { symbol: p.symbol, shares: p.shares, market_value: sliceValue, mv, cash: cashRemaining, pct: pct(sliceValue, total) }
     })
-  }, [rawPositions, quotes])
+  }, [rawPositions, quotesData])
   const selectedMarketValue = selectedPos ? selectedPrice * selectedPos.shares : 0
   const selectedUnrealised = selectedPos ? selectedMarketValue - selectedPos.avg_cost * selectedPos.shares : 0
 

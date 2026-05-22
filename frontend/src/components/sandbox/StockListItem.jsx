@@ -51,7 +51,12 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
 
   // Memoize calculations to ensure they update on quote/pos changes
   const calculations = useMemo(() => {
-    const mp = quote?.last_price ?? pos.avg_cost
+    const shares = Number(pos.shares ?? 0)
+    const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
+    const marketValuePrice = shares > 0 && Number.isFinite(Number(pos.market_value)) && Number(pos.market_value) > 0
+      ? Number(pos.market_value) / shares
+      : null
+    const mp = quote?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? (shares > 0 ? pos.avg_cost : null)
     const equity = mp * pos.shares
     const unrealised = equity - pos.avg_cost * pos.shares
     const totalPnl = pos.realized_pnl + unrealised
@@ -137,7 +142,7 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>{pos.shares > 0 ? `${pos.shares.toFixed(4)} sh` : 'Watchlist'}</span>
           <span className="font-mono text-slate-400">
-            {quote?.last_price != null ? `$${quote.last_price.toFixed(2)}` : pos.shares > 0 ? fmtMoney(equity) : '—'}
+            {mp != null ? fmtMoney(mp) : '—'}
           </span>
         </div>
         {pos.pending_shares > 0 && (

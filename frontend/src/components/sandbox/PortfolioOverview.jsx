@@ -161,7 +161,11 @@ export default function PortfolioOverview({
       .map((p) => {
         const shares = Math.abs(Number(p._effShares ?? 0))
         const avgCost = Number(p._effAvgCost ?? 0)
-        const mp = Number(quotes?.[p.symbol]?.last_price ?? avgCost)
+        const storedMarketPrice = Number(p.market_price ?? p.last_price)
+        const marketValuePrice = shares > 0 && Number.isFinite(Number(p.market_value)) && Number(p.market_value) > 0
+          ? Number(p.market_value) / shares
+          : null
+        const mp = Number(quotes?.[p.symbol]?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost)
         const mv = shares * mp
         return {
           symbol: p.symbol,
@@ -643,7 +647,11 @@ export default function PortfolioOverview({
                     const shares = Number(pos._effShares ?? 0)
                     const avgCost = Number(pos._effAvgCost ?? 0)
                     const q = quotes[pos.symbol]
-                    const mp = q?.last_price ?? avgCost
+                    const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
+                    const marketValuePrice = shares > 0 && Number.isFinite(Number(pos.market_value)) && Number(pos.market_value) > 0
+                      ? Number(pos.market_value) / shares
+                      : null
+                    const mp = q?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
                     const mv = mp * shares
                     const costBasis = avgCost * shares
                     const cashRemaining = Math.max(0, pos.allocated_funds - avgCost * shares)
@@ -843,7 +851,11 @@ export default function PortfolioOverview({
               .map(p => {
                 const avgCost = Number(p._effAvgCost ?? 0)
                 const shares = Number(p._effShares ?? 0)
-                const mp = quotes[p.symbol]?.last_price ?? avgCost
+                const storedMarketPrice = Number(p.market_price ?? p.last_price)
+                const marketValuePrice = shares > 0 && Number.isFinite(Number(p.market_value)) && Number(p.market_value) > 0
+                  ? Number(p.market_value) / shares
+                  : null
+                const mp = quotes[p.symbol]?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
                 const unreal = (mp - avgCost) * shares
                 return { symbol: p.symbol, value: parseFloat(unreal.toFixed(2)) }
               })

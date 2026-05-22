@@ -19,6 +19,7 @@ from app.routers.sandbox_router._helpers import (
     ensure_sandbox_write_allowed,
     offload_simulated_state,
 )
+from app.services import market_service
 from app.services.ib_service import ib_service
 from app.services.local_storage import save_portfolio_state
 
@@ -77,9 +78,15 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
             avg_cost = float((ib_item or {}).get("avg_cost") or 0.0)
             market_price = avg_cost
             if ib_item is not None:
-                quote = await ib_service.get_market_data(symbol)
+                quote = await market_service.get_quote(symbol, source_preference="ib")
                 if isinstance(quote, dict) and "error" not in quote:
-                    market_price = float(quote.get("last") or quote.get("close") or avg_cost or 0.0)
+                    market_price = float(
+                        quote.get("last_price")
+                        or quote.get("last")
+                        or quote.get("close")
+                        or avg_cost
+                        or 0.0
+                    )
 
             market_value = quantity * market_price
             unrealized = (market_price - avg_cost) * quantity
@@ -91,6 +98,8 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "allocated_funds": round(max(0.0, market_value), 4),
                 "shares": quantity,
                 "avg_cost": round(avg_cost, 4),
+                "market_price": round(market_price, 4),
+                "last_price": round(market_price, 4),
                 "strategy_name": local.strategy_name if local else None,
                 "strategy_enabled": bool(local.strategy_enabled) if local else False,
                 "last_signal": local.last_signal if local else None,
