@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Cell, Tooltip, ResponsiveContainer, Treemap,
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
@@ -6,6 +6,7 @@ import {
 import {
   HomeIcon, ChartPieIcon, TableCellsIcon, ClockIcon,
   ArrowUpIcon, ArrowDownIcon, BanknotesIcon,
+  ChevronLeftIcon, ChevronRightIcon, ChevronDoubleLeftIcon, ChevronDoubleRightIcon,
 } from '@heroicons/react/24/outline'
 import { useQuery } from '@tanstack/react-query'
 import { getSandboxFundEvents } from '../../api/client'
@@ -105,6 +106,8 @@ export default function PortfolioOverview({
   })
   const fundEvents = isSimulated ? (fundEventsData?.events ?? []) : []
   const [activityPage, setActivityPage] = useState(0)
+  const gainLossChartRef = useRef(null)
+  const [gainLossChartWidth, setGainLossChartWidth] = useState(0)
   const netDepositedFromEvents = fundEvents.reduce((sum, event) => {
     if (event.event_type === 'deposit') return sum + (event.amount ?? 0)
     if (event.event_type === 'withdrawal') return sum - (event.amount ?? 0)
@@ -269,6 +272,134 @@ export default function PortfolioOverview({
   const avgDailyRealizedPnl = avgDailyRealizedPnlServer ?? avgDailyRealizedPnlFallback
   const realizedTradeDays = realizedTradeDaysServer ?? realizedTradeDaysFallback
   const elapsedDays = elapsedDaysServer ?? elapsedTradingDaysFallback
+
+  useEffect(() => {
+    if (!gainLossChartRef.current) return undefined
+
+    const updateWidth = () => {
+      const next = Math.floor(gainLossChartRef.current?.clientWidth ?? 0)
+      setGainLossChartWidth(prev => (prev !== next ? next : prev))
+    }
+
+    updateWidth()
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(gainLossChartRef.current)
+    window.addEventListener('resize', updateWidth)
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateWidth)
+    }
+  }, [analytics?.total_trades, analytics?.cumulative_pnl?.length])
+
+  const gainLossSeries = useMemo(() => {
+    const dailyMap = new Map()
+
+    for (const trade of realizedTradeLog) {
+      const key = dateKey(trade.date)
+      dailyMap.set(key, (dailyMap.get(key) ?? 0) + trade.pnl)
+    }
+
+    if (dailyMap.size === 0 && analytics?.cumulative_pnl?.length > 1) {
+      for (let i = 1; i < analytics.cumulative_pnl.length; i++) {
+        const current = analytics.cumulative_pnl[i]
+        const previous = analytics.cumulative_pnl[i - 1]
+        const dt = parsePointDate(current.date)
+        if (!dt) continue
+        const key = dateKey(dt)
+        const diff = Number(current.value ?? 0) - Number(previous.value ?? 0)
+        dailyMap.set(key, (dailyMap.get(key) ?? 0) + diff)
+      }
+    }
+
+    const baseDaily = Array.from(dailyMap.entries())
+      .map(([key, value]) => ({
+        key,
+        start: new Date(`${key}T00:00:00`),
+        end: new Date(`${key}T00:00:00`),
+        value,
+      }))
+      .sort((a, b) => a.start - b.start)
+
+    if (baseDaily.length === 0) {
+      return { granularity: 'day', data: [] }
+    }
+
+    const startOfWeek = (date) => {
+      const d = new Date(date)
+      d.setHours(0, 0, 0, 0)
+      const day = d.getDay()
+      const shift = day === 0 ? -6 : 1 - day
+      d.setDate(d.getDate() + shift)
+      return d
+    }
+
+    const startOfMonth = (date) => new Date(date.getFullYear(), date.getMonth(), 1)
+    const startOfQuarter = (date) => new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1)
+    const startOfYear = (date) => new Date(date.getFullYear(), 0, 1)
+
+    const formatDate = (date) => date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+
+    const buildBuckets = (unit) => {
+      const buckets = new Map()
+      for (const row of baseDaily) {
+        let bucketStart = row.start
+        if (unit === 'week') bucketStart = startOfWeek(row.start)
+        else if (unit === 'month') bucketStart = startOfMonth(row.start)
+        else if (unit === 'quarter') bucketStart = startOfQuarter(row.start)
+        else if (unit === 'year') bucketStart = startOfYear(row.start)
+
+        const bucketKey = dateKey(bucketStart)
+        const existing = buckets.get(bucketKey)
+        if (existing) {
+          existing.value += row.value
+          if (row.start > existing.end) existing.end = row.start
+        } else {
+          buckets.set(bucketKey, {
+            key: bucketKey,
+            start: bucketStart,
+            end: row.start,
+            value: row.value,
+          })
+        }
+      }
+
+      return Array.from(buckets.values())
+        .sort((a, b) => a.start - b.start)
+        .map((bucket) => {
+          let label = formatDate(bucket.start)
+          if (unit === 'week') label = `Wk ${formatDate(bucket.start)}`
+          else if (unit === 'month') label = bucket.start.toLocaleDateString(undefined, { month: 'short', year: '2-digit' })
+          else if (unit === 'quarter') label = `Q${Math.floor(bucket.start.getMonth() / 3) + 1} ${bucket.start.getFullYear()}`
+          else if (unit === 'year') label = String(bucket.start.getFullYear())
+
+          return {
+            ...bucket,
+            label,
+            tooltipLabel: unit === 'day'
+              ? formatDate(bucket.start)
+              : `${formatDate(bucket.start)} - ${formatDate(bucket.end)}`,
+          }
+        })
+    }
+
+    const units = ['day', 'week', 'month', 'quarter', 'year']
+    const fallbackWidth = 640
+    const usableWidth = Math.max(1, (gainLossChartWidth > 0 ? gainLossChartWidth : fallbackWidth) - 24)
+    const minBarWidth = 5
+
+    let chosen = units[units.length - 1]
+    let chosenData = buildBuckets(chosen)
+    for (const unit of units) {
+      const data = buildBuckets(unit)
+      const estimatedBarWidth = data.length > 0 ? usableWidth / data.length : usableWidth
+      chosen = unit
+      chosenData = data
+      if (estimatedBarWidth >= minBarWidth || unit === units[units.length - 1]) break
+    }
+
+    return { granularity: chosen, data: chosenData }
+  }, [analytics?.cumulative_pnl, dateKey, gainLossChartWidth, parsePointDate, realizedTradeLog])
 
   // Max gain & max drawdown from cumulative P&L curve
   let maxGain = 0
@@ -725,34 +856,33 @@ export default function PortfolioOverview({
                 </div>
               )}
 
-              {analytics.cumulative_pnl.length > 1 && (() => {
-                const dailyPnl = []
-                for (let i = 1; i < analytics.cumulative_pnl.length; i++) {
-                  const current = analytics.cumulative_pnl[i]
-                  const previous = analytics.cumulative_pnl[i - 1]
-                  dailyPnl.push({
-                    date: current.date,
-                    value: current.value - previous.value,
-                  })
-                }
+              {gainLossSeries.data.length > 0 && (() => {
+                const granularityTitle = {
+                  day: 'Daily Gain / Loss',
+                  week: 'Weekly Gain / Loss',
+                  month: 'Monthly Gain / Loss',
+                  quarter: 'Quarterly Gain / Loss',
+                  year: 'Yearly Gain / Loss',
+                }[gainLossSeries.granularity] ?? 'Gain / Loss'
                 return (
                   <div className="card">
-                    <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Daily Gain / Loss</div>
-                    <div className="h-48">
+                    <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">{granularityTitle}</div>
+                    <div className="h-48" ref={gainLossChartRef}>
                       <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={dailyPnl} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                        <BarChart data={gainLossSeries.data} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                          <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
-                            tickFormatter={v => v.slice(5)} />
+                          <XAxis dataKey="label" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
+                            interval="preserveStartEnd" />
                           <YAxis tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
                             tickFormatter={v => `$${v >= 0 ? '+' : ''}${v >= 1000 || v <= -1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0)}`} width={54} />
                           <Tooltip
                             contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
                             labelStyle={{ color: '#94a3b8' }}
-                            formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Daily P&L']}
+                            labelFormatter={(_label, payload) => payload?.[0]?.payload?.tooltipLabel ?? _label}
+                            formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, `${gainLossSeries.granularity.charAt(0).toUpperCase()}${gainLossSeries.granularity.slice(1)} P&L`]}
                           />
                           <Bar dataKey="value" radius={[3, 3, 0, 0]}>
-                            {dailyPnl.map((entry, idx) => (
+                            {gainLossSeries.data.map((entry, idx) => (
                               <Cell key={idx} fill={entry.value >= 0 ? '#10b981' : '#ef4444'} />
                             ))}
                           </Bar>
@@ -974,17 +1104,87 @@ export default function PortfolioOverview({
             </div>
             {totalPages > 1 && (
               <div className="flex items-center justify-between px-1 pt-3 border-t border-dark-600 mt-2">
-                <button
-                  onClick={() => setActivityPage(p => Math.max(0, p - 1))}
-                  disabled={safePage === 0}
-                  className="text-xs px-2.5 py-1 rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                >← Prev</button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setActivityPage(0)}
+                    disabled={safePage === 0}
+                    title="Go to first page"
+                    aria-label="Go to first page"
+                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronDoubleLeftIcon className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => setActivityPage(p => Math.max(0, p - 10))}
+                    disabled={safePage === 0}
+                    title="Jump back 10 pages"
+                    aria-label="Jump back 10 pages"
+                    className="relative h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronDoubleLeftIcon className="h-4 w-4" />
+                    <span className="absolute -right-1 -top-1 text-[9px] leading-none text-slate-300">10</span>
+                  </button>
+                  <button
+                    onClick={() => setActivityPage(p => Math.max(0, p - 5))}
+                    disabled={safePage === 0}
+                    title="Jump back 5 pages"
+                    aria-label="Jump back 5 pages"
+                    className="relative h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeftIcon className="h-4 w-4" />
+                    <span className="absolute -right-1 -top-1 text-[9px] leading-none text-slate-300">5</span>
+                  </button>
+                  <button
+                    onClick={() => setActivityPage(p => Math.max(0, p - 1))}
+                    disabled={safePage === 0}
+                    title="Previous page"
+                    aria-label="Previous page"
+                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronLeftIcon className="h-4 w-4" />
+                  </button>
+                </div>
                 <span className="text-xs text-slate-500">{safePage + 1} / {totalPages} · {all.length} total</span>
-                <button
-                  onClick={() => setActivityPage(p => Math.min(totalPages - 1, p + 1))}
-                  disabled={safePage === totalPages - 1}
-                  className="text-xs px-2.5 py-1 rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                >Next →</button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setActivityPage(p => Math.min(totalPages - 1, p + 1))}
+                    disabled={safePage === totalPages - 1}
+                    title="Next page"
+                    aria-label="Next page"
+                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronRightIcon className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => setActivityPage(p => Math.min(totalPages - 1, p + 5))}
+                    disabled={safePage === totalPages - 1}
+                    title="Jump forward 5 pages"
+                    aria-label="Jump forward 5 pages"
+                    className="relative h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronRightIcon className="h-4 w-4" />
+                    <span className="absolute -left-1 -top-1 text-[9px] leading-none text-slate-300">5</span>
+                  </button>
+                  <button
+                    onClick={() => setActivityPage(p => Math.min(totalPages - 1, p + 10))}
+                    disabled={safePage === totalPages - 1}
+                    title="Jump forward 10 pages"
+                    aria-label="Jump forward 10 pages"
+                    className="relative h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronDoubleRightIcon className="h-4 w-4" />
+                    <span className="absolute -left-1 -top-1 text-[9px] leading-none text-slate-300">10</span>
+                  </button>
+                  <button
+                    onClick={() => setActivityPage(totalPages - 1)}
+                    disabled={safePage === totalPages - 1}
+                    title="Go to last page"
+                    aria-label="Go to last page"
+                    className="h-7 w-7 inline-flex items-center justify-center rounded border border-dark-600 text-slate-400 hover:text-slate-200 hover:border-dark-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <ChevronDoubleRightIcon className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
             )}
             </>
