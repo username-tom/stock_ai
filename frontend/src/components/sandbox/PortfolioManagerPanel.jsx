@@ -89,6 +89,7 @@ function buildDraftFromSettings(settings) {
     sentiment_data_points: Math.max(MIN_SENTIMENT_DATA_POINTS, Number(settings.sentiment_data_points ?? MIN_SENTIMENT_DATA_POINTS)),
     sentiment_interval: settings.sentiment_interval ?? '1m',
     ai_tag_strategy_enabled: settings.ai_tag_strategy_enabled ?? false,
+    ai_sentiment_change_enabled: settings.ai_sentiment_change_enabled ?? true,
     ai_tag_strategies: {
       ...DEFAULT_AI_TAG_STRATEGIES,
       ...(settings.ai_tag_strategies ?? {}),
@@ -98,6 +99,8 @@ function buildDraftFromSettings(settings) {
     ai_tag_long_engine_off: settings.ai_tag_long_engine_off ?? true,
     ai_tag_long_tp_pct: settings.ai_tag_long_tp_pct ?? 0,
     ai_tag_long_sl_pct: settings.ai_tag_long_sl_pct ?? 0,
+    ai_tag_no_loss_sell: settings.ai_tag_no_loss_sell ?? true,
+    pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.75,
   }
 }
 
@@ -461,12 +464,15 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       sentiment_data_points: Number(draft.sentiment_data_points),
       sentiment_interval: draft.sentiment_interval,
       ai_tag_strategy_enabled: draft.ai_tag_strategy_enabled,
+      ai_sentiment_change_enabled: draft.ai_sentiment_change_enabled,
       ai_tag_strategies: draft.ai_tag_strategies,
       ai_tag_allow_overnight: draft.ai_tag_allow_overnight,
       ai_tag_action_mode: draft.ai_tag_action_mode,
       ai_tag_long_engine_off: draft.ai_tag_long_engine_off,
       ai_tag_long_tp_pct: Number(draft.ai_tag_long_tp_pct),
       ai_tag_long_sl_pct: Number(draft.ai_tag_long_sl_pct),
+      ai_tag_no_loss_sell: draft.ai_tag_no_loss_sell,
+      pending_price_drift_cancel_pct: Number(draft.pending_price_drift_cancel_pct),
     })
   }
 
@@ -705,7 +711,12 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           <ChartBarIcon className="h-3.5 w-3.5" />
           Sentiment window: last {settings.sentiment_data_points ?? 10} bars ({settings.sentiment_interval}, {settings.sentiment_lookback_days}d range)
         </span>
-        {settings.ai_tag_strategy_enabled && (
+        {settings.ai_sentiment_change_enabled === false ? (
+          <span className="flex items-center gap-1 text-slate-600">
+            <CpuChipIcon className="h-3.5 w-3.5" />
+            AI sentiment changes disabled
+          </span>
+        ) : settings.ai_tag_strategy_enabled && (
           <span className="flex items-center gap-1 text-violet-400">
             <CpuChipIcon className="h-3.5 w-3.5" />
             AI tag routing active
@@ -714,6 +725,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             {settings.ai_tag_action_mode !== 'direct' && settings.ai_tag_long_engine_off && ' · long hold mode'}
             {settings.ai_tag_long_tp_pct > 0 && ` TP ${settings.ai_tag_long_tp_pct}%`}
             {settings.ai_tag_long_sl_pct > 0 && ` SL ${settings.ai_tag_long_sl_pct}%`}
+            {settings.ai_tag_no_loss_sell !== false ? ' · no-loss AI exits' : ''}
+            {settings.pending_price_drift_cancel_pct != null && ` · drift cancel ${Number(settings.pending_price_drift_cancel_pct).toFixed(2)}%`}
           </span>
         )}
       </div>
@@ -860,7 +873,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       )}
 
       {/* AI Tags overview */}
-      {settings.ai_tag_strategy_enabled && Object.keys(aiTags).length > 0 && (
+      {settings.ai_sentiment_change_enabled !== false && settings.ai_tag_strategy_enabled && Object.keys(aiTags).length > 0 && (
         <div>
           <div className="flex items-center gap-3 mb-2">
             <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">AI Tag Routing</span>
@@ -1441,19 +1454,37 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             {/* ── AI Tag Strategy Routing ── */}
             <CollapsibleSection
               title="AI Tag Strategy Routing"
-              badge={draft.ai_tag_strategy_enabled ? 'Enabled' : 'Disabled'}
+              badge={draft.ai_sentiment_change_enabled ? (draft.ai_tag_strategy_enabled ? 'Enabled' : 'Configured') : 'Disabled'}
               isOpen={openSections.aiTag}
               onToggle={() => toggleSection('aiTag')}
             >
+              <SettingRow
+                label="AI Sentiment Changes"
+                hint="Master switch for AI-driven strategy/trade changes. Turn this off to prevent AI sentiment from altering PM actions."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_sentiment_change_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, ai_sentiment_change_enabled: !d.ai_sentiment_change_enabled }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_sentiment_change_enabled ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.ai_sentiment_change_enabled ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </SettingRow>
+
               <SettingRow
                 label="AI Tag Strategy Switching"
                 hint="When enabled, the portfolio manager automatically updates the strategy for each position based on its AI learner tag. WATCH tag always keeps the current default day-trading strategy unchanged."
               >
                 <label className="flex items-center gap-2 cursor-pointer">
                   <div
-                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_strategy_enabled ? 'bg-violet-600' : 'bg-dark-600'} ${!draft.ai_sentiment_change_enabled ? 'opacity-50' : ''}`}
                     onClick={() => {
-                      if (!editSettings) return
+                      if (!editSettings || !draft.ai_sentiment_change_enabled) return
                       updateDraft(d => ({ ...d, ai_tag_strategy_enabled: !d.ai_tag_strategy_enabled }))
                     }}
                   >
@@ -1463,7 +1494,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 </label>
               </SettingRow>
 
-              {draft.ai_tag_strategy_enabled && (
+              {!draft.ai_sentiment_change_enabled ? (
+                <div className="text-xs text-slate-500">AI sentiment changes are disabled. Current strategy configuration is preserved but not actively applied by PM.</div>
+              ) : draft.ai_tag_strategy_enabled && (
                 <>
                   <SettingRow
                     label="Action Mode"
@@ -1582,6 +1615,40 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                         className="input w-28 text-sm py-1.5"
                       />
                       <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_sl_pct) > 0 ? '' : ' (off)'}</span>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="No-Loss AI Sell Guard"
+                    hint="When enabled, AI-driven sells are blocked if they would realize a loss. The position is held and retried later."
+                  >
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <div
+                        className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_tag_no_loss_sell ? 'bg-violet-600' : 'bg-dark-600'}`}
+                        onClick={() => {
+                          if (!editSettings) return
+                          updateDraft(d => ({ ...d, ai_tag_no_loss_sell: !d.ai_tag_no_loss_sell }))
+                        }}
+                      >
+                        <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_tag_no_loss_sell ? 'translate-x-4' : ''}`} />
+                      </div>
+                      <span className="text-xs text-slate-300">{draft.ai_tag_no_loss_sell ? 'Enabled (block loss-making AI exits)' : 'Disabled (allow AI exits at loss)'}</span>
+                    </label>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Pending Price Drift Cancel %"
+                    hint="Cancel pending BUY orders when market price drifts from pending fill/limit by at least this percentage. Applies to simulated and IB pending-buy cancels."
+                  >
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={0} max={100} step={0.05}
+                        disabled={!editSettings}
+                        value={draft.pending_price_drift_cancel_pct}
+                        onChange={e => updateDraft(d => ({ ...d, pending_price_drift_cancel_pct: e.target.value }))}
+                        className="input w-28 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">%</span>
                     </div>
                   </SettingRow>
 

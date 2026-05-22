@@ -65,6 +65,7 @@ _settings: dict[str, Any] = {
     },
     "sentiment_strategy_enabled": True,   # auto-change strategy based on sentiment
     "ai_tag_strategy_enabled": False,      # auto-change strategy based on AI learner tag
+    "ai_sentiment_change_enabled": True,   # master switch for AI sentiment-driven strategy/trade changes
     "ai_tag_strategies": {
         "STRONG LONG": "sma_crossover",
         "LONG": "sma_crossover",
@@ -77,6 +78,8 @@ _settings: dict[str, Any] = {
     "ai_tag_long_engine_off": True,        # disable engine after buy for LONG/STRONG LONG (hold mode)
     "ai_tag_long_tp_pct": 0.0,            # take profit % for long-hold positions (0 = disabled)
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
+    "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
+    "pending_price_drift_cancel_pct": 0.75,  # cancel pending BUY when market drifts >= this % from pending fill/limit
     "stop_loss_pct": 0.0,
     "take_profit_pct": 0.0,
     "hold_positions_overnight": True,     # whether to hold positions between days
@@ -194,6 +197,7 @@ async def _load_settings_from_db() -> None:
             )
             _settings["sentiment_interval"] = getattr(row, "sentiment_interval", "1m") or "1m"
             _settings["ai_tag_strategy_enabled"] = bool(getattr(row, "ai_tag_strategy_enabled", False))
+            _settings["ai_sentiment_change_enabled"] = bool(getattr(row, "ai_sentiment_change_enabled", True))
             _settings["ai_tag_strategies"] = _load_strategy_map(
                 getattr(row, "ai_tag_strategies", None),
                 _settings["ai_tag_strategies"],
@@ -203,6 +207,8 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_long_engine_off"] = bool(getattr(row, "ai_tag_long_engine_off", True))
             _settings["ai_tag_long_tp_pct"] = float(getattr(row, "ai_tag_long_tp_pct", 0.0) or 0.0)
             _settings["ai_tag_long_sl_pct"] = float(getattr(row, "ai_tag_long_sl_pct", 0.0) or 0.0)
+            _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
+            _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.75) or 0.75)
 
 
 async def _save_settings_to_db() -> None:
@@ -246,12 +252,15 @@ async def _save_settings_to_db() -> None:
         )
         row.sentiment_interval = _settings.get("sentiment_interval", "1m") or "1m"
         row.ai_tag_strategy_enabled = bool(_settings.get("ai_tag_strategy_enabled", False))
+        row.ai_sentiment_change_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
         row.ai_tag_strategies = json.dumps(_settings.get("ai_tag_strategies", {}), sort_keys=True)
         row.ai_tag_allow_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
         row.ai_tag_action_mode = _settings.get("ai_tag_action_mode", "strategy_override") or "strategy_override"
         row.ai_tag_long_engine_off = bool(_settings.get("ai_tag_long_engine_off", True))
         row.ai_tag_long_tp_pct = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
         row.ai_tag_long_sl_pct = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
+        row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
+        row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.75)
         await db.commit()
 
 
@@ -264,9 +273,10 @@ def update_manager_settings(new: dict) -> dict:
               "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval",
               "stop_loss_pct", "take_profit_pct",
               "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
-              "ai_tag_strategy_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
+              "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
               "ai_tag_action_mode",
-              "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct"}
+              "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
+              "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -298,10 +308,10 @@ def update_manager_settings(new: dict) -> dict:
                 if syms:
                     await _refresh_scores(syms)
                 await _apply_sentiment_strategies()
-                if _settings.get("ai_tag_strategy_enabled", False):
+                if _settings.get("ai_tag_strategy_enabled", False) and _settings.get("ai_sentiment_change_enabled", True):
                     await _apply_ai_tag_strategies()
             loop.create_task(_refresh_and_apply())
-        if any(key in new for key in ("ai_tag_strategy_enabled", "ai_tag_strategies")):
+        if any(key in new for key in ("ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies")):
             loop.create_task(_apply_ai_tag_strategies())
     return get_manager_settings()
 
@@ -519,12 +529,40 @@ async def _apply_ai_tag_strategies() -> None:
     """
     if not _settings.get("ai_tag_strategy_enabled", False):
         return
+    if not _settings.get("ai_sentiment_change_enabled", True):
+        return
 
     tag_strategies = _settings.get("ai_tag_strategies", {})
     action_mode = _settings.get("ai_tag_action_mode", "strategy_override")
     engine_off_mode = bool(_settings.get("ai_tag_long_engine_off", True))
     long_tp = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
     long_sl = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
+    no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
+
+    def _is_frenzy_period() -> bool:
+        from app.services.sandbox_engine import _ET
+        now_et = datetime.now(tz=_ET)
+        if now_et.weekday() >= 5:
+            return False
+        mins = now_et.hour * 60 + now_et.minute
+        open_mins = 9 * 60 + 30
+        frenzy_end = open_mins + 180
+        return open_mins <= mins < frenzy_end
+
+    def _ai_period_for_current_phase() -> str:
+        # Use a longer learner horizon near end-of-day when overnight holds are enabled,
+        # so AI tags lean toward next-session bias instead of minute-scale noise.
+        if not bool(_settings.get("hold_positions_overnight", True)):
+            return "2d"
+        try:
+            from app.services.sandbox_engine import _is_in_pre_sell_engine_shutoff_window
+            eod_mins = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+            shutoff_mins = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
+            if _is_in_pre_sell_engine_shutoff_window(eod_mins, shutoff_mins):
+                return "30d"
+        except Exception:
+            pass
+        return "2d"
 
     # Record existing tags before overwrite for change-detection.
     old_tags: dict[str, str] = {
@@ -544,7 +582,7 @@ async def _apply_ai_tag_strategies() -> None:
     # ── 2. Classify symbols ───────────────────────────────────────────── #
     try:
         from app.services.stock_learner import classify_symbols
-        insights = await classify_symbols(symbols)
+        insights = await classify_symbols(symbols, period=_ai_period_for_current_phase())
     except Exception as exc:
         logger.warning("AI tag classification failed: %s", exc)
         return
@@ -729,6 +767,12 @@ async def _apply_ai_tag_strategies() -> None:
                                 )
                                 qty = effective_qty
                                 pnl = round((cp - effective_avg_cost) * qty, 4)
+                                if no_loss_sell and pnl < 0:
+                                    hold_modes[pos.symbol] = True
+                                    _log_activity(
+                                        f"AI direct SELL deferred for {pos.symbol}: would realize loss ${pnl:.2f}"
+                                    )
+                                    continue
                                 had_local_shares = pos.shares > 0
                                 if had_local_shares:
                                     total = qty * cp
@@ -770,12 +814,24 @@ async def _apply_ai_tag_strategies() -> None:
 
                 elif was_long and (pos.shares > 0 or has_ib_long):
                     # Tag changed from LONG/STRONG LONG → other: sell directly.
+                    if bool(_settings.get("hold_positions_overnight", True)) and _is_frenzy_period():
+                        hold_modes[pos.symbol] = True
+                        _log_activity(
+                            f"AI tag-change SELL deferred during frenzy for overnight-priority {pos.symbol}"
+                        )
+                        continue
                     cp = price_map.get(pos.symbol, 0.0)
                     if cp > 0:
                         qty = float(pos.shares) if pos.shares > 0 else float(ib_qty)
                         cost_basis = float(pos.avg_cost) if (pos.shares > 0 and pos.avg_cost > 0) else float(ib_avg_cost)
                         total = qty * cp
                         pnl = round((cp - cost_basis) * qty, 4) if cost_basis > 0 else 0.0
+                        if no_loss_sell and pnl < 0:
+                            hold_modes[pos.symbol] = True
+                            _log_activity(
+                                f"AI tag-change SELL deferred for {pos.symbol}: would realize loss ${pnl:.2f}"
+                            )
+                            continue
                         had_local_shares = pos.shares > 0
                         if had_local_shares:
                             pos.shares = 0.0
@@ -845,6 +901,12 @@ async def _apply_ai_tag_strategies() -> None:
                             )
                             qty = effective_qty
                             pnl = round((cp - effective_avg_cost) * qty, 4)
+                            if no_loss_sell and pnl < 0:
+                                hold_modes[pos.symbol] = True
+                                _log_activity(
+                                    f"AI long-hold SELL deferred for {pos.symbol}: would realize loss ${pnl:.2f}"
+                                )
+                                continue
                             had_local_shares = pos.shares > 0
                             if had_local_shares:
                                 total = qty * cp
@@ -986,9 +1048,9 @@ def _position_max_allocation(position: SandboxPosition, account_total_funds: flo
 
 def _position_committed_funds(position: SandboxPosition) -> float:
     settled_cost = float(position.shares or 0.0) * float(position.avg_cost or 0.0)
-    pending_cost = float(position.pending_shares or 0.0) * float(position.pending_avg_cost or 0.0)
     allocated = float(position.allocated_funds or 0.0)
-    return allocated + settled_cost + pending_cost
+    # pending BUY cost is already debited from allocated_funds when the order is placed.
+    return allocated + settled_cost
 
 
 async def _do_transfer() -> None:
@@ -1354,6 +1416,7 @@ async def _attempt_ib_eod_liquidation() -> None:
     }
 
     ai_allow_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
+    ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
     now = datetime.now(timezone.utc)
     cooldown_s = 30
 
@@ -1365,7 +1428,7 @@ async def _attempt_ib_eod_liquidation() -> None:
             continue
 
         # Optional per-symbol overnight exemption for LONG / STRONG LONG tags.
-        if ai_allow_overnight:
+        if ai_enabled and ai_allow_overnight:
             tag = (
                 _state.get("ai_tags", {}).get(symbol, {}).get("learner_tag") or ""
             ).upper()
@@ -1452,6 +1515,7 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
 
     cancelled: list[str] = []
     cancel_events: list[dict[str, Any]] = []
+    drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
     for o in candidates:
         symbol = str(o.get("symbol") or "").upper()
         side_raw = str(o.get("side") or "BUY").upper()
@@ -1462,8 +1526,9 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         if cp <= 0 or limit_price <= 0:
             continue
 
-        # Price moved away from intended pending buy fill (same semantics as sandbox).
-        if cp >= limit_price:
+        # Cancel if market has drifted materially from the pending limit.
+        drift_pct = abs(cp - limit_price) / limit_price * 100.0
+        if drift_pct < drift_threshold_pct:
             continue
 
         oid = int(o.get("ib_order_id") or 0)
@@ -1476,7 +1541,9 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                 f"IB PM pending BUY cancel failed {symbol} id={oid}: {result['error']}"
             )
         else:
-            cancelled.append(f"{symbol} id={oid} (${cp:.2f}<${limit_price:.2f})")
+            cancelled.append(
+                f"{symbol} id={oid} (drift {drift_pct:.2f}%: ${cp:.2f} vs ${limit_price:.2f})"
+            )
             cancel_events.append({
                 "symbol": symbol,
                 "side": side,
@@ -1543,6 +1610,8 @@ async def _cancel_bearish_pending_orders() -> None:
         in_eod_window = not hold_overnight and _is_in_eod_sell_window(eod_mins)
 
         market_score = float(_compute_market_classification().get("score", 0.0))
+        ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
+        drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
 
         # Fetch current prices for all pending symbols (to check price vs fill price).
         symbols = [p.symbol for p in positions]
@@ -1568,27 +1637,32 @@ async def _cancel_bearish_pending_orders() -> None:
             # ── 2. Price already below pending fill price (pre-loss) ──────
             cp = price_map.get(pos.symbol, 0.0)
             fill_price = float(pos.pending_avg_cost or 0.0)
-            price_dropped = cp > 0 and fill_price > 0 and cp < fill_price
+            price_drifted = (
+                cp > 0
+                and fill_price > 0
+                and (abs(cp - fill_price) / fill_price * 100.0) >= drift_threshold_pct
+            )
 
             # ── 3. AI tag is SHORT or STRONG SHORT ────────────────────────
             ai_tag = (
                 _state.get("ai_tags", {}).get(pos.symbol, {}).get("learner_tag") or ""
             ).upper()
-            ai_short = ai_tag in ("SHORT", "STRONG SHORT")
-            ai_long = ai_tag in ("LONG", "STRONG LONG")
+            ai_short = ai_enabled and ai_tag in ("SHORT", "STRONG SHORT")
+            ai_long = ai_enabled and ai_tag in ("LONG", "STRONG LONG")
 
             # EOD policy: cancel all pending orders unless AI tag is LONG/STRONG LONG.
             cancel_for_eod = in_eod_window and not ai_long
 
-            if not bearish_sentiment and not price_dropped and not ai_short and not cancel_for_eod:
+            if not bearish_sentiment and not price_drifted and not ai_short and not cancel_for_eod:
                 continue
 
             # ── Build cancel reason ───────────────────────────────────────
             reasons: list[str] = []
             if bearish_sentiment:
                 reasons.append(f"sentiment {score:+.3f}")
-            if price_dropped:
-                reasons.append(f"price ${cp:.2f}<fill ${fill_price:.2f}")
+            if price_drifted:
+                drift_pct = abs(cp - fill_price) / fill_price * 100.0 if cp > 0 and fill_price > 0 else 0.0
+                reasons.append(f"price drift {drift_pct:.2f}% (${cp:.2f} vs fill ${fill_price:.2f})")
             if ai_short:
                 reasons.append(f"ai_tag {ai_tag}")
             if cancel_for_eod:
@@ -1719,6 +1793,7 @@ async def _process_ib_engine_signals() -> None:
 
     stop_loss_pct = float(_settings.get("stop_loss_pct", 0.0) or 0.0)
     take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
+    ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
 
     order_candidates: list[dict[str, Any]] = []
     buy_symbols_needing_quote: set[str] = set()
@@ -1755,7 +1830,7 @@ async def _process_ib_engine_signals() -> None:
         )
 
         if signal > 0:
-            if tag in {"SHORT", "STRONG SHORT"}:
+            if ai_enabled and tag in {"SHORT", "STRONG SHORT"}:
                 _log_activity(f"IB signal BUY blocked for {symbol}: ai_tag={tag}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue

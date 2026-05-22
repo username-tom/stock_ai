@@ -546,12 +546,15 @@ class PortfolioManagerSettingsRequest(BaseModel):
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=365)
     sentiment_interval: Optional[str] = Field(default=None, pattern="^(1m|5m|15m|30m|1h|daily)$")
     ai_tag_strategy_enabled: Optional[bool] = None
+    ai_sentiment_change_enabled: Optional[bool] = None
     ai_tag_strategies: Optional[dict[str, str]] = None
     ai_tag_allow_overnight: Optional[bool] = None
     ai_tag_action_mode: Optional[str] = None
     ai_tag_long_engine_off: Optional[bool] = None
     ai_tag_long_tp_pct: Optional[float] = None
     ai_tag_long_sl_pct: Optional[float] = None
+    ai_tag_no_loss_sell: Optional[bool] = None
+    pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 
 
 @router.get("/manager/state")

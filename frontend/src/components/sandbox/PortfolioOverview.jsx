@@ -723,7 +723,10 @@ export default function PortfolioOverview({
                     const mp = q?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
                     const mv = mp * shares
                     const costBasis = avgCost * shares
-                    const cashRemaining = isSimulated ? Math.max(0, pos.allocated_funds - avgCost * shares) : null
+                    const pendingCost = Number(pos.pending_avg_cost ?? 0) * Number(pos.pending_shares ?? 0)
+                    const cashRemaining = isSimulated
+                      ? Math.max(0, Number(pos.allocated_funds ?? 0) - (avgCost * shares + pendingCost))
+                      : null
                     const unreal = mv - costBasis
                     const unrealPct = Math.abs(costBasis) > 0 ? (unreal / Math.abs(costBasis)) * 100 : null
                     const realizedPct = pos.total_invested > 0.01 ? ((pos.realized_pnl ?? 0) / pos.total_invested) * 100 : null

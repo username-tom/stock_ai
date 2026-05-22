@@ -365,18 +365,36 @@ export default function SandboxPanel() {
     return rawPositions.reduce((s, p) => s + ((getOwnedMarketPrice(p) ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
   }, [ibConnected, accountData?.unrealized_pnl, rawPositions, quotesData])
   const pieData = useMemo(() => {
-    const active = rawPositions.filter(p => p.shares > 0 || p.allocated_funds > 0)
+    const active = rawPositions.filter((p) => {
+      const shares = Number(p.shares ?? 0)
+      const alloc = Number(p.allocated_funds ?? 0)
+      const pendingShares = Number(p.pending_shares ?? 0)
+      // Keep true held positions. For pure pending buys (no settled shares),
+      // exclude them from market-value allocation until they settle.
+      if (shares > 0) return true
+      return alloc > 0 && pendingShares <= 0
+    })
     const total = active.reduce((s, p) => {
-      const mv = (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares
-      const cashRemaining = Math.max(0, p.allocated_funds - p.avg_cost * p.shares)
+      const shares = Number(p.shares ?? 0)
+      const avgCost = Number(p.avg_cost ?? 0)
+      const pendingShares = Number(p.pending_shares ?? 0)
+      const pendingAvgCost = Number(p.pending_avg_cost ?? 0)
+      const mv = (getOwnedMarketPrice(p) ?? avgCost) * shares
+      const committed = avgCost * shares + pendingAvgCost * pendingShares
+      const cashRemaining = Math.max(0, Number(p.allocated_funds ?? 0) - committed)
       return s + mv + cashRemaining
     }, 0)
     if (total === 0) return []
     return active.map(p => {
-      const mv = (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares
-      const cashRemaining = Math.max(0, p.allocated_funds - p.avg_cost * p.shares)
+      const shares = Number(p.shares ?? 0)
+      const avgCost = Number(p.avg_cost ?? 0)
+      const pendingShares = Number(p.pending_shares ?? 0)
+      const pendingAvgCost = Number(p.pending_avg_cost ?? 0)
+      const mv = (getOwnedMarketPrice(p) ?? avgCost) * shares
+      const committed = avgCost * shares + pendingAvgCost * pendingShares
+      const cashRemaining = Math.max(0, Number(p.allocated_funds ?? 0) - committed)
       const sliceValue = mv + cashRemaining
-      return { symbol: p.symbol, shares: p.shares, market_value: sliceValue, mv, cash: cashRemaining, pct: pct(sliceValue, total) }
+      return { symbol: p.symbol, shares, market_value: sliceValue, mv, cash: cashRemaining, pct: pct(sliceValue, total) }
     })
   }, [rawPositions, quotesData])
   const selectedMarketValue = selectedPos ? selectedPrice * selectedPos.shares : 0

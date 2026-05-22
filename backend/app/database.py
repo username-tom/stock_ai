@@ -104,6 +104,10 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_engine_off BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_tp_pct REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_sl_pct REAL NOT NULL DEFAULT 0.0",
+        # portfolio_manager_settings AI sentiment controls and pending drift handling
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_sentiment_change_enabled BOOLEAN NOT NULL DEFAULT 1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_no_loss_sell BOOLEAN NOT NULL DEFAULT 1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_price_drift_cancel_pct REAL NOT NULL DEFAULT 0.75",
         # Rename legacy strategy name 'bollinger' → 'bollinger_bands' on any existing positions
         "UPDATE sandbox_positions SET strategy_name = 'bollinger_bands' WHERE strategy_name = 'bollinger'",
         # Keep enough bars so PM RSI/MACD/SMA sentiment scoring is meaningful.

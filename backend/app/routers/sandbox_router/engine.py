@@ -118,12 +118,15 @@ class PortfolioManagerSettingsRequest(BaseModel):
     sentiment_data_points: Optional[int] = Field(default=None, ge=35, le=5000)
     sentiment_interval: Optional[str] = None
     ai_tag_strategy_enabled: Optional[bool] = None
+    ai_sentiment_change_enabled: Optional[bool] = None
     ai_tag_strategies: Optional[dict[str, str]] = None
     ai_tag_allow_overnight: Optional[bool] = None
     ai_tag_action_mode: Optional[str] = Field(default=None, pattern="^(strategy_override|direct)$")
     ai_tag_long_engine_off: Optional[bool] = None
     ai_tag_long_tp_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
     ai_tag_long_sl_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    ai_tag_no_loss_sell: Optional[bool] = None
+    pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 
 
 @router.get("/manager/state")

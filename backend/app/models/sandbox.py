@@ -120,6 +120,7 @@ class PortfolioManagerSettings(Base):
     sentiment_interval = Column(String(10), default="1m", nullable=False)
     # AI tag (learner) strategy routing
     ai_tag_strategy_enabled = Column(Boolean, default=False, nullable=False)
+    ai_sentiment_change_enabled = Column(Boolean, default=True, nullable=False)
     ai_tag_strategies = Column(Text, nullable=False, server_default=text("'{}'"))
     ai_tag_allow_overnight = Column(Boolean, default=True, nullable=False)
     ai_tag_action_mode = Column(String(20), default="strategy_override", nullable=False)
@@ -127,4 +128,6 @@ class PortfolioManagerSettings(Base):
     ai_tag_long_engine_off = Column(Boolean, default=True, nullable=False)
     ai_tag_long_tp_pct = Column(Float, default=0.0, nullable=False)
     ai_tag_long_sl_pct = Column(Float, default=0.0, nullable=False)
+    ai_tag_no_loss_sell = Column(Boolean, default=True, nullable=False)
+    pending_price_drift_cancel_pct = Column(Float, default=0.75, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

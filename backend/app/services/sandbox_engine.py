@@ -262,9 +262,9 @@ def _get_buy_lock() -> asyncio.Lock:
 
 def _position_committed_funds(pos: SandboxPosition) -> float:
     settled_cost = float(pos.shares or 0.0) * float(pos.avg_cost or 0.0)
-    pending_cost = float(pos.pending_shares or 0.0) * float(pos.pending_avg_cost or 0.0)
     allocated = float(pos.allocated_funds or 0.0)
-    return allocated + settled_cost + pending_cost
+    # pending BUY cost is already debited from allocated_funds at order placement.
+    return allocated + settled_cost
 
 
 def _position_max_allocation(pos: SandboxPosition, account_total_funds: float) -> float:
