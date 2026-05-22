@@ -39,19 +39,39 @@ import BulkStrategyModal from './sandbox/BulkStrategyModal'
 const WATCHLIST_STORAGE_KEY = 'dashboard_watchlist'
 const WATCHLIST_DEFAULT = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
 
+function normalizeSymbolList(symbols) {
+  if (!Array.isArray(symbols)) return []
+  const out = []
+  const seen = new Set()
+  for (const raw of symbols) {
+    const sym = String(raw ?? '').trim().toUpperCase()
+    if (!sym || seen.has(sym)) continue
+    seen.add(sym)
+    out.push(sym)
+  }
+  return out
+}
+
+function mergePinnedWatchlist(currentSymbols, pinnedSymbols) {
+  const pinned = normalizeSymbolList(pinnedSymbols)
+  const current = normalizeSymbolList(currentSymbols)
+  const merged = [...new Set([...pinned, ...current])]
+  return merged.slice(0, WATCHLIST_SYMBOL_LIMIT)
+}
+
 function readDashboardWatchlist() {
   try {
     const raw = localStorage.getItem(WATCHLIST_STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) return parsed.slice(0, WATCHLIST_SYMBOL_LIMIT)
+      if (Array.isArray(parsed)) return normalizeSymbolList(parsed).slice(0, WATCHLIST_SYMBOL_LIMIT)
     }
   } catch {}
-  return WATCHLIST_DEFAULT
+  return normalizeSymbolList(WATCHLIST_DEFAULT)
 }
 
 function writeDashboardWatchlist(symbols) {
-  const next = symbols.slice(0, WATCHLIST_SYMBOL_LIMIT)
+  const next = normalizeSymbolList(symbols).slice(0, WATCHLIST_SYMBOL_LIMIT)
   try { localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(next)) } catch {}
   window.dispatchEvent(new Event('watchlist-updated'))
 }
@@ -81,6 +101,39 @@ function getIbOrderExpiryLabel(order) {
   const hours = Math.floor(mins / 60)
   const remMins = mins % 60
   return `Expiry: ${hours}h ${remMins}m remaining`
+}
+
+function compactStrategyLabel(strategyName) {
+  const raw = String(strategyName ?? '').trim()
+  if (!raw) return null
+  if (raw.startsWith('template:')) {
+    return raw.slice(9).replace(/\.py$/i, '')
+  }
+  if (raw.startsWith('custom:')) {
+    const id = raw.slice(7)
+    return id ? `custom#${id}` : 'custom'
+  }
+  return raw.split(':')[0]
+}
+
+function buildIbTradeNote(tradeLike) {
+  const status = String(tradeLike?.status ?? '').trim().toUpperCase() || 'SUBMITTED'
+  const orderId = tradeLike?.ib_order_id
+  const strategy = compactStrategyLabel(tradeLike?.strategy_name)
+  const reason = String(tradeLike?.reason ?? '').trim()
+  const noteParts = []
+  if (orderId != null) noteParts.push(`IB #${orderId}`)
+  noteParts.push(status)
+  if (tradeLike?.order_type) {
+    const orderType = String(tradeLike.order_type).trim().toUpperCase()
+    if (orderType) noteParts.push(orderType)
+  }
+  if (tradeLike?.limit_price != null && Number.isFinite(Number(tradeLike.limit_price))) {
+    noteParts.push(`LMT $${Number(tradeLike.limit_price).toFixed(2)}`)
+  }
+  if (strategy) noteParts.push(`via ${strategy}`)
+  if (reason) noteParts.push(reason)
+  return noteParts.join(' · ')
 }
 
 export default function SandboxPanel() {
@@ -184,7 +237,6 @@ export default function SandboxPanel() {
   }, [activeProfile, qc, refetchPositions, refetchAccount])
 
   useEffect(() => {
-    if (!ibConnected) return undefined
     const sync = () => setIbWatchlistSymbols(readDashboardWatchlist())
     sync()
     window.addEventListener('watchlist-updated', sync)
@@ -193,7 +245,20 @@ export default function SandboxPanel() {
       window.removeEventListener('watchlist-updated', sync)
       window.removeEventListener('focus', sync)
     }
-  }, [ibConnected])
+  }, [])
+
+  // Ensure every sidebar stock stays in dashboard watchlist, prioritizing
+  // currently visible sidebar symbols when the list is at capacity.
+  useEffect(() => {
+    const sidebarSymbols = normalizeSymbolList((rawPositions ?? []).map(p => p?.symbol))
+    if (!sidebarSymbols.length) return
+    const current = readDashboardWatchlist()
+    const next = mergePinnedWatchlist(current, sidebarSymbols)
+    const changed = next.length !== current.length || next.some((sym, idx) => sym !== current[idx])
+    if (!changed) return
+    writeDashboardWatchlist(next)
+    setIbWatchlistSymbols(next)
+  }, [rawPositions])
 
   // Always include all IB position symbols in the symbols array for quote fetching
   const symbols = useMemo(() => {
@@ -202,9 +267,7 @@ export default function SandboxPanel() {
     if (ibConnected && ibPositionsData?.positions) {
       ibSymbols = ibPositionsData.positions.map(p => p.symbol)
     }
-    const merged = ibConnected
-      ? [...baseSymbols, ...ibWatchlistSymbols, ...ibSymbols]
-      : baseSymbols
+    const merged = [...baseSymbols, ...ibWatchlistSymbols, ...ibSymbols]
     return [...new Set(merged.filter(Boolean))]
   }, [ibConnected, rawPositions, ibWatchlistSymbols, ibPositionsData])
 
@@ -218,8 +281,6 @@ export default function SandboxPanel() {
   const positions = useMemo(() => {
     const learnerBySymbol = learnerData?.insights ?? {}
     const applyLearner = pos => ({ ...pos, ...(learnerBySymbol[pos.symbol] ?? {}) })
-
-    if (!ibConnected) return rawPositions.map(applyLearner)
 
     const bySymbol = new Map(rawPositions.map(p => [p.symbol, p]))
     const merged = rawPositions.map(applyLearner)
@@ -249,7 +310,7 @@ export default function SandboxPanel() {
       })
     }
     return merged
-  }, [ibConnected, rawPositions, ibWatchlistSymbols, learnerData?.insights])
+  }, [rawPositions, ibWatchlistSymbols, learnerData?.insights])
   const { data: quotesData } = useQuery({
     queryKey: ['sandbox-quotes', symbols.join(',')],
     queryFn: () => symbols.length ? getBulkQuotes(symbols) : Promise.resolve({}),
@@ -417,8 +478,8 @@ export default function SandboxPanel() {
             firstSeen[fallbackKey] = Date.now()
           }
           const ts = Number.isFinite(createdTs) && createdTs > 0 ? createdTs : firstSeen[fallbackKey]
-          const sub = ibConnected && t.ib_order_id != null
-            ? `IB #${t.ib_order_id} · ${status || 'Submitted'}`
+          const sub = ibConnected
+            ? buildIbTradeNote(t)
             : (t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined)
           return {
             type: 'trade',
@@ -460,16 +521,15 @@ export default function SandboxPanel() {
         return removeSandboxSymbol(s)
       }
 
-      // Remove from backend watchlist metadata (and release any idle allocation)
-      // while also removing from the local dashboard watchlist list.
+      // Remove from backend watchlist metadata (and release any idle allocation).
       await removeSandboxSymbol(s)
-      const current = readDashboardWatchlist()
-      const next = current.filter(sym => sym !== s)
-      writeDashboardWatchlist(next)
-      setIbWatchlistSymbols(next)
-      return { symbol: s, local_watchlist_removed: true }
+      return { symbol: s }
     },
     onSuccess: (_, symbol) => {
+      const current = readDashboardWatchlist()
+      const next = current.filter(sym => sym !== symbol)
+      writeDashboardWatchlist(next)
+      setIbWatchlistSymbols(next)
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       setSelectedSymbol(prev => (prev === symbol ? null : prev))
     },
@@ -505,6 +565,7 @@ export default function SandboxPanel() {
       if (d.trade_id != null) {
         setTradeMsg({ type: 'success', text: `${d.side} ${d.quantity} ${d.symbol} @ $${d.price.toFixed(2)}${d.pnl != null ? ` — PnL: ${fmt(d.pnl)}` : ''}` })
       } else {
+        const enteredReason = tradeForm.reason?.trim() || ''
         setTradeMsg({
           type: 'success',
           text: `${d.side} ${d.quantity} ${d.symbol} submitted to ${activeProfileRef.current.toUpperCase()} IB (${d.order_type ?? 'MKT'}${d.limit_price != null ? ` @ $${Number(d.limit_price).toFixed(2)}` : ''})${d.ib_order_id != null ? ` · Order #${d.ib_order_id}` : ''}`,
@@ -515,7 +576,15 @@ export default function SandboxPanel() {
           tradeId: d.id,
           side: d.side,
           label: `Order submitted ${d.side} ${d.quantity} ${d.symbol}`,
-          sub: `IB #${d.ib_order_id ?? 'n/a'} · ${d.status ?? 'Submitted'}${d.limit_price != null ? ` · LMT $${Number(d.limit_price).toFixed(2)}` : ''}`,
+          reason: enteredReason || null,
+          sub: buildIbTradeNote({
+            ib_order_id: d.ib_order_id,
+            status: d.status,
+            order_type: d.order_type,
+            limit_price: d.limit_price,
+            strategy_name: selectedPos?.strategy_name,
+            reason: enteredReason,
+          }),
           time: new Date().toLocaleTimeString(),
           ts: Date.now(),
         }, ...prev].slice(0, 500))
@@ -660,13 +729,19 @@ export default function SandboxPanel() {
       setActivities(prev => prev.filter(a => (a.profile ?? 'simulated') !== 'paper'))
       prevTradeIdRef.current = null
       tradeFirstSeenRef.current = {}
+      // Drop cached IB history immediately so old rows can't repopulate activity.
+      qc.removeQueries({ queryKey: ['ib-trade-history'] })
+      qc.setQueryData(['ib-trade-history', 'paper'], { trades: [] })
       setImportMsg({
         type: 'success',
-        text: `Paper reset submitted: ${data.cancelled_orders ?? 0} order(s) cancelled, ${data.flatten_orders ?? 0} flatten order(s) placed.`,
+        text: `Paper reset submitted: ${data.cancelled_orders ?? 0} order(s) cancelled, ${data.flatten_orders ?? 0} flatten order(s) placed, ${data.deleted_trade_rows ?? 0} paper trade row(s) cleared.`,
       })
       qc.invalidateQueries({ queryKey: ['ib-status'] })
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['ib-orders'] })
+      qc.invalidateQueries({ queryKey: ['ib-positions'] })
+      qc.invalidateQueries({ queryKey: ['ib-trade-history'] })
       qc.invalidateQueries({ queryKey: ['sandbox-trades-all'] })
       qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
     },
@@ -750,7 +825,7 @@ export default function SandboxPanel() {
     if (current.includes(sym)) return { added: false, error: 'Already in watchlist.' }
 
     if (current.length < WATCHLIST_SYMBOL_LIMIT) {
-      const next = [...current, sym]
+      const next = normalizeSymbolList([...current, sym])
       writeDashboardWatchlist(next)
       setIbWatchlistSymbols(next)
       return { added: true, downgraded: false }
@@ -764,7 +839,7 @@ export default function SandboxPanel() {
 
     setSetting('quotes_refresh_ms', 15_000)
     setSetting('sandbox_quotes_ms', 15_000)
-    const next = [...current.slice(1), sym]
+    const next = normalizeSymbolList([...current.slice(1), sym])
     writeDashboardWatchlist(next)
     setIbWatchlistSymbols(next)
     return { added: true, downgraded: true, replaced: oldest }

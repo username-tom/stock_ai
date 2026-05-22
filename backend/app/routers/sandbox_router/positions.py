@@ -139,7 +139,7 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "last_run_at": local.last_run_at.isoformat() if local and local.last_run_at else None,
                 "engine_error": local.engine_error if local else None,
                 "realized_pnl": round(
-                    float(realized_by_symbol.get(symbol, float(local.realized_pnl or 0.0) if local else 0.0)),
+                    float(realized_by_symbol.get(symbol, 0.0)),
                     4,
                 ),
                 "total_invested": round(max(0.0, avg_cost * quantity), 4),

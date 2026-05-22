@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.config import settings
 from app.database import get_db, AsyncSessionLocal
@@ -210,7 +210,7 @@ async def ib_open_orders():
 
 
 @router.post("/ib/paper/reset")
-async def reset_ib_paper_portfolio():
+async def reset_ib_paper_portfolio(db: AsyncSession = Depends(get_db)):
     """Reset IB paper portfolio by cancelling open orders and flattening positions.
 
     This endpoint is intentionally disabled for live mode.
@@ -270,10 +270,17 @@ async def reset_ib_paper_portfolio():
                 "status": result.get("status"),
             })
 
+    # Reset local PAPER trade history so realized PnL/activity views reflect
+    # the reset account state and do not show stale values.
+    delete_result = await db.execute(delete(Trade).where(Trade.mode == TradingMode.PAPER))
+    await db.commit()
+    deleted_trade_rows = int(delete_result.rowcount or 0)
+
     return {
         "status": "ok",
         "cancelled_orders": len(cancelled_order_ids),
         "flatten_orders": len(flattened),
+        "deleted_trade_rows": deleted_trade_rows,
         "cancel_errors": cancel_errors,
         "flatten_errors": flatten_errors,
         "details": {

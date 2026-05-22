@@ -102,8 +102,44 @@ export default function PositionDetail({
     ? Math.min(dayHigh, Math.max(dayLow, resolvedTradePrice ?? dayLow))
     : null
   const openOrdersForSymbol = useMemo(
-    () => (ibOrders ?? []).filter(o => o.symbol === selectedSymbol),
-    [ibOrders, selectedSymbol],
+    () => {
+      const symbol = String(selectedSymbol ?? '').toUpperCase()
+
+      const liveOrders = (ibOrders ?? [])
+        .filter(o => String(o?.symbol ?? '').toUpperCase() === symbol)
+        .map(o => ({
+          ...o,
+          _source: 'ib-orders',
+        }))
+
+      const knownOrderIds = new Set(
+        liveOrders
+          .map(o => Number(o?.ib_order_id))
+          .filter(Number.isFinite),
+      )
+
+      const historyPending = (trades ?? [])
+        .filter(t => String(t?.symbol ?? '').toUpperCase() === symbol)
+        .filter(t => String(t?.status ?? '').toUpperCase() === 'PENDING')
+        .filter(t => Number.isFinite(Number(t?.ib_order_id)))
+        .filter(t => !knownOrderIds.has(Number(t.ib_order_id)))
+        .map(t => ({
+          ib_order_id: Number(t.ib_order_id),
+          symbol,
+          side: String(t?.side ?? '').toUpperCase() || 'BUY',
+          quantity: Number(t?.quantity ?? 0),
+          remaining: Number(t?.quantity ?? 0),
+          status: 'PENDING',
+          order_type: Number.isFinite(Number(t?.price)) && Number(t.price) > 0 ? 'LMT' : 'MKT',
+          limit_price: Number.isFinite(Number(t?.price)) && Number(t.price) > 0 ? Number(t.price) : null,
+          tif: 'DAY',
+          created_at: t?.created_at ?? null,
+          _source: 'trade-history',
+        }))
+
+      return [...liveOrders, ...historyPending]
+    },
+    [ibOrders, trades, selectedSymbol],
   )
   const openOrderPriceLevels = useMemo(() => {
     const levels = openOrdersForSymbol
@@ -922,6 +958,9 @@ export default function PositionDetail({
                       </div>
                       <div className="text-[11px] text-slate-500">
                         {timing.status} · remaining {timing.remainingLabel}
+                        {o._source === 'trade-history' && (
+                          <span className="text-slate-600"> · from history</span>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
