@@ -104,6 +104,7 @@ _state: dict[str, Any] = {
 # Prevent repeated IB profit-take submissions every PM loop tick.
 _ib_profit_take_last_attempt: dict[str, datetime] = {}
 _ib_eod_liq_last_attempt: dict[str, datetime] = {}
+_ib_signal_last_processed_at: dict[str, str] = {}
 
 
 def get_manager_settings() -> dict:
@@ -603,6 +604,7 @@ async def _apply_ai_tag_strategies() -> None:
         from app.models.sandbox import SandboxTrade as _ST
         res = await db.execute(sa_select(SandboxPosition))
         positions: list[SandboxPosition] = res.scalars().all()
+        db_changed = False
 
         for pos in positions:
             info = insights.get(pos.symbol, {})
@@ -623,6 +625,7 @@ async def _apply_ai_tag_strategies() -> None:
                 if target and pos.strategy_name != target:
                     old_strat = pos.strategy_name or "none"
                     pos.strategy_name = target
+                    db_changed = True
                     if pos.strategy_enabled:
                         strategy_changes.append(f"{pos.symbol}[AI:{new_tag}]: {old_strat}→{target}")
 
@@ -632,6 +635,7 @@ async def _apply_ai_tag_strategies() -> None:
                     # Engine always off in direct mode for LONG positions.
                     if pos.strategy_enabled:
                         pos.strategy_enabled = False
+                        db_changed = True
                         engine_changes.append(f"{pos.symbol}: engine off (direct, {new_tag})")
 
                     cp = price_map.get(pos.symbol, 0.0)
@@ -656,6 +660,7 @@ async def _apply_ai_tag_strategies() -> None:
                                     pos.allocated_funds -= total
                                     pos.total_invested = (pos.total_invested or 0.0) + total
                                     pos.pm_managed = True   # PM owns this; skip day-start re-enable
+                                    db_changed = True
                                     hold_modes[pos.symbol] = True
                                     db.add(_ST(
                                         symbol=pos.symbol,
@@ -680,6 +685,7 @@ async def _apply_ai_tag_strategies() -> None:
                         # Position already held — ensure pm_managed is set (survive restarts).
                         if not pos.pm_managed:
                             pos.pm_managed = True
+                            db_changed = True
 
                         if pos.shares <= 0:
                             # Real broker position exists even when local sandbox shares are flat.
@@ -711,6 +717,7 @@ async def _apply_ai_tag_strategies() -> None:
                                 else:
                                     total = 0.0
                                 pos.pm_managed = False  # PM releasing control
+                                db_changed = True
                                 hold_modes[pos.symbol] = False
                                 if had_local_shares:
                                     acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
@@ -754,6 +761,7 @@ async def _apply_ai_tag_strategies() -> None:
                             pos.realized_pnl += pnl
                             pos.avg_cost = 0.0
                         pos.pm_managed = False  # PM releasing control
+                        db_changed = True
                         hold_modes[pos.symbol] = False
                         if had_local_shares:
                             acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
@@ -782,6 +790,7 @@ async def _apply_ai_tag_strategies() -> None:
                     # Re-enable engine so the new tag's strategy can run.
                     if not pos.strategy_enabled:
                         pos.strategy_enabled = True
+                        db_changed = True
                         engine_changes.append(f"{pos.symbol}: engine re-enabled ({new_tag})")
 
             # ── Strategy override mode: long-hold engine control ───────────
@@ -791,6 +800,7 @@ async def _apply_ai_tag_strategies() -> None:
                 if is_long and has_open and pos.strategy_enabled:
                     pos.strategy_enabled = False
                     pos.pm_managed = True   # PM holds; skip day-start re-enable
+                    db_changed = True
                     hold_modes[pos.symbol] = True
                     engine_changes.append(f"{pos.symbol}: engine off (long hold, {new_tag})")
 
@@ -798,6 +808,7 @@ async def _apply_ai_tag_strategies() -> None:
                     # Ensure pm_managed survives a backend restart.
                     if not pos.pm_managed:
                         pos.pm_managed = True
+                        db_changed = True
                     cp = price_map.get(pos.symbol, 0.0)
                     effective_qty = float(pos.shares) if pos.shares > 0 else float(ib_qty)
                     effective_avg_cost = float(pos.avg_cost) if (pos.shares > 0 and pos.avg_cost > 0) else float(ib_avg_cost)
@@ -823,6 +834,7 @@ async def _apply_ai_tag_strategies() -> None:
                                 total = 0.0
                             pos.strategy_enabled = True
                             pos.pm_managed = False  # PM releasing control
+                            db_changed = True
                             hold_modes[pos.symbol] = False
                             if had_local_shares:
                                 acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
@@ -854,10 +866,11 @@ async def _apply_ai_tag_strategies() -> None:
                 elif not is_long and was_long and not pos.strategy_enabled:
                     pos.strategy_enabled = True
                     pos.pm_managed = False  # PM releasing control
+                    db_changed = True
                     hold_modes[pos.symbol] = False
                     engine_changes.append(f"{pos.symbol}: engine re-enabled ({old_tag}→{new_tag})")
 
-        if strategy_changes or engine_changes:
+        if db_changed:
             await db.commit()
             if strategy_changes:
                 _log_activity(f"AI tag strategy: {', '.join(strategy_changes)}")
@@ -1630,6 +1643,209 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
         return len(positions)
 
 
+async def _process_ib_engine_signals() -> None:
+    """Consume engine signals in IB mode and route execution through PM rules."""
+    from app.services.ib_service import ib_service
+
+    if not ib_service.is_connected:
+        return
+
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import select as sa_select
+        res = await db.execute(
+            sa_select(SandboxPosition).where(
+                SandboxPosition.strategy_enabled == True,  # noqa: E712
+                SandboxPosition.strategy_name.isnot(None),
+            )
+        )
+        positions: list[SandboxPosition] = res.scalars().all()
+
+    if not positions:
+        return
+
+    ib_positions = await ib_service.get_positions()
+    ib_by_symbol: dict[str, dict[str, float]] = {}
+    for row in ib_positions:
+        sym = str(row.get("symbol") or "").upper()
+        if not sym:
+            continue
+        ib_by_symbol[sym] = {
+            "qty": float(row.get("quantity") or 0.0),
+            "avg_cost": float(row.get("avg_cost") or 0.0),
+        }
+
+    open_orders = await ib_service.get_open_orders()
+    active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
+    pending_buy_symbols = {
+        str(o.get("symbol") or "").upper()
+        for o in open_orders
+        if str(o.get("side") or "").upper() == "BUY"
+        and str(o.get("status") or "") in active_status
+        and float(o.get("remaining") or 0.0) > 0
+    }
+    pending_sell_symbols = {
+        str(o.get("symbol") or "").upper()
+        for o in open_orders
+        if str(o.get("side") or "").upper() == "SELL"
+        and str(o.get("status") or "") in active_status
+        and float(o.get("remaining") or 0.0) > 0
+    }
+
+    order_candidates: list[dict[str, Any]] = []
+    buy_symbols_needing_quote: set[str] = set()
+    buy_signal_rows: list[tuple[SandboxPosition, str, float, str, str]] = []
+
+    for pos in positions:
+        symbol = str(pos.symbol or "").upper()
+        if not symbol:
+            continue
+
+        last_run_at = pos.last_run_at.isoformat() if pos.last_run_at else ""
+        signal = int(pos.last_signal or 0)
+        if signal not in (-1, 1):
+            continue
+
+        process_key = f"{last_run_at}:{signal}"
+        if _ib_signal_last_processed_at.get(symbol) == process_key:
+            continue
+
+        tag = str((_state.get("ai_tags", {}).get(symbol, {}).get("learner_tag") or "")).upper()
+        score = float((_state.get("scores", {}).get(symbol, {}).get("score") or 0.0))
+        ib_qty = float(ib_by_symbol.get(symbol, {}).get("qty", 0.0))
+
+        logger.info(
+            "PM IB signal observed (symbol=%s signal=%s run_at=%s tag=%s score=%+.3f ib_qty=%.4f)",
+            symbol,
+            signal,
+            (last_run_at or "-"),
+            (tag or "WATCH"),
+            score,
+            ib_qty,
+        )
+
+        if signal > 0:
+            if tag in {"SHORT", "STRONG SHORT"}:
+                _log_activity(f"IB signal BUY blocked for {symbol}: ai_tag={tag}")
+                _ib_signal_last_processed_at[symbol] = process_key
+                continue
+            if score < -0.2:
+                _log_activity(f"IB signal BUY blocked for {symbol}: score={score:+.3f}")
+                _ib_signal_last_processed_at[symbol] = process_key
+                continue
+            if ib_qty > 0 or symbol in pending_buy_symbols:
+                _ib_signal_last_processed_at[symbol] = process_key
+                continue
+            buy_symbols_needing_quote.add(symbol)
+            buy_signal_rows.append((pos, symbol, score, tag, process_key))
+
+        elif signal < 0:
+            if ib_qty <= 0 or symbol in pending_sell_symbols:
+                _ib_signal_last_processed_at[symbol] = process_key
+                continue
+
+            order_candidates.append({
+                "symbol": symbol,
+                "side": "SELL",
+                "quantity": float(abs(ib_qty)),
+                "reason": f"pm_engine_signal_sell (signal={signal}, score={score:+.3f}, tag={tag or 'WATCH'})",
+                "processed_key": process_key,
+            })
+
+    if buy_symbols_needing_quote:
+        price_map: dict[str, float] = {}
+        try:
+            from app.services.market_service import get_bulk_quotes
+            quotes = await get_bulk_quotes(sorted(buy_symbols_needing_quote))
+            price_map = {
+                sym: float(q["last_price"])
+                for sym, q in quotes.items()
+                if q and q.get("last_price")
+            }
+        except Exception as exc:
+            logger.warning("PM IB signal quote fetch failed: %s", exc)
+
+        for pos, symbol, score, tag, process_key in buy_signal_rows:
+            cp = float(price_map.get(symbol, 0.0))
+            alloc = float(pos.allocated_funds or 0.0)
+            if cp <= 0.0:
+                _log_activity(f"IB signal BUY skipped for {symbol}: no market price")
+                _ib_signal_last_processed_at[symbol] = process_key
+                continue
+
+            qty = math.floor(alloc / cp)
+            if qty <= 0:
+                _log_activity(
+                    f"IB signal BUY skipped for {symbol}: alloc=${alloc:.2f}, price=${cp:.2f}"
+                )
+                _ib_signal_last_processed_at[symbol] = process_key
+                continue
+
+            logger.info(
+                "PM IB BUY candidate (symbol=%s alloc=%.2f price=%.2f qty=%s)",
+                symbol,
+                alloc,
+                cp,
+                qty,
+            )
+            order_candidates.append({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": float(qty),
+                "price": cp,
+                "reason": f"pm_engine_signal_buy (signal=1, score={score:+.3f}, tag={tag or 'WATCH'})",
+                "processed_key": process_key,
+            })
+
+    if not order_candidates:
+        return
+
+    from app.config import settings
+    from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
+
+    mode = TradingMode.LIVE if settings.TRADING_MODE == "live" else TradingMode.PAPER
+    for order in order_candidates:
+        symbol = order["symbol"]
+        side = order["side"]
+        logger.info(
+            "PM IB signal dispatch (symbol=%s side=%s qty=%.4f reason=%s)",
+            symbol,
+            side,
+            float(order["quantity"]),
+            order.get("reason", ""),
+        )
+        result = await ib_service.place_order(
+            symbol=symbol,
+            side=side,
+            quantity=float(order["quantity"]),
+            order_type="MKT",
+        )
+        if result.get("error"):
+            _log_activity(f"IB PM {side} failed for {symbol}: {result['error']}")
+            _ib_signal_last_processed_at[symbol] = order["processed_key"]
+            continue
+
+        ib_status = str(result.get("status") or "").upper()
+        is_filled = ib_status == "FILLED"
+        async with AsyncSessionLocal() as db:
+            db.add(Trade(
+                symbol=symbol,
+                side=OrderSide.BUY if side == "BUY" else OrderSide.SELL,
+                quantity=float(order["quantity"]),
+                price=float(order.get("price") or 0.0),
+                status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
+                mode=mode,
+                ib_order_id=result.get("ib_order_id"),
+                strategy_name="pm_engine_signal",
+                filled_at=datetime.utcnow() if is_filled else None,
+            ))
+            await db.commit()
+
+        _log_activity(
+            f"IB PM {side} submitted from engine signal for {symbol} x{float(order['quantity']):.4f}"
+        )
+        _ib_signal_last_processed_at[symbol] = order["processed_key"]
+
+
 # ── main loop ─────────────────────────────────────────────────────────────── #
 
 async def refresh_sentiment_routing() -> None:
@@ -1716,6 +1932,12 @@ async def run_portfolio_manager() -> None:
             except Exception as exc:
                 logger.warning("PM score refresh error: %s", exc)
             last_score = now
+
+        # In IB mode, consume latest engine signals and route execution through PM.
+        try:
+            await _process_ib_engine_signals()
+        except Exception as exc:
+            logger.warning("PM IB signal processing error: %s", exc)
 
         # Transfer on interval
         if now - last_transfer >= _settings["transfer_interval_s"]:

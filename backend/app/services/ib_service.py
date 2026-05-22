@@ -572,6 +572,15 @@ class IBService:
         try:
             action = side.upper()
             kind = order_type.upper()
+            logger.info(
+                "IB place_order request (symbol=%s side=%s qty=%.4f type=%s limit=%s mode=%s)",
+                symbol.upper(),
+                action,
+                float(quantity),
+                kind,
+                (f"{float(limit_price):.4f}" if limit_price is not None else "-"),
+                settings.TRADING_MODE,
+            )
             if action not in {"BUY", "SELL"}:
                 return {"error": "side must be BUY or SELL."}
             if kind == "LMT" and limit_price is None:
@@ -599,12 +608,14 @@ class IBService:
                 self._app.next_order_id += 1
 
             self._app.placeOrder(order_id, contract, order)
+            logger.info("IB placeOrder submitted (ib_order_id=%s symbol=%s)", order_id, symbol.upper())
 
             status = "Submitted"
             for _ in range(15):
                 await asyncio.sleep(0.2)
                 err = self._pop_req_error(order_id)
                 if err:
+                    logger.warning("IB order rejected (ib_order_id=%s error=%s)", order_id, err)
                     return {"error": f"IB rejected order {order_id}: {err}"}
                 with self._app._lock:
                     if order_id in self._app.order_status:
@@ -614,9 +625,12 @@ class IBService:
             if status in {"Inactive", "Cancelled", "ApiCancelled"}:
                 err = self._pop_req_error(order_id)
                 if err:
+                    logger.warning("IB order not active (ib_order_id=%s status=%s error=%s)", order_id, status, err)
                     return {"error": f"IB order {order_id} {status}: {err}"}
+                logger.warning("IB order not active (ib_order_id=%s status=%s)", order_id, status)
                 return {"error": f"IB order {order_id} {status}. Check TWS/Gateway logs for details."}
 
+            logger.info("IB order status observed (ib_order_id=%s status=%s)", order_id, status)
             return {
                 "ib_order_id": order_id,
                 "status": status,
@@ -635,12 +649,14 @@ class IBService:
             return {"error": "Not connected to IB."}
         try:
             order_id = int(ib_order_id)
+            logger.info("IB cancel_order request (ib_order_id=%s)", order_id)
             # ibapi changed cancelOrder signatures across versions.
             # Try modern (orderId, manualCancelTime) first, then legacy (orderId).
             try:
                 self._app.cancelOrder(order_id, "")
             except TypeError:
                 self._app.cancelOrder(order_id)
+            logger.info("IB cancel_order submitted (ib_order_id=%s)", order_id)
             return {"status": "ok", "cancelled": ib_order_id}
         except Exception as exc:
             logger.error("cancel_order error: %s", exc)

@@ -296,7 +296,6 @@ export default function SandboxPanel() {
   })
   const allTrades = allTradesData?.trades ?? []
   const engineTrades = allTrades.filter(t => t.strategy_name)
-  const latestEngineTrade = engineTrades[0] ?? null
 
   // IB trade history – PAPER / LIVE orders persisted in the Trade table
   const { data: ibTradeHistoryData } = useQuery({
@@ -306,6 +305,14 @@ export default function SandboxPanel() {
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const ibTradeHistory = ibTradeHistoryData?.trades ?? []
+
+  const latestNotifiableTrade = useMemo(() => {
+    if (ibConnected) {
+      const recentIbTrade = ibTradeHistory.find(t => String(t?.status ?? '').toUpperCase() !== 'CANCELLED')
+      return recentIbTrade ?? ibTradeHistory[0] ?? null
+    }
+    return engineTrades[0] ?? null
+  }, [ibConnected, ibTradeHistory, engineTrades])
 
   // Use IB history when connected, sandbox trades when simulated
   const activeTrades = ibConnected ? ibTradeHistory : allTrades
@@ -349,6 +356,9 @@ export default function SandboxPanel() {
       type: 'trade',
       profile: activeProfile,
       side: o.side,
+      symbol: o.symbol,
+      shares: Number(o.remaining ?? o.quantity ?? 0),
+      price: o.limit_price != null ? Number(o.limit_price) : null,
       label: `Open ${o.side} ${o.remaining ?? o.quantity} / ${o.quantity} ${o.symbol}`,
       sub: `Order #${o.ib_order_id} · ${o.status ?? 'Submitted'} · ${getIbOrderExpiryLabel(o)}`,
       time: o.created_at ? new Date(o.created_at).toLocaleTimeString() : now,
@@ -362,6 +372,9 @@ export default function SandboxPanel() {
         type: 'trade',
         profile: activeProfile,
         side: (Number(p.quantity) || 0) >= 0 ? 'BUY' : 'SELL',
+        symbol: p.symbol,
+        shares: Number(p.quantity ?? 0),
+        price: Number(p.avg_cost ?? 0),
         label: `Position ${p.symbol} ${Number(p.quantity).toFixed(2)} @ $${Number(p.avg_cost || 0).toFixed(2)}`,
         sub: `Market Value: $${Number(p.market_value || 0).toFixed(2)}`,
         time: now,
@@ -371,7 +384,7 @@ export default function SandboxPanel() {
     const entries = [...orderEntries, ...positionEntries]
     if (!entries.length) return
     setActivities(prev => {
-      const keep = prev.filter(a => !((a.profile ?? 'simulated') === activeProfile && a.syncFromIb))
+      const keep = prev.filter(a => !(String(a.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase() && a.syncFromIb))
       const synced = entries.map(e => ({ ...e, syncFromIb: true }))
       return [...synced, ...keep].slice(0, 500)
     })
@@ -414,7 +427,13 @@ export default function SandboxPanel() {
           }
         })
 
-      const retained = prev.filter(a => !(a.type === 'trade' && (a.profile ?? 'simulated') === activeProfile))
+      const retained = prev.filter(a => {
+        const sameProfile = String(a.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase()
+        // Keep IB sync snapshots (open orders/positions) so inline symbol logs
+        // can show activity even when there is no persisted trade record yet.
+        if (a.type === 'trade' && sameProfile && !a.syncFromIb) return false
+        return true
+      })
       return [...tradeEntries, ...retained]
         .sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
         .slice(0, 500)
@@ -736,7 +755,7 @@ export default function SandboxPanel() {
     // In IB mode (paper or live): export the in-memory activity log as CSV
     if (ibConnected) {
       const mode = ibMode ?? 'paper'
-      const rows = activities.filter(a => (a.profile ?? 'simulated') === activeProfile)
+      const rows = activities.filter(a => String(a.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase())
       const escape = v => `"${String(v ?? '').replace(/"/g, '""')}"`
       const header = 'Time,Type,Side,Label,Sub'
       const body = rows.map(a =>
@@ -788,13 +807,13 @@ export default function SandboxPanel() {
   }
 
   const visibleActivities = useMemo(
-    () => activities.filter(a => (a.profile ?? 'simulated') === activeProfile),
+    () => activities.filter(a => String(a.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase()),
     [activities, activeProfile],
   )
 
   return (
     <div className="flex h-[calc(100vh-2rem)] max-h-[calc(100vh-2rem)] overflow-hidden">
-      <TradeNotificationBanner latestEngineTrade={latestEngineTrade} />
+      <TradeNotificationBanner latestEngineTrade={latestNotifiableTrade} />
       <ActivityLog activities={visibleActivities} />
 
       <SandboxSidebar
@@ -1077,6 +1096,7 @@ export default function SandboxPanel() {
               ibMode={ibMode}
               accountData={accountData}
               positions={positions}
+              ibPositions={ibConnected ? (ibPositionsData?.positions ?? []) : []}
               quotes={quotes}
               totalEquity={totalEquity}
               totalUnrealizedPnl={totalUnrealizedPnl}
@@ -1085,7 +1105,7 @@ export default function SandboxPanel() {
               analytics={analytics}
               realizedMetrics={realizedMetrics}
               allTrades={activeTrades}
-              activities={activities}
+              activities={visibleActivities}
               pmScores={managerState?.scores ?? {}}
               managerSettings={managerState?.settings ?? null}
               onOpenManager={activeMainTab === 'summary' ? () => setActiveMainTab('manager') : null}
@@ -1105,7 +1125,7 @@ export default function SandboxPanel() {
               accountData={accountData}
               quotes={quotes}
               trades={trades}
-              activities={activities}
+              activities={visibleActivities}
               engineState={engineState}
               editingStrategy={editingStrategy}
               setEditingStrategy={setEditingStrategy}

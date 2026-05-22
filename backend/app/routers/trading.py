@@ -64,6 +64,35 @@ async def _snapshot_simulated_automation_state() -> None:
     })
 
 
+async def _pause_simulated_automation() -> dict:
+    """Disable sandbox automation while IB mode is active."""
+    async with AsyncSessionLocal() as db:
+        res = await db.execute(select(SandboxPosition))
+        positions = res.scalars().all()
+        paused_engines = 0
+        for p in positions:
+            if bool(p.strategy_enabled):
+                p.strategy_enabled = False
+                paused_engines += 1
+        await db.commit()
+
+    from app.services.portfolio_manager import get_manager_settings, update_manager_settings
+
+    manager_was_enabled = bool(get_manager_settings().get("enabled", False))
+    if manager_was_enabled:
+        update_manager_settings({"enabled": False})
+
+    logger.info(
+        "IB handoff: paused simulated automation (engines_paused=%s, manager_paused=%s)",
+        paused_engines,
+        manager_was_enabled,
+    )
+    return {
+        "engines_paused": paused_engines,
+        "manager_paused": manager_was_enabled,
+    }
+
+
 async def _restore_simulated_automation_state() -> dict:
     """Restore simulated engine + manager enabled states after IB disconnect."""
     payload = load_portfolio_state(_SIM_AUTOMATION_PROFILE)
@@ -101,21 +130,26 @@ async def _restore_simulated_automation_state() -> dict:
 
 @router.post("/ib/connect")
 async def connect_ib():
+    logger.info("IB connect requested (configured_mode=%s)", settings.TRADING_MODE)
     result = await ib_service.connect()
     if result.get("status") == "ok" and ib_service.is_connected:
         mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
         try:
             async with AsyncSessionLocal() as db:
                 await offload_simulated_state(db)
-                await _snapshot_simulated_automation_state()
 
             await _snapshot_ib_state(mode)
             result["handoff"] = {
                 "simulated_saved": True,
                 "engines_stopped": False,
                 "portfolio_manager_stopped": False,
+                "engines_paused_count": 0,
                 "active_profile": mode,
             }
+            logger.info(
+                "IB connected and handoff complete (profile=%s, signals/PM remain active)",
+                mode,
+            )
         except Exception as exc:
             logger.warning("IB handoff setup failed: %s", exc)
             result["handoff"] = {
@@ -129,22 +163,11 @@ async def connect_ib():
 
 @router.post("/ib/disconnect")
 async def disconnect_ib():
+    logger.info("IB disconnect requested")
     if ib_service.is_connected:
         mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
         await _snapshot_ib_state(mode)
-    result = await ib_service.disconnect()
-
-    try:
-        restored = await _restore_simulated_automation_state()
-        result["simulated_restore"] = restored
-    except Exception as exc:
-        logger.warning("Simulated automation state restore failed: %s", exc)
-        result["simulated_restore"] = {
-            "restored": False,
-            "error": str(exc),
-        }
-
-    return result
+    return await ib_service.disconnect()
 
 
 @router.get("/ib/status")

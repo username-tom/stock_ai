@@ -81,6 +81,7 @@ export default function PortfolioOverview({
   ibMode,
   accountData,
   positions,
+  ibPositions = [],
   quotes,
   totalEquity,
   totalUnrealizedPnl,
@@ -97,6 +98,7 @@ export default function PortfolioOverview({
 }) {
   const appSettings = useAppSettings()
   const isSimulated = !ibMode
+  const activeProfile = isSimulated ? 'simulated' : String(ibMode).toLowerCase()
   const priceColors = usePriceChangeTracking(quotes)
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
@@ -119,6 +121,78 @@ export default function PortfolioOverview({
   const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : null
 
   const cumulativeSeries = analytics?.cumulative_pnl ?? []
+  const ibPositionsBySymbol = useMemo(() => {
+    const map = new Map()
+    for (const row of ibPositions ?? []) {
+      const symbol = String(row?.symbol ?? '').trim().toUpperCase()
+      if (!symbol) continue
+      map.set(symbol, {
+        quantity: Number(row?.quantity ?? 0),
+        avg_cost: Number(row?.avg_cost ?? 0),
+      })
+    }
+    return map
+  }, [ibPositions])
+  const effectivePositions = useMemo(() => {
+    return (positions ?? []).map((pos) => {
+      const symbol = String(pos?.symbol ?? '').trim().toUpperCase()
+      if (isSimulated) {
+        return {
+          ...pos,
+          _effShares: Number(pos?.shares ?? 0),
+          _effAvgCost: Number(pos?.avg_cost ?? 0),
+          _effSymbol: symbol,
+        }
+      }
+      const ibRow = ibPositionsBySymbol.get(symbol)
+      return {
+        ...pos,
+        _effShares: Number(ibRow?.quantity ?? 0),
+        _effAvgCost: Number(ibRow?.avg_cost ?? 0),
+        _effSymbol: symbol,
+      }
+    })
+  }, [positions, isSimulated, ibPositionsBySymbol])
+  const effectivePieData = useMemo(() => {
+    if (isSimulated) return pieData
+
+    const held = effectivePositions
+      .filter(p => Math.abs(Number(p._effShares ?? 0)) > 0)
+      .map((p) => {
+        const shares = Math.abs(Number(p._effShares ?? 0))
+        const avgCost = Number(p._effAvgCost ?? 0)
+        const mp = Number(quotes?.[p.symbol]?.last_price ?? avgCost)
+        const mv = shares * mp
+        return {
+          symbol: p.symbol,
+          shares,
+          market_value: mv,
+          mv,
+          cash: 0,
+        }
+      })
+
+    const total = held.reduce((sum, row) => sum + Number(row.market_value ?? 0), 0)
+    if (total <= 0) return []
+    return held.map((row) => ({
+      ...row,
+      pct: Number(((row.market_value / total) * 100).toFixed(2)),
+    }))
+  }, [isSimulated, pieData, effectivePositions, quotes])
+  const breakdownPositions = useMemo(() => {
+    if (isSimulated) {
+      return [...effectivePositions].sort((a, b) => String(a.symbol).localeCompare(String(b.symbol)))
+    }
+
+    // IB mode: keep all watchlist rows, merge IB shares/cost per symbol,
+    // then sort by owned position size (largest first).
+    return [...effectivePositions].sort((a, b) => {
+      const aQty = Math.abs(Number(a._effShares ?? 0))
+      const bQty = Math.abs(Number(b._effShares ?? 0))
+      if (bQty !== aQty) return bQty - aQty
+      return String(a.symbol).localeCompare(String(b.symbol))
+    })
+  }, [isSimulated, effectivePositions])
   const parsePointDate = (value) => {
     if (!value || typeof value !== 'string') return null
     const normalized = value.includes('T') ? value : value.replace(' ', 'T')
@@ -416,7 +490,7 @@ export default function PortfolioOverview({
   const maxGainPct = totalDeposited > 0 ? (maxGain / totalDeposited) * 100 : null
   const maxDrawdownPct = totalDeposited > 0 ? (maxDrawdown / totalDeposited) * 100 : null
 
-  const marketShareData = pieData.map((entry, i) => ({
+  const marketShareData = effectivePieData.map((entry, i) => ({
     ...entry,
     fill: PIE_COLORS[i % PIE_COLORS.length],
   }))
@@ -448,7 +522,12 @@ export default function PortfolioOverview({
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">{isSimulated ? 'Portfolio Equity' : 'Gross Position Value'}</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(totalEquity)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{positions.filter(p => p.shares > 0).length} positions held</div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {isSimulated
+              ? effectivePositions.filter(p => Number(p._effShares) > 0).length
+              : (ibPositions ?? []).filter(p => Math.abs(Number(p?.quantity ?? 0)) > 0).length
+            } positions held
+          </div>
         </div>
         <div className={`card ${headlineUnrealized >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
           <div className="text-xs text-slate-500 mb-1">Unrealised P&amp;L</div>
@@ -535,7 +614,7 @@ export default function PortfolioOverview({
       )}
 
       {/* Per-position breakdown table */}
-      {positions.length > 0 ? (
+      {breakdownPositions.length > 0 ? (
         <div className="card">
             <div className="flex items-center gap-2 mb-4">
               <TableCellsIcon className="h-4 w-4 text-slate-400" />
@@ -560,16 +639,18 @@ export default function PortfolioOverview({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-dark-700">
-                  {positions.map((pos, i) => {
+                  {breakdownPositions.map((pos, i) => {
+                    const shares = Number(pos._effShares ?? 0)
+                    const avgCost = Number(pos._effAvgCost ?? 0)
                     const q = quotes[pos.symbol]
-                    const mp = q?.last_price ?? pos.avg_cost
-                    const mv = mp * pos.shares
-                    const costBasis = pos.avg_cost * pos.shares
-                    const cashRemaining = Math.max(0, pos.allocated_funds - pos.avg_cost * pos.shares)
+                    const mp = q?.last_price ?? avgCost
+                    const mv = mp * shares
+                    const costBasis = avgCost * shares
+                    const cashRemaining = Math.max(0, pos.allocated_funds - avgCost * shares)
                     const unreal = mv - costBasis
                     const unrealPct = costBasis > 0 ? (unreal / costBasis) * 100 : null
                     const realizedPct = pos.total_invested > 0.01 ? ((pos.realized_pnl ?? 0) / pos.total_invested) * 100 : null
-                    const pd = pieData.find(d => d.symbol === pos.symbol)
+                    const pd = effectivePieData.find(d => d.symbol === pos.symbol)
                     const priceColor = priceColors[pos.symbol]
                     const aiTag = (pos.learner_tag || '—').toUpperCase()
                     const aiStyle = AI_TAG_CELL_STYLES[aiTag] ?? 'text-slate-500'
@@ -620,16 +701,16 @@ export default function PortfolioOverview({
                             <div className="text-amber-300">{lowerLimit}</div>
                           </div>
                         </td>
-                        <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? pos.shares.toFixed(3) : '—'}</td>
-                        <td className="text-right text-slate-300 font-mono">{pos.shares > 0 ? fmtMoney(pos.avg_cost) : '—'}</td>
+                        <td className="text-right text-slate-300 font-mono">{Math.abs(shares) > 0 ? shares.toFixed(3) : '—'}</td>
+                        <td className="text-right text-slate-300 font-mono">{Math.abs(shares) > 0 ? fmtMoney(avgCost) : '—'}</td>
                         <td className={`text-right py-2 px-3 font-mono rounded transition-colors ${priceColor?.bgColor || ''} ${priceColor?.textColor || 'text-slate-200'}`}>
                           {fmtMoney(mp)}
                         </td>
-                        <td className="text-right text-slate-200 font-mono">{pos.shares > 0 ? fmtMoney(mv) : '—'}</td>
+                        <td className="text-right text-slate-200 font-mono">{Math.abs(shares) > 0 ? fmtMoney(mv) : '—'}</td>
                         <td className="text-right text-blue-300 font-mono">{cashRemaining > 0 ? fmtMoney(cashRemaining) : '—'}</td>
                         <td className="text-right text-slate-400">{pd ? `${pd.pct}%` : '—'}</td>
                         <td className={`text-right font-semibold font-mono ${unreal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {pos.shares > 0
+                          {Math.abs(shares) > 0
                             ? `${fmt(unreal)} (${unrealPct == null ? '—' : `${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%`})`
                             : '—'}
                         </td>
@@ -704,9 +785,9 @@ export default function PortfolioOverview({
       )}
 
       {/* Allocation + Unrealised row */}
-      {(pieData.length > 0 || positions.some(p => p.shares > 0)) && (
+      {(effectivePieData.length > 0 || effectivePositions.some(p => p._effShares > 0)) && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {pieData.length > 0 && (
+          {effectivePieData.length > 0 && (
             <div className="card">
               <div className="flex items-center gap-2 mb-4">
                 <ChartPieIcon className="h-4 w-4 text-slate-400" />
@@ -756,12 +837,14 @@ export default function PortfolioOverview({
             </div>
           )}
 
-          {positions.some(p => p.shares > 0) && (() => {
-            const unrealData = positions
-              .filter(p => p.shares > 0)
+          {effectivePositions.some(p => p._effShares > 0) && (() => {
+            const unrealData = effectivePositions
+              .filter(p => Number(p._effShares ?? 0) > 0)
               .map(p => {
-                const mp = quotes[p.symbol]?.last_price ?? p.avg_cost
-                const unreal = (mp - p.avg_cost) * p.shares
+                const avgCost = Number(p._effAvgCost ?? 0)
+                const shares = Number(p._effShares ?? 0)
+                const mp = quotes[p.symbol]?.last_price ?? avgCost
+                const unreal = (mp - avgCost) * shares
                 return { symbol: p.symbol, value: parseFloat(unreal.toFixed(2)) }
               })
               .sort((a, b) => b.value - a.value)
@@ -990,13 +1073,17 @@ export default function PortfolioOverview({
           <ClockIcon className="h-4 w-4 text-slate-400" />
           <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Activity Log</h2>
           {(() => {
-            const total = activities.filter(a => a.type === 'trade' && a.tradeId).length + fundEvents.length
+            const total = activities
+              .filter(a => a.type === 'trade' && (String(a.profile ?? 'simulated').toLowerCase() === activeProfile))
+              .length + fundEvents.length
             return total > 0 && <span className="ml-auto text-xs text-slate-500">{total} event{total !== 1 ? 's' : ''}</span>
           })()}
         </div>
         {(() => {
-          const tradeEntries = activities.filter(a => a.type === 'trade' && a.tradeId).map(a => ({
-            id: `t-${a.tradeId}`,
+          const tradeEntries = activities
+            .filter(a => a.type === 'trade' && (String(a.profile ?? 'simulated').toLowerCase() === activeProfile))
+            .map((a, i) => ({
+            id: a.tradeId != null ? `t-${a.tradeId}` : `ta-${a.ts ?? 0}-${a.symbol ?? ''}-${a.side ?? ''}-${i}`,
             kind: 'trade',
             side: a.side,
             date: new Date(a.ts).toISOString(),

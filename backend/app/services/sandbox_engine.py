@@ -585,10 +585,20 @@ async def _execute_trade(
     disable_engine_after_sell: bool = False,
 ) -> None:
     """Open a fresh DB session and execute the simulated trade."""
+    from app.services.ib_service import ib_service
+
+    if ib_service.is_connected:
+        logger.info(
+            "Sandbox engine trade blocked while IB is connected (symbol=%s side=%s reason=%s)",
+            pos.symbol,
+            side,
+            reason,
+        )
+        return
+
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
         from app.models.sandbox import SandboxAccount
-        from app.services.ib_service import ib_service
         result = await db.execute(
             sa_select(SandboxPosition).where(SandboxPosition.id == pos.id)
         )

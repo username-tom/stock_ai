@@ -958,11 +958,13 @@ export default function PositionDetail({
         <div className="overflow-y-auto max-h-80">
         {(() => {
           // Merge trades + fund events + allocation events into a single timeline, filtered by selectedSymbol
-          const tradeEntries = activities.filter(a => a.type === 'trade' && a.tradeId && a.symbol === selectedSymbol).map(a => ({
-            id: `t-${a.tradeId}`,
+          const tradeEntries = activities
+            .filter(a => a.type === 'trade' && a.symbol === selectedSymbol)
+            .map((a, i) => ({
+            id: a.tradeId != null ? `t-${a.tradeId}` : `ta-${a.ts ?? 0}-${a.symbol ?? ''}-${a.side ?? ''}-${i}`,
             kind: 'trade',
             side: a.side,
-            date: new Date(a.ts).toISOString(),
+            date: new Date(a.ts ?? Date.now()).toISOString(),
             label: a.label,
             sub: a.sub,
             pnl: a.pnl,
