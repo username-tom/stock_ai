@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
@@ -171,6 +171,34 @@ function sanitizeSentimentMap(map) {
   )
 }
 
+function buildImportDraft(baseSettings, imported) {
+  const baseDraft = buildDraftFromSettings(baseSettings)
+  const payload = imported?.settings && typeof imported.settings === 'object' ? imported.settings : imported
+  if (!payload || typeof payload !== 'object') return baseDraft
+
+  const candidate = { ...baseDraft, ...payload }
+
+  // Support importing backend-shape payloads where transfer_pct is stored as 0-1.
+  if (typeof payload.transfer_pct === 'number' && payload.transfer_pct <= 1) {
+    candidate.transfer_pct = Math.round(payload.transfer_pct * 100)
+  }
+
+  candidate.market_sentiment_strategies = {
+    ...baseDraft.market_sentiment_strategies,
+    ...(payload.market_sentiment_strategies ?? {}),
+  }
+  candidate.symbol_sentiment_strategies = {
+    ...baseDraft.symbol_sentiment_strategies,
+    ...(payload.symbol_sentiment_strategies ?? {}),
+  }
+  candidate.ai_tag_strategies = {
+    ...baseDraft.ai_tag_strategies,
+    ...(payload.ai_tag_strategies ?? {}),
+  }
+
+  return candidate
+}
+
 function CollapsibleSection({ title, badge, children, isOpen, onToggle }) {
   return (
     <div className="border border-dark-600 rounded-lg overflow-hidden">
@@ -209,6 +237,7 @@ function SettingRow({ label, hint, children }) {
 export default function PortfolioManagerPanel({ profile = 'simulated', onShowOverview, onSelectSymbol }) {
   const qc = useQueryClient()
   const appSettings = useAppSettings()
+  const importInputRef = useRef(null)
   const activeProfile = normalizeProfile(profile)
   const [editSettings, setEditSettings] = useState(false)
   const [draft, setDraft] = useState(null)
@@ -217,6 +246,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [dragPayload, setDragPayload] = useState(null)
   const [dragOverMode, setDragOverMode] = useState(null)
   const [sentimentError, setSentimentError] = useState(null)
+  const [importNotice, setImportNotice] = useState(null)
   const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false })
 
   function toggleSection(key) {
@@ -361,6 +391,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     // Revert to current backend settings when cancelling edits
     const nextDraft = buildDraftFromSettings(settings)
     setEditSettings(false)
+    setImportNotice(null)
     setDraft(nextDraft)
     const next = {
       ...savedStates,
@@ -403,6 +434,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       return
     }
     setSentimentError(null)
+    setImportNotice(null)
     updateMut.mutate({
       transfer_pct: draft.transfer_pct / 100,
       transfer_interval_s: Number(draft.transfer_interval_s),
@@ -435,6 +467,49 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       ai_tag_long_tp_pct: Number(draft.ai_tag_long_tp_pct),
       ai_tag_long_sl_pct: Number(draft.ai_tag_long_sl_pct),
     })
+  }
+
+  function handleExportSettings() {
+    const exportSettings = draft ?? buildDraftFromSettings(settings)
+    const payload = {
+      type: 'portfolio_manager_settings',
+      version: 1,
+      profile: activeProfile,
+      exported_at: new Date().toISOString(),
+      settings: exportSettings,
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `pm-settings-${activeProfile}-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
+    URL.revokeObjectURL(url)
+  }
+
+  function handleImportClick() {
+    importInputRef.current?.click()
+  }
+
+  async function handleImportSettings(event) {
+    const file = event.target.files?.[0]
+    if (!file) return
+    try {
+      const text = await file.text()
+      const parsed = JSON.parse(text)
+      const importedDraft = buildImportDraft(settings, parsed)
+      setSentimentError(null)
+      setImportNotice(`Imported settings from ${file.name}. Review and click Save to apply.`)
+      setEditSettings(true)
+      updateDraft(importedDraft)
+    } catch {
+      setSentimentError('Unable to import settings file. Please select a valid JSON export.')
+      setImportNotice(null)
+    } finally {
+      event.target.value = ''
+    }
   }
 
   const strategyOptions = strategyData?.strategies ?? []
@@ -526,6 +601,28 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             </button>
           )}
           <button
+            onClick={handleExportSettings}
+            disabled={!settings}
+            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Export PM settings as JSON"
+          >
+            Export
+          </button>
+          <button
+            onClick={handleImportClick}
+            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
+            title="Import PM settings from JSON"
+          >
+            Import
+          </button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={handleImportSettings}
+          />
+          <button
             onClick={editSettings ? doneEditing : openEdit}
             className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
           >
@@ -542,6 +639,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       </div>
       {sentimentError && (
         <p className="text-xs text-red-400 -mt-2">{sentimentError}</p>
+      )}
+      {!sentimentError && importNotice && (
+        <p className="text-xs text-emerald-400 -mt-2">{importNotice}</p>
       )}
 
       {/* Summary stats */}
