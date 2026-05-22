@@ -22,10 +22,51 @@ const TABS = [
 const QUOTE_CACHE_KEY = 'dashboard_quote_cache_v1'
 const QUOTE_CACHE_TTL_MS = 15 * 60_000
 const QUOTE_CACHE_MAX_SYMBOLS = 300
-const HISTORY_CACHE_KEY = 'dashboard_history_cache_v1'
+const HISTORY_CACHE_KEY = 'dashboard_history_cache_v2'
 const HISTORY_CACHE_SHORT_TTL_MS = 10 * 60_000
 const HISTORY_CACHE_LONG_TTL_MS = 6 * 60 * 60_000
 const HISTORY_CACHE_MAX_ENTRIES = 200
+const DASHBOARD_CHART_TYPE_KEY = 'dashboard_chart_type_v1'
+
+const CHART_TYPE_OPTIONS = [
+  { key: 'line', label: 'Price Line' },
+  { key: 'candles', label: 'Candlestick' },
+]
+
+const LINE_PERIOD_OPTIONS = [
+  { key: '1d',  label: '1D' },
+  { key: '2d',  label: '2D' },
+  { key: '5d',  label: '5D' },
+  { key: '2w',  label: '2W' },
+  { key: '1mo', label: '1M' },
+  { key: '3mo', label: '3M' },
+  { key: '6mo', label: '6M' },
+  { key: '1y',  label: '1Y' },
+  { key: '2y',  label: '2Y' },
+  { key: '5y',  label: '5Y' },
+  { key: 'max', label: 'Max' },
+]
+
+const CANDLE_PERIOD_OPTIONS = LINE_PERIOD_OPTIONS
+
+const PERIOD_INTERVAL_HINTS = {
+  '1d': '1m',
+  '2d': '1m',
+  '5d': '15m',
+  '2w': '15m',
+  '1mo': '1d',
+  '3mo': '1d',
+  '6mo': '1d',
+  '1y': '1d',
+  '2y': '1d',
+  '5y': '1d',
+  'max': '1d',
+}
+
+const CANDLE_PERIOD_INTERVAL_HINTS = {
+  ...PERIOD_INTERVAL_HINTS,
+  max: '3mo',
+}
 
 function readQuoteCache() {
   try {
@@ -94,21 +135,30 @@ function readHistoryCache() {
   }
 }
 
+function readStoredChartType() {
+  try {
+    const raw = localStorage.getItem(DASHBOARD_CHART_TYPE_KEY)
+    return raw === 'candles' ? 'candles' : 'line'
+  } catch {
+    return 'line'
+  }
+}
+
 function getHistoryCacheTTL(period) {
   return ['1d', '2d', '5d', '2w'].includes(period)
     ? HISTORY_CACHE_SHORT_TTL_MS
     : HISTORY_CACHE_LONG_TTL_MS
 }
 
-function historyCacheKey(symbol, period) {
-  return `${symbol || ''}|${period || ''}`
+function historyCacheKey(symbol, period, interval) {
+  return `${symbol || ''}|${period || ''}|${interval || ''}`
 }
 
-function getCachedHistory(symbol, period) {
-  if (!symbol || !period) return undefined
+function getCachedHistory(symbol, period, interval) {
+  if (!symbol || !period || !interval) return undefined
 
   const cache = readHistoryCache()
-  const key = historyCacheKey(symbol, period)
+  const key = historyCacheKey(symbol, period, interval)
   const entry = cache?.[key]
   if (!entry?.data || !entry?.ts) return undefined
 
@@ -132,6 +182,20 @@ function mergeHistoryData(cachedObj, freshObj) {
   const freshRows  = Array.isArray(freshObj.data)  ? freshObj.data  : []
   if (!cachedRows.length) return freshObj
   if (!freshRows.length)  return cachedObj
+
+  const dateStyle = (rows) => {
+    const sample = rows.find(r => typeof r?.date === 'string')?.date ?? ''
+    if (/^\d{4}-\d{2}-\d{2}$/.test(sample)) return 'iso-date'
+    if (/^\d{2}\/\d{2} \d{2}:\d{2}$/.test(sample)) return 'intraday-label'
+    return 'other'
+  }
+  const cachedStyle = dateStyle(cachedRows)
+  const freshStyle = dateStyle(freshRows)
+  if (cachedStyle !== freshStyle && freshStyle !== 'other') {
+    // Do not merge incompatible label formats (legacy cache vs new format).
+    return freshObj
+  }
+
   const map = new Map(cachedRows.map(d => [d.date, d]))
   for (const d of freshRows) map.set(d.date, d)
   const sorted = Array.from(map.values()).sort((a, b) =>
@@ -140,14 +204,14 @@ function mergeHistoryData(cachedObj, freshObj) {
   return { ...freshObj, data: sorted }
 }
 
-function writeHistoryCache(symbol, period, data) {
-  if (!symbol || !period || !data) return
+function writeHistoryCache(symbol, period, interval, data) {
+  if (!symbol || !period || !interval || !data) return
 
   const now = Date.now()
   const cache = readHistoryCache()
-  const existing = cache[historyCacheKey(symbol, period)]?.data
+  const existing = cache[historyCacheKey(symbol, period, interval)]?.data
   const merged   = mergeHistoryData(existing, data)
-  cache[historyCacheKey(symbol, period)] = { ts: now, data: merged }
+  cache[historyCacheKey(symbol, period, interval)] = { ts: now, data: merged }
 
   for (const [key, entry] of Object.entries(cache)) {
     const parts = key.split('|')
@@ -176,6 +240,7 @@ export default function Dashboard() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [chartSymbol, setChartSymbol] = useState(() => searchParams.get('symbol') || watchlist[0] || 'AAPL')
   const [chartPeriod, setChartPeriod] = useState('1d')
+  const [chartType, setChartType] = useState(readStoredChartType)
 
   // Consume ?symbol= param on navigation from sandbox
   useEffect(() => {
@@ -188,6 +253,24 @@ export default function Dashboard() {
   }, [searchParams])
   const [indicators, setIndicators] = useState({ bb: true, ma9: false, ma20: true, ma50: true, ma100: false, ma200: true, rsi: true, macd: true })
   const [activeTab, setActiveTab] = useState('charts')
+
+  const periodOptions = chartType === 'candles' ? CANDLE_PERIOD_OPTIONS : LINE_PERIOD_OPTIONS
+  const intervalHints = chartType === 'candles' ? CANDLE_PERIOD_INTERVAL_HINTS : PERIOD_INTERVAL_HINTS
+  const chartInterval = intervalHints[chartPeriod] ?? '1d'
+
+  useEffect(() => {
+    if (!periodOptions.some(p => p.key === chartPeriod)) {
+      setChartPeriod(periodOptions[0]?.key ?? '1d')
+    }
+  }, [chartPeriod, periodOptions])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DASHBOARD_CHART_TYPE_KEY, chartType)
+    } catch {
+      // Ignore storage failures (private mode/quota) and keep UI functional.
+    }
+  }, [chartType])
 
   const toggleIndicator = (key) => setIndicators(prev => ({ ...prev, [key]: !prev[key] }))
 
@@ -228,11 +311,14 @@ export default function Dashboard() {
   const shortPeriod = ['1d', '2d', '5d', '2w'].includes(chartPeriod)
   const histRefetchInterval = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms : 5 * 60_000) : 15 * 60_000
   const histStaleTime       = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms - 5_000 : 4 * 60_000) : 840_000
-  const cachedHistory = useMemo(() => getCachedHistory(chartSymbol, chartPeriod), [chartSymbol, chartPeriod])
+  const cachedHistory = useMemo(
+    () => getCachedHistory(chartSymbol, chartPeriod, chartInterval),
+    [chartSymbol, chartPeriod, chartInterval]
+  )
 
   const { data: histData, isLoading: histLoading } = useQuery({
-    queryKey: ['history', chartSymbol, chartPeriod],
-    queryFn: () => getHistory(chartSymbol, chartPeriod),
+    queryKey: ['history', chartSymbol, chartPeriod, chartInterval],
+    queryFn: () => getHistory(chartSymbol, chartPeriod, chartInterval),
     initialData: cachedHistory,
     staleTime: histStaleTime,
     refetchInterval: histRefetchInterval,
@@ -246,11 +332,11 @@ export default function Dashboard() {
   const needsWarmup = ['5d', '2w', '1mo', '3mo', '6mo'].includes(chartPeriod)
   // Warmup shares the '1y' localStorage slot; serves as initialData so the
   // chart renders immediately on load without a network round-trip.
-  const cachedWarmup = useMemo(() => getCachedHistory(chartSymbol, '1y'), [chartSymbol])
+  const cachedWarmup = useMemo(() => getCachedHistory(chartSymbol, '1y', '1d'), [chartSymbol])
   const { data: warmupHistData } = useQuery({
     // Reuse the same key as the 1Y chart view so they share React Query's cache.
-    queryKey: ['history', chartSymbol, '1y'],
-    queryFn: () => getHistory(chartSymbol, '1y'),
+    queryKey: ['history', chartSymbol, '1y', '1d'],
+    queryFn: () => getHistory(chartSymbol, '1y', '1d'),
     initialData: cachedWarmup,
     staleTime: 24 * 60 * 60_000,  // 24h — daily bars don’t change retroactively
     refetchIntervalInBackground: false,
@@ -259,15 +345,15 @@ export default function Dashboard() {
   const warmupData = needsWarmup ? (warmupHistData?.data ?? null) : null
 
   useEffect(() => {
-    if (histData && chartSymbol && chartPeriod) {
-      writeHistoryCache(chartSymbol, chartPeriod, histData)
+    if (histData && chartSymbol && chartPeriod && chartInterval) {
+      writeHistoryCache(chartSymbol, chartPeriod, chartInterval, histData)
     }
-  }, [histData, chartSymbol, chartPeriod])
+  }, [histData, chartSymbol, chartPeriod, chartInterval])
 
   // Persist warmup data so the next page load skips the 1Y fetch entirely
   useEffect(() => {
     if (warmupHistData && chartSymbol) {
-      writeHistoryCache(chartSymbol, '1y', warmupHistData)
+      writeHistoryCache(chartSymbol, '1y', '1d', warmupHistData)
     }
   }, [warmupHistData, chartSymbol])
 
@@ -351,8 +437,13 @@ export default function Dashboard() {
           <div className="flex-1 min-w-0">
             <PriceChartPanel
               chartSymbol={chartSymbol}
+              chartType={chartType}
+              setChartType={setChartType}
               chartPeriod={chartPeriod}
               setChartPeriod={setChartPeriod}
+              chartInterval={chartInterval}
+              chartTypeOptions={CHART_TYPE_OPTIONS}
+              periodOptions={periodOptions}
               indicators={indicators}
               toggleIndicator={toggleIndicator}
               histData={histData}

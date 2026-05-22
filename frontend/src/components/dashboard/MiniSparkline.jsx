@@ -3,8 +3,8 @@ import { getHistory } from '../../api/client'
 
 export default function MiniSparkline({ symbol }) {
   const { data, isLoading } = useQuery({
-    queryKey: ['history', symbol, '1d'],
-    queryFn: () => getHistory(symbol, '1d'),
+    queryKey: ['history', symbol, '1d', '1m'],
+    queryFn: () => getHistory(symbol, '1d', '1m'),
     staleTime: 60_000,
     refetchInterval: 120_000,
     refetchIntervalInBackground: false,

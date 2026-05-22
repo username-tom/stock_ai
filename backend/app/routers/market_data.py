@@ -59,7 +59,7 @@ async def get_history(
 ):
     """Return OHLCV history for *symbol* (cached up to 15 min)."""
     try:
-        result = await market_service.get_history(symbol, period)
+        result = await market_service.get_history(symbol, period, interval_override=interval)
         return {"symbol": symbol.upper(), "interval": interval, **result}
     except Exception as exc:
         logger.error("history failed for %s: %s", symbol.upper(), exc)

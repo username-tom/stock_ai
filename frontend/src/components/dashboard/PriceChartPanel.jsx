@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { BriefcaseIcon } from '@heroicons/react/24/outline'
 import SubplotChart from '../charts/SubplotChart'
+import CandlestickChart from '../charts/CandlestickChart'
 
 function ChartSkeleton() {
   // A lightweight SVG fake-chart that renders instantly with no layout shift
@@ -72,20 +73,6 @@ function ChartSkeleton() {
   )
 }
 
-const PERIOD_OPTIONS = [
-  { key: '1d',  label: '1D' },
-  { key: '2d',  label: '2D' },
-  { key: '5d',  label: '5D' },
-  { key: '2w',  label: '2W' },
-  { key: '1mo', label: '1M' },
-  { key: '3mo', label: '3M' },
-  { key: '6mo', label: '6M' },
-  { key: '1y',  label: '1Y' },
-  { key: '2y',  label: '2Y' },
-  { key: '5y',  label: '5Y' },
-  { key: 'max', label: 'Max' },
-]
-
 const INDICATOR_OPTIONS = [
   { key: 'bb',     label: 'BB' },
   { key: 'ma9',    label: 'MA(9)' },
@@ -98,7 +85,12 @@ const INDICATOR_OPTIONS = [
 ]
 
 export default function PriceChartPanel({
+  chartType,
+  setChartType,
+  chartTypeOptions,
   chartSymbol, chartPeriod, setChartPeriod,
+  chartInterval,
+  periodOptions,
   indicators, toggleIndicator,
   histData, histLoading,
   chartPrevClose,
@@ -107,6 +99,7 @@ export default function PriceChartPanel({
   isInWatchlist = false,
 }) {
   const navigate = useNavigate()
+  const isCandlestick = chartType === 'candles'
   const ibTelemetry = histData?.ib_telemetry ?? quoteTelemetry
   const effectiveGap = ibTelemetry?.effective_request_gap_seconds
   const pacingReason = ibTelemetry?.last_pacing_error
@@ -153,9 +146,29 @@ export default function PriceChartPanel({
               )}
             </div>
           )}
+          <div className="mt-1 text-[10px] text-slate-500">
+            Interval {chartInterval || '1d'}
+          </div>
         </div>
         <div className="flex gap-1">
-          {PERIOD_OPTIONS.map(p => (
+          {chartTypeOptions?.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setChartType(t.key)}
+              className={`px-2 py-1 text-xs rounded-md transition-colors ${
+                chartType === t.key
+                  ? 'bg-sky-600 text-white'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex gap-1">
+          {periodOptions?.map(p => (
             <button
               key={p.key}
               onClick={() => setChartPeriod(p.key)}
@@ -187,6 +200,25 @@ export default function PriceChartPanel({
       </div>
       {histLoading ? (
         <ChartSkeleton />
+      ) : isCandlestick ? (
+        <div className="space-y-1">
+          <CandlestickChart
+            data={histData?.data ?? []}
+            warmupData={warmupData ?? undefined}
+            indicators={indicators}
+            prevClose={chartPrevClose}
+            hidePremarketAfterOpen={false}
+            height={220}
+          />
+          <SubplotChart
+            data={histData?.data ?? []}
+            warmupData={warmupData ?? undefined}
+            indicators={indicators}
+            period={chartPeriod}
+            prevClose={chartPrevClose}
+            hidePricePanel
+          />
+        </div>
       ) : (
         <SubplotChart
           data={histData?.data ?? []}

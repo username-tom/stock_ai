@@ -55,7 +55,7 @@ _PERIOD_RANGE_MAP: dict[str, str] = {
 _PERIOD_INTERVAL_MAP: dict[str, str] = {
     "1d":  "1m",  "2d":  "1m",  "5d":  "15m", "2w":  "15m",
     "1mo": "1d",  "3mo": "1d",  "6mo": "1d",
-    "1y":  "1d",  "2y":  "1d",  "5y":  "1wk", "max": "1mo",
+    "1y":  "1d",  "2y":  "1d",  "5y":  "1d", "max": "1d",
 }
 
 # History TTL per period (seconds)
@@ -739,7 +739,7 @@ async def _get_ib_quote(symbol: str) -> dict[str, Any]:
     }
 
 
-def _ib_period_request(period: str) -> tuple[str, str, bool]:
+def _ib_period_request(period: str, interval_override: str | None = None) -> tuple[str, str, bool]:
     mapping: dict[str, tuple[str, str, bool]] = {
         "1d": ("3 D", "1 min", False),
         "2d": ("4 D", "1 min", False),
@@ -750,10 +750,28 @@ def _ib_period_request(period: str) -> tuple[str, str, bool]:
         "6mo": ("7 M", "1 day", True),
         "1y": ("1 Y", "1 day", True),
         "2y": ("2 Y", "1 day", True),
-        "5y": ("5 Y", "1 week", True),
-        "max": ("10 Y", "1 month", True),
+        "5y": ("5 Y", "1 day", True),
+        "max": ("10 Y", "1 day", True),
     }
-    return mapping.get(period, ("1 Y", "1 day", True))
+    duration, bar_size, use_rth = mapping.get(period, ("1 Y", "1 day", True))
+    if interval_override:
+        ib_bar_size_map = {
+            "1m": "1 min",
+            "2m": "2 mins",
+            "5m": "5 mins",
+            "15m": "15 mins",
+            "1h": "1 hour",
+            "1d": "1 day",
+            "1wk": "1 week",
+            "1mo": "1 month",
+            "3mo": "1 month",
+        }
+        override = ib_bar_size_map.get(interval_override)
+        if override:
+            bar_size = override
+            intraday = interval_override in {"1m", "2m", "5m", "15m", "1h"}
+            use_rth = not intraday if period not in ("1d", "2d") else False
+    return duration, bar_size, use_rth
 
 
 def _format_dt_for_period(dt: datetime, intraday: bool, period: str) -> str:
@@ -763,8 +781,8 @@ def _format_dt_for_period(dt: datetime, intraday: bool, period: str) -> str:
     return dt_et.strftime("%m/%d %H:%M")
 
 
-async def _get_ib_history(symbol: str, period: str) -> dict[str, Any]:
-    duration, bar_size, use_rth = _ib_period_request(period)
+async def _get_ib_history(symbol: str, period: str, interval_override: str | None = None) -> dict[str, Any]:
+    duration, bar_size, use_rth = _ib_period_request(period, interval_override)
 
     # ------------------------------------------------------------------
     # Disk-cache layer: historical (past) bars never change, so load what
@@ -941,11 +959,20 @@ def _fmt_ts(ts: int, intraday: bool, period: str) -> str:
     return dt.strftime("%m/%d %H:%M")
 
 
-async def _fetch_yf_history(sym: str, period: str) -> dict:
+def _normalize_interval_override(interval: str | None) -> str | None:
+    if not interval:
+        return None
+    normalized = interval.strip().lower()
+    allowed = {"1m", "2m", "5m", "15m", "1h", "1d", "1wk", "1mo", "3mo"}
+    return normalized if normalized in allowed else None
+
+
+async def _fetch_yf_history(sym: str, period: str, interval_override: str | None = None) -> dict:
     """Fetch OHLCV history from Yahoo Finance and return the formatted result dict."""
-    yf_range    = _PERIOD_RANGE_MAP.get(period, "1y")
-    yf_interval = _PERIOD_INTERVAL_MAP.get(period, "1d")
-    intraday    = "m" in yf_interval or "h" in yf_interval
+    yf_range = _PERIOD_RANGE_MAP.get(period, "1y")
+    yf_interval = _normalize_interval_override(interval_override) or _PERIOD_INTERVAL_MAP.get(period, "1d")
+    intraday_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
+    intraday = yf_interval in intraday_intervals
 
     chart = await _yf_chart(sym, range_=yf_range, interval=yf_interval,
                             include_pre_post=(period in ("1d", "2d")))
@@ -1081,26 +1108,27 @@ def _merge_ib_onto_yf(ib_result: dict, yf_result: dict) -> dict:
     return result
 
 
-async def _ib_history_overlay_task(sym: str, period: str) -> None:
+async def _ib_history_overlay_task(sym: str, period: str, interval_override: str | None = None) -> None:
     """Background task: fetch IB history and cache the raw IB result only.
 
     We deliberately do NOT merge with YF here.  The merge happens on every
     get_history() call so the chart always reflects the latest YF bars —
     storing a pre-merged snapshot would freeze the chart for the full TTL.
     """
-    ib_cache_key = f"history:ib:{sym}:{period}"
+    interval_key = _normalize_interval_override(interval_override) or "auto"
+    ib_cache_key = f"history:ib:{sym}:{period}:{interval_key}"
     try:
-        ib_result = await _get_ib_history(sym, period)
+        ib_result = await _get_ib_history(sym, period, interval_override=interval_override)
         await _cache.set(ib_cache_key, ib_result)
         logger.debug("IB history overlay refreshed for %s %s", sym, period)
     except Exception as exc:
         logger.debug("IB history overlay failed for %s %s: %s", sym, period, exc)
     finally:
         async with _ib_hist_overlay_lock:
-            _ib_hist_overlay_inflight.pop(f"{sym}:{period}", None)
+            _ib_hist_overlay_inflight.pop(f"{sym}:{period}:{interval_key}", None)
 
 
-async def get_history(symbol: str, period: str = "1y") -> list[dict]:
+async def get_history(symbol: str, period: str = "1y", interval_override: str | None = None) -> list[dict]:
     """Return OHLCV records list for *symbol*, served from cache when fresh.
 
     In IB mode Yahoo Finance is always the instant base source.  An IB fetch
@@ -1109,6 +1137,8 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
     while still surfacing IB-verified data shortly after.
     """
     sym = symbol.upper()
+    resolved_interval = _normalize_interval_override(interval_override)
+    interval_key = resolved_interval or "auto"
 
     if _ib_data_pull_allowed_now():
         # ---- IB mode: YF always fresh; IB merged per-request ----
@@ -1116,24 +1146,24 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
         # snapshot.  IB bars (cached separately) are merged on every call,
         # providing price verification for historical bars while YF covers
         # the most recent candles that IB hasn't emitted yet.
-        yf_cache_key = f"history:yf:{sym}:{period}"
+        yf_cache_key = f"history:yf:{sym}:{period}:{interval_key}"
         ttl = _HISTORY_TTL_MAP.get(period, 900)
         yf_data = await _cache.get(yf_cache_key, ttl)
         if yf_data is None:
-            yf_data = await _fetch_yf_history(sym, period)
+            yf_data = await _fetch_yf_history(sym, period, interval_override=resolved_interval)
             await _cache.set(yf_cache_key, yf_data)
 
         # Check IB cache and fire a background refresh when stale.
-        ib_cache_key = f"history:ib:{sym}:{period}"
+        ib_cache_key = f"history:ib:{sym}:{period}:{interval_key}"
         ib_cached = await _cache.get(ib_cache_key, _IB_HIST_OVERLAY_TTL)
-        inflight_key = f"{sym}:{period}"
+        inflight_key = f"{sym}:{period}:{interval_key}"
         async with _ib_hist_overlay_lock:
             if ib_cached is None and inflight_key not in _ib_hist_overlay_inflight:
-                task = asyncio.create_task(_ib_history_overlay_task(sym, period))
+                task = asyncio.create_task(_ib_history_overlay_task(sym, period, resolved_interval))
                 _ib_hist_overlay_inflight[inflight_key] = task
 
         # Re-merge IB-verified bars onto current YF data every request.
-        vol_patch_key = f"history:ibvol:{sym}:{period}"
+        vol_patch_key = f"history:ibvol:{sym}:{period}:{interval_key}"
         if ib_cached is not None:
             merged = _merge_ib_onto_yf(ib_cached, yf_data)
             # Persist IB volumes in a long-lived patch cache so they survive
@@ -1156,13 +1186,13 @@ async def get_history(symbol: str, period: str = "1y") -> list[dict]:
         return yf_data
 
     # ---- Pure YF mode ----
-    cache_key = f"history:yf:{sym}:{period}"
+    cache_key = f"history:yf:{sym}:{period}:{interval_key}"
     ttl = _HISTORY_TTL_MAP.get(period, 900)
     cached = await _cache.get(cache_key, ttl)
     if cached is not None:
         return cached
 
-    result = await _fetch_yf_history(sym, period)
+    result = await _fetch_yf_history(sym, period, interval_override=resolved_interval)
     await _cache.set(cache_key, result)
     return result
 

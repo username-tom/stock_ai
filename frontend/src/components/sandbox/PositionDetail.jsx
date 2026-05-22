@@ -69,8 +69,8 @@ export default function PositionDetail({
   const scripts = scriptsData?.scripts ?? []
 
   const { data: histData } = useQuery({
-    queryKey: ['history', selectedSymbol, '1d'],
-    queryFn: () => getHistory(selectedSymbol, '1d'),
+    queryKey: ['history', selectedSymbol, '1d', '1m'],
+    queryFn: () => getHistory(selectedSymbol, '1d', '1m'),
     staleTime: 60000,
     refetchInterval: appSettings.portfolio_detail_ms,
     enabled: !!selectedSymbol,

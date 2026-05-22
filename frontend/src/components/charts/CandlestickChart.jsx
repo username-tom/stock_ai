@@ -1,4 +1,14 @@
 import { useRef, useState, useEffect, useCallback, Component } from 'react'
+import { enrichData, enrichDataWithWarmup } from './indicators'
+
+const BB_UPPER = '#60a5fa'
+const BB_LOWER = '#f472b6'
+const BB_MID = '#fbbf24'
+const MA_9   = '#22d3ee'
+const MA_20  = '#facc15'
+const MA_50  = '#4ade80'
+const MA_100 = '#fb923c'
+const MA_200 = '#c084fc'
 
 /* ?? Error boundary � any render crash logs to console ??????????? */
 class ChartErrorBoundary extends Component {
@@ -25,7 +35,14 @@ class ChartErrorBoundary extends Component {
 }
 
 /* ?? Helpers ????????????????????????????????????????????????????? */
-const timeOf = (s) => s?.slice(6) ?? ''                        // "MM/DD HH:MM" ? "HH:MM"
+const isIntradayLabel = (s) => typeof s === 'string' && s.includes('/') && s.includes(':')
+const timeOf = (s) => (isIntradayLabel(s) ? s.slice(6) : '')   // "MM/DD HH:MM" ? "HH:MM"
+const shortDateLabel = (s) => {
+  if (!s) return ''
+  if (isIntradayLabel(s)) return s.slice(0, 5)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s.slice(5)
+  return String(s)
+}
 const fmt2   = (n) => (n != null ? n.toFixed(2) : '�')
 const fmtVol = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : `${(n / 1e3).toFixed(0)}K`
 
@@ -107,7 +124,7 @@ function IconButton({ title, onClick, disabled = false, children }) {
 }
 
 /* ?? Pure-SVG chart � zero recharts, zero invariant risk ????????? */
-function CandlestickInner({ data = [], prevClose, height = 260, className = '' }) {
+function CandlestickInner({ data = [], prevClose, height = 260, className = '', indicators = null, warmupData = null, hidePremarketAfterOpen = true }) {
   const containerRef = useRef(null)
   const [width, setWidth] = useState(0)
   const [hovered, setHovered] = useState(null)
@@ -143,13 +160,19 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '' }
   const plotW = width  - PAD_LEFT - PAD_RIGHT
   const plotH = chartHeight - PAD_TOP  - PAD_BOTTOM
 
-  const hidePremarket = shouldHidePremarket()
-  /* filter: hide pre-market after 10:30 ET and keep full OHLC */
-  const minTime = hidePremarket ? '09:30' : '07:30'
-  const bars = data.filter(d =>
-    timeOf(d.date) >= minTime &&
+  const rawBars = data.filter(d =>
     d.open != null && d.high != null && d.low != null && d.close != null
   )
+  const enrichedBars = warmupData?.length
+    ? enrichDataWithWarmup(warmupData, rawBars)
+    : enrichData(rawBars)
+  const isIntraday = enrichedBars.some(d => isIntradayLabel(d.date))
+  const hidePremarket = isIntraday && hidePremarketAfterOpen && shouldHidePremarket()
+  /* filter: hide pre-market after 10:30 ET for intraday series only */
+  const minTime = hidePremarket ? '09:30' : '07:30'
+  const bars = isIntraday
+    ? enrichedBars.filter(d => timeOf(d.date) >= minTime)
+    : enrichedBars
 
   useEffect(() => {
     if (!bars.length) {
@@ -198,9 +221,42 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '' }
   const bw  = Math.max(1, Math.min(14, bandwidth - 2))
 
   /* reference positions */
-  const mktOpenIdx  = visibleBars.findIndex(d => timeOf(d.date) >= '09:30')
-  const mktCloseIdx  = visibleBars.findIndex(d => timeOf(d.date) >= '16:00')
+  const mktOpenIdx  = isIntraday ? visibleBars.findIndex(d => timeOf(d.date) >= '09:30') : -1
+  const mktCloseIdx = isIntraday ? visibleBars.findIndex(d => timeOf(d.date) >= '16:00') : -1
   const prevCloseY  = prevClose != null ? pToY(prevClose) : null
+
+  const hasBB    = indicators?.bb === true && visibleBars.some(d => d.upper != null)
+  const hasMA9   = indicators?.ma9 === true && visibleBars.some(d => d.ma_9 != null)
+  const hasMA20  = indicators?.ma20 === true && visibleBars.some(d => d.ma_20 != null)
+  const hasMA50  = indicators?.ma50 === true && visibleBars.some(d => d.ma_50 != null)
+  const hasMA100 = indicators?.ma100 === true && visibleBars.some(d => d.ma_100 != null)
+  const hasMA200 = indicators?.ma200 === true && visibleBars.some(d => d.ma_200 != null)
+
+  const renderSeries = (key, stroke, strokeWidth = 1, dashed = false) => {
+    const segments = []
+    let points = []
+    for (let i = 0; i < visibleBars.length; i++) {
+      const v = visibleBars[i]?.[key]
+      if (v == null) {
+        if (points.length > 1) segments.push(points)
+        points = []
+        continue
+      }
+      points.push(`${xOf(i)},${pToY(v)}`)
+    }
+    if (points.length > 1) segments.push(points)
+    return segments.map((seg, idx) => (
+      <polyline
+        key={`${key}-${idx}`}
+        points={seg.join(' ')}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={strokeWidth}
+        strokeDasharray={dashed ? '4 2' : undefined}
+        opacity={0.95}
+      />
+    ))
+  }
 
   /* axis ticks */
   const yTicks    = Array.from({ length: 5 }, (_, i) => lo + (hi - lo) * (i / 4))
@@ -373,7 +429,7 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '' }
         )}
 
         {/* Market-close vertical line */}
-        {mktCloseIdx >= 0 && (
+        {isIntraday && mktCloseIdx >= 0 && (
           <g>
             <line
               x1={xOf(mktCloseIdx)} y1={PAD_TOP} x2={xOf(mktCloseIdx)} y2={PAD_TOP + plotH}
@@ -384,7 +440,7 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '' }
         )}
 
         {/* Market-open vertical line (hidden after 10:30 ET) */}
-        {!hidePremarket && mktOpenIdx >= 0 && (
+        {isIntraday && !hidePremarket && mktOpenIdx >= 0 && (
           <g>
             <line
               x1={xOf(mktOpenIdx)} y1={PAD_TOP} x2={xOf(mktOpenIdx)} y2={PAD_TOP + plotH}
@@ -423,6 +479,16 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '' }
           )
         })}
 
+        {/* Indicator overlays on candlesticks */}
+        {hasBB && renderSeries('upper', BB_UPPER, 1, true)}
+        {hasBB && renderSeries('lower', BB_LOWER, 1, true)}
+        {hasBB && renderSeries('mid', BB_MID, 1)}
+        {hasMA9 && renderSeries('ma_9', MA_9)}
+        {hasMA20 && renderSeries('ma_20', MA_20)}
+        {hasMA50 && renderSeries('ma_50', MA_50)}
+        {hasMA100 && renderSeries('ma_100', MA_100)}
+        {hasMA200 && renderSeries('ma_200', MA_200, 1.1)}
+
         {/* Hover crosshair */}
         {hovered && (
           <line
@@ -434,7 +500,7 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '' }
         {/* X-axis labels */}
         {xTicks.map(i => (
           <text key={i} x={xOf(i)} y={chartHeight - 6} fill="#64748b" fontSize={10} textAnchor="middle" fontFamily="monospace">
-            {timeOf(visibleBars[i].date)}
+            {isIntraday ? (timeOf(visibleBars[i].date) || shortDateLabel(visibleBars[i].date)) : shortDateLabel(visibleBars[i].date)}
           </text>
         ))}
         </svg>

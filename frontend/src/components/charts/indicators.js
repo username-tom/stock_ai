@@ -111,9 +111,10 @@ export function computeMACD(closes, fast = 12, slow = 26, signalPeriod = 9) {
  *
  * @param {(number|null)[]} values
  * @param {number} period
+ * @param {boolean} [fillLeading=false]
  * @returns {(number|null)[]}
  */
-export function computeSMA(values, period) {
+export function computeSMA(values, period, fillLeading = false) {
   const result = new Array(values.length).fill(null)
   let sum = 0
   let count = 0
@@ -130,6 +131,7 @@ export function computeSMA(values, period) {
       if (removed != null) { sum -= removed; count-- }
     }
     if (count === period) result[i] = sum / period
+    else if (fillLeading && count > 0) result[i] = sum / count
   }
   return result
 }
@@ -285,11 +287,11 @@ export function enrichData(data) {
   const bbValues    = hasBB               ? null : computeBollingerBands(closes)
   const fastMA      = hasFastMA           ? null : computeEMA(closes, 20)
   const slowMA      = hasSlowMA           ? null : computeEMA(closes, 50)
-  const ma9Values   = computeSMA(closes, 9)
-  const ma20Values  = computeSMA(closes, 20)
-  const ma50Values  = computeSMA(closes, 50)
-  const ma100Values = computeSMA(closes, 100)
-  const ma200Values = computeSMA(closes, 200)
+  const ma9Values   = computeSMA(closes, 9, true)
+  const ma20Values  = computeSMA(closes, 20, true)
+  const ma50Values  = computeSMA(closes, 50, true)
+  const ma100Values = computeSMA(closes, 100, true)
+  const ma200Values = computeSMA(closes, 200, true)
   const stochValues = hasStoch || !hasHighLow ? null : computeStochastic(highs, lows, closes)
   const atrValues   = hasATR   || !hasHighLow ? null : computeATR(highs, lows, closes)
   const obvValues   = hasOBV   || !hasVol     ? null : computeOBV(closes, volumes)

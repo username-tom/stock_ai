@@ -603,7 +603,7 @@ function OBVTooltip({ active, payload }) {
   )
 }
 
-export default function SubplotChart({ data = [], warmupData, height = 240, indicators = {}, period = '', prevClose }) {
+export default function SubplotChart({ data = [], warmupData, height = 240, indicators = {}, period = '', prevClose, hidePricePanel = false }) {
   const syncId = useId()
 
   if (!data.length) return (
@@ -612,8 +612,9 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
     </div>
   )
 
-  // 1D and 2D get the Yahoo-style pre/regular/post chart
-  if (period === '1d' || period === '2d') {
+  // 1D and 2D get the Yahoo-style pre/regular/post chart unless caller only
+  // wants indicator panes.
+  if (!hidePricePanel && (period === '1d' || period === '2d')) {
     return <OneDayChart data={data} period={period} height={height} indicators={indicators} prevClose={prevClose} syncId={syncId} />
   }
 
@@ -641,41 +642,47 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
   const priceHeight = height
   const oscHeight = 100
 
+  if (hidePricePanel && !hasRSI && !hasMACD && !hasStoch && !hasATR && !hasOBV) {
+    return null
+  }
+
   return (
     <div className="space-y-1">
       {/* Price panel */}
-      <ResponsiveContainer width="100%" height={priceHeight}>
-        <ComposedChart syncId={syncId} data={sampled} margin={{ top: 8, right: 10, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-          {sharedXAxis}
-          <YAxis
-            domain={['auto', 'auto']}
-            tick={{ fill: '#64748b', fontSize: 10 }}
-            tickLine={false}
-            axisLine={false}
-            width={60}
-            tickFormatter={v => `$${v.toFixed(0)}`}
-          />
-          <Tooltip content={<PriceTooltip prevClose={prevClose} indicators={indicators} />} />
-          {sessionAreas.map((a, i) => (
-            <ReferenceArea key={`off-p-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
-          ))}
-          {dayLines.map((d, i) => (
-            <ReferenceLine key={`day-p-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
-          ))}
-          <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={<SignalDot />} activeDot={{ r: 3 }} name="Close" isAnimationActive={false} />
-          {hasBB && <Line type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Upper" isAnimationActive={false} />}
-          {hasBB && <Line type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Lower" isAnimationActive={false} />}
-          {hasBB && <Line type="monotone" dataKey="mid" stroke={BB_MID} strokeWidth={0.8} strokeDasharray="2 2" dot={false} name="BB Mid" isAnimationActive={false} />}
-          {hasFastMA && <Line type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} name="Fast MA" isAnimationActive={false} />}
-          {hasSlowMA && <Line type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} name="Slow MA" isAnimationActive={false} />}
-          {hasMA9   && <Line type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} name="MA(9)"   isAnimationActive={false} />}
-          {hasMA20  && <Line type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} name="MA(20)"  isAnimationActive={false} />}
-          {hasMA50  && <Line type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} name="MA(50)"  isAnimationActive={false} />}
-          {hasMA100 && <Line type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} name="MA(100)" isAnimationActive={false} />}
-          {hasMA200 && <Line type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} name="MA(200)" isAnimationActive={false} />}
-        </ComposedChart>
-      </ResponsiveContainer>
+      {!hidePricePanel && (
+        <ResponsiveContainer width="100%" height={priceHeight}>
+          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 8, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {sharedXAxis}
+            <YAxis
+              domain={['auto', 'auto']}
+              tick={{ fill: '#64748b', fontSize: 10 }}
+              tickLine={false}
+              axisLine={false}
+              width={60}
+              tickFormatter={v => `$${v.toFixed(0)}`}
+            />
+            <Tooltip content={<PriceTooltip prevClose={prevClose} indicators={indicators} />} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-p-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-p-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={<SignalDot />} activeDot={{ r: 3 }} name="Close" isAnimationActive={false} />
+            {hasBB && <Line type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Upper" isAnimationActive={false} />}
+            {hasBB && <Line type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Lower" isAnimationActive={false} />}
+            {hasBB && <Line type="monotone" dataKey="mid" stroke={BB_MID} strokeWidth={0.8} strokeDasharray="2 2" dot={false} name="BB Mid" isAnimationActive={false} />}
+            {hasFastMA && <Line type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} name="Fast MA" isAnimationActive={false} />}
+            {hasSlowMA && <Line type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} name="Slow MA" isAnimationActive={false} />}
+            {hasMA9   && <Line type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} name="MA(9)"   isAnimationActive={false} />}
+            {hasMA20  && <Line type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} name="MA(20)"  isAnimationActive={false} />}
+            {hasMA50  && <Line type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} name="MA(50)"  isAnimationActive={false} />}
+            {hasMA100 && <Line type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} name="MA(100)" isAnimationActive={false} />}
+            {hasMA200 && <Line type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} name="MA(200)" isAnimationActive={false} />}
+          </ComposedChart>
+        </ResponsiveContainer>
+      )}
 
       {/* RSI panel */}
       {hasRSI && (
