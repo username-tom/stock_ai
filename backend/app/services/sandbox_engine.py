@@ -451,7 +451,13 @@ async def _process_symbol(
         if ref_idx is not None and "signal_source" in df_sig.columns:
             signal_source = str(df_sig.loc[ref_idx, "signal_source"]).strip()
 
-        status["last_signal"] = current_signal
+        from app.services.ib_service import ib_service
+
+        # In IB mode, PM consumes SandboxPosition.last_signal. Persist the
+        # actionable signal so event-based strategies (where last bar signal
+        # is often 0) still produce IB orders.
+        signal_for_pm = trade_signal if ib_service.is_connected else current_signal
+        status["last_signal"] = signal_for_pm
 
         # Determine what action to take
         action = None
@@ -539,7 +545,7 @@ async def _process_symbol(
         # Write engine status back to the position row (current bar signal for display)
         await _update_position_status(
             pos.id,
-            current_signal,
+            signal_for_pm,
             None,
             datetime.now(timezone.utc),
             disable_engine=disable_engine_without_position,

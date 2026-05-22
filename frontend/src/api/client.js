@@ -38,8 +38,8 @@ export const getIBOrders = () => api.get('/trading/ib/orders').then(r => r.data)
 export const resetIBPaperPortfolio = () => api.post('/trading/ib/paper/reset').then(r => r.data)
 export const placeOrder = (payload) => api.post('/trading/order', payload).then(r => r.data)
 export const cancelOrder = (id) => api.delete(`/trading/order/${id}`).then(r => r.data)
-export const getTradeHistory = (limit = 100) =>
-  api.get('/trading/history', { params: { limit } }).then(r => r.data)
+export const getTradeHistory = (limit = 100, mode = undefined) =>
+  api.get('/trading/history', { params: { limit, ...(mode ? { mode } : {}) } }).then(r => r.data)
 
 // Custom Scripts
 export const getScripts = () => api.get('/scripts').then(r => r.data)

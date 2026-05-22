@@ -77,10 +77,29 @@ function fmtLowerLimit(managerSettings, totalFunds) {
   return fmtMoney(Number(managerSettings.min_position_funds ?? 0))
 }
 
+function fitTreemapLabel(symbol, width, height) {
+  const text = String(symbol ?? '')
+  if (!text) return { text: '?', fontSize: 10 }
+
+  // Approximate monospace width: ~0.62em per character.
+  const maxByWidth = Math.floor((Math.max(0, width - 10)) / Math.max(1, text.length * 0.62))
+  const maxByHeight = Math.floor(Math.max(0, height - 6) * 0.75)
+  const fontSize = Math.max(9, Math.min(14, maxByWidth, maxByHeight || 14))
+
+  let fitted = text
+  const minReadable = 9
+  if (fontSize <= minReadable && text.length > 6) {
+    fitted = `${text.slice(0, 5)}…`
+  }
+
+  return { text: fitted, fontSize }
+}
+
 export default function PortfolioOverview({
   ibMode,
   accountData,
   positions,
+  positionsRefreshing = false,
   ibPositions = [],
   quotes,
   totalEquity,
@@ -620,9 +639,14 @@ export default function PortfolioOverview({
       {/* Per-position breakdown table */}
       {breakdownPositions.length > 0 ? (
         <div className="card">
-            <div className="flex items-center gap-2 mb-4">
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <div className="flex items-center gap-2">
               <TableCellsIcon className="h-4 w-4 text-slate-400" />
               <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Position Breakdown</h2>
+              </div>
+              {positionsRefreshing && (
+                <span className="text-[11px] text-slate-500 animate-pulse">Updating values...</span>
+              )}
             </div>
             <div className="max-h-100 overflow-y-auto pr-1">
               <table className="w-full text-xs">
@@ -801,7 +825,7 @@ export default function PortfolioOverview({
                 <ChartPieIcon className="h-4 w-4 text-slate-400" />
                 <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Allocation by Market Value</h2>
               </div>
-              <div className="h-80">
+              <div className="h-80 px-2 py-2">
                 <ResponsiveContainer width="100%" height="100%">
                   <Treemap
                     data={marketShareData}
@@ -812,20 +836,46 @@ export default function PortfolioOverview({
                     content={({ x, y, width, height, index = 0, depth = 0, name, payload }) => {
                       if (depth === 0 || width <= 0 || height <= 0) return null
                       const bg = payload?.fill ?? PIE_COLORS[index % PIE_COLORS.length]
-                      const symbol = payload?.symbol ?? name ?? ''
+                      const fallbackByIndex = marketShareData[index]?.symbol
+                      const symbol = String(
+                        payload?.symbol
+                        ?? payload?.name
+                        ?? payload?.payload?.symbol
+                        ?? payload?.payload?.name
+                        ?? fallbackByIndex
+                        ?? name
+                        ?? ''
+                      ).trim()
                       const pct = payload?.pct
-                      const showSymbol = width > 68 && height > 28
-                      const showPct = width > 100 && height > 48
+                      const { text: labelText, fontSize } = fitTreemapLabel(symbol, width, height)
+                      const showPct = width > 84 && height > 34
                       return (
                         <g>
                           <rect x={x} y={y} width={width} height={height} style={{ fill: bg, stroke: '#0f172a', strokeWidth: 1 }} />
-                          {showSymbol && (
-                            <text x={x + 8} y={y + 16} fill="#f8fafc" fontSize={11} fontWeight={700}>
-                              {symbol}
+                          {(width > 26 && height > 16) && (
+                            <text
+                              x={x + width / 2}
+                              y={showPct ? y + (height * 0.42) : y + (height * 0.52)}
+                              fill="#f8fafc"
+                              fontSize={fontSize}
+                              fontWeight={700}
+                              textAnchor="middle"
+                              dominantBaseline="middle"
+                              style={{ paintOrder: 'stroke', stroke: 'rgba(15,23,42,0.75)', strokeWidth: 2 }}
+                            >
+                              {labelText}
                             </text>
                           )}
                           {showPct && pct != null && (
-                            <text x={x + 8} y={y + 32} fill="#e2e8f0" fontSize={10}>
+                            <text
+                              x={x + width / 2}
+                              y={y + (height * 0.68)}
+                              fill="#e2e8f0"
+                              fontSize={Math.max(9, Math.min(11, fontSize - 1))}
+                              textAnchor="middle"
+                              dominantBaseline="middle"
+                              style={{ paintOrder: 'stroke', stroke: 'rgba(15,23,42,0.75)', strokeWidth: 1.5 }}
+                            >
                               {pct}%
                             </text>
                           )}

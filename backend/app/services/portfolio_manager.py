@@ -1673,6 +1673,10 @@ async def _process_ib_engine_signals() -> None:
             "qty": float(row.get("quantity") or 0.0),
             "avg_cost": float(row.get("avg_cost") or 0.0),
         }
+    ib_avg_cost_by_symbol = {
+        sym: float(info.get("avg_cost") or 0.0)
+        for sym, info in ib_by_symbol.items()
+    }
 
     open_orders = await ib_service.get_open_orders()
     active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
@@ -1691,8 +1695,13 @@ async def _process_ib_engine_signals() -> None:
         and float(o.get("remaining") or 0.0) > 0
     }
 
+    stop_loss_pct = float(_settings.get("stop_loss_pct", 0.0) or 0.0)
+    take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
+
     order_candidates: list[dict[str, Any]] = []
     buy_symbols_needing_quote: set[str] = set()
+    risk_symbols_needing_quote: set[str] = set()
+    risk_rows: list[tuple[str, float, float]] = []
     buy_signal_rows: list[tuple[SandboxPosition, str, float, str, str]] = []
 
     for pos in positions:
@@ -1751,11 +1760,25 @@ async def _process_ib_engine_signals() -> None:
                 "processed_key": process_key,
             })
 
-    if buy_symbols_needing_quote:
+        if (
+            ib_qty > 0
+            and float(ib_by_symbol.get(symbol, {}).get("avg_cost") or 0.0) > 0
+            and symbol not in pending_sell_symbols
+            and (stop_loss_pct > 0.0 or take_profit_pct > 0.0)
+        ):
+            risk_symbols_needing_quote.add(symbol)
+            risk_rows.append((
+                symbol,
+                ib_qty,
+                float(ib_by_symbol.get(symbol, {}).get("avg_cost") or 0.0),
+            ))
+
+    quote_symbols = set(buy_symbols_needing_quote) | set(risk_symbols_needing_quote)
+    if quote_symbols:
         price_map: dict[str, float] = {}
         try:
             from app.services.market_service import get_bulk_quotes
-            quotes = await get_bulk_quotes(sorted(buy_symbols_needing_quote))
+            quotes = await get_bulk_quotes(sorted(quote_symbols))
             price_map = {
                 sym: float(q["last_price"])
                 for sym, q in quotes.items()
@@ -1796,6 +1819,29 @@ async def _process_ib_engine_signals() -> None:
                 "processed_key": process_key,
             })
 
+        for symbol, qty, avg_cost in risk_rows:
+            cp = float(price_map.get(symbol, 0.0))
+            if cp <= 0.0 or avg_cost <= 0.0 or qty <= 0.0:
+                continue
+
+            hit_sl = stop_loss_pct > 0.0 and cp <= avg_cost * (1.0 - stop_loss_pct / 100.0)
+            hit_tp = take_profit_pct > 0.0 and cp >= avg_cost * (1.0 + take_profit_pct / 100.0)
+            if not hit_sl and not hit_tp:
+                continue
+
+            reason = (
+                f"pm_risk_stop_loss ({stop_loss_pct:.2f}% @ ${cp:.2f})"
+                if hit_sl
+                else f"pm_risk_take_profit ({take_profit_pct:.2f}% @ ${cp:.2f})"
+            )
+            order_candidates.append({
+                "symbol": symbol,
+                "side": "SELL",
+                "quantity": float(qty),
+                "price": cp,
+                "reason": reason,
+            })
+
     if not order_candidates:
         return
 
@@ -1821,11 +1867,19 @@ async def _process_ib_engine_signals() -> None:
         )
         if result.get("error"):
             _log_activity(f"IB PM {side} failed for {symbol}: {result['error']}")
-            _ib_signal_last_processed_at[symbol] = order["processed_key"]
+            processed_key = order.get("processed_key")
+            if processed_key:
+                _ib_signal_last_processed_at[symbol] = str(processed_key)
             continue
 
         ib_status = str(result.get("status") or "").upper()
         is_filled = ib_status == "FILLED"
+        submitted_price = float(order.get("price") or 0.0)
+        est_pnl = None
+        if side == "SELL" and submitted_price > 0:
+            avg_cost = float(ib_avg_cost_by_symbol.get(symbol, 0.0) or 0.0)
+            if avg_cost > 0:
+                est_pnl = round((submitted_price - avg_cost) * float(order["quantity"]), 4)
         async with AsyncSessionLocal() as db:
             db.add(Trade(
                 symbol=symbol,
@@ -1836,14 +1890,17 @@ async def _process_ib_engine_signals() -> None:
                 mode=mode,
                 ib_order_id=result.get("ib_order_id"),
                 strategy_name="pm_engine_signal",
-                filled_at=datetime.utcnow() if is_filled else None,
+                pnl=est_pnl,
+                filled_at=datetime.now(timezone.utc) if is_filled else None,
             ))
             await db.commit()
 
         _log_activity(
             f"IB PM {side} submitted from engine signal for {symbol} x{float(order['quantity']):.4f}"
         )
-        _ib_signal_last_processed_at[symbol] = order["processed_key"]
+        processed_key = order.get("processed_key")
+        if processed_key:
+            _ib_signal_last_processed_at[symbol] = str(processed_key)
 
 
 # ── main loop ─────────────────────────────────────────────────────────────── #

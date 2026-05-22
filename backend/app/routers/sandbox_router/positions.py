@@ -45,6 +45,8 @@ def _should_force_engine_off_for_position(pos: SandboxPosition) -> bool:
 @router.get("/positions")
 async def get_positions(db: AsyncSession = Depends(get_db)):
     if ib_service.is_connected:
+        from app.models.trade import Trade, TradingMode, OrderStatus
+
         raw_positions = await ib_service.get_positions()
         ib_filtered = [p for p in raw_positions if abs(float(p.get("quantity") or 0.0)) > 0]
         ib_by_symbol = {
@@ -52,6 +54,22 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
             for p in ib_filtered
             if str(p.get("symbol") or "").strip()
         }
+
+        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        trade_mode = TradingMode.LIVE if mode == "live" else TradingMode.PAPER
+        pnl_res = await db.execute(
+            select(Trade.symbol, Trade.pnl).where(
+                Trade.mode == trade_mode,
+                Trade.pnl.isnot(None),
+                Trade.status != OrderStatus.CANCELLED,
+            )
+        )
+        realized_by_symbol: dict[str, float] = {}
+        for sym, pnl in pnl_res.all():
+            key = str(sym or "").upper()
+            if not key:
+                continue
+            realized_by_symbol[key] = realized_by_symbol.get(key, 0.0) + float(pnl or 0.0)
 
         local_rows = (await db.execute(select(SandboxPosition))).scalars().all()
         local_by_symbol = {p.symbol: p for p in local_rows if p.symbol}
@@ -105,7 +123,10 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "last_signal": local.last_signal if local else None,
                 "last_run_at": local.last_run_at.isoformat() if local and local.last_run_at else None,
                 "engine_error": local.engine_error if local else None,
-                "realized_pnl": float(local.realized_pnl or 0.0) if local else 0.0,
+                "realized_pnl": round(
+                    float(realized_by_symbol.get(symbol, float(local.realized_pnl or 0.0) if local else 0.0)),
+                    4,
+                ),
                 "total_invested": round(max(0.0, avg_cost * quantity), 4),
                 "unrealized_pnl": round(unrealized, 4),
                 "market_value": round(market_value, 4),

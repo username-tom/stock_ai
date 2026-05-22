@@ -123,6 +123,7 @@ export default function SandboxPanel() {
   const [activities, setActivities] = useState([])
   const [ibWatchlistSymbols, setIbWatchlistSymbols] = useState(() => readDashboardWatchlist())
   const prevTradeIdRef = useRef(null)
+  const ibSyncFirstSeenRef = useRef({})
   const prevIbSessionRef = useRef({ connected: false, mode: null })
   const prevProfileRef = useRef('simulated')
   const activeProfileRef = useRef('simulated')
@@ -143,7 +144,7 @@ export default function SandboxPanel() {
   const activeProfile = ibConnected ? (ibMode ?? 'paper') : 'simulated'
   useEffect(() => { activeProfileRef.current = activeProfile }, [activeProfile])
   const { data: ibPositionsData } = useQuery({
-    queryKey: ['ib-positions'],
+    queryKey: ['ib-positions', ibMode ?? 'disconnected'],
     queryFn: getIBPositions,
     enabled: ibConnected,
     refetchInterval: appSettings.trading_positions_ms,
@@ -156,9 +157,30 @@ export default function SandboxPanel() {
   })
 
   // queries
-  const { data: accountData } = useQuery({ queryKey: ['sandbox-account'], queryFn: getSandboxAccount, refetchInterval: appSettings.sandbox_account_ms })
-  const { data: posData } = useQuery({ queryKey: ['sandbox-positions'], queryFn: getSandboxPositions, refetchInterval: appSettings.sandbox_account_ms })
+  const { data: accountData, refetch: refetchAccount, isFetching: isAccountFetching } = useQuery({
+    queryKey: ['sandbox-account', activeProfile],
+    queryFn: getSandboxAccount,
+    refetchInterval: appSettings.sandbox_account_ms,
+    placeholderData: (prev) => prev,
+  })
+  const { data: posData, refetch: refetchPositions, isFetching: isPositionsFetching } = useQuery({
+    queryKey: ['sandbox-positions', activeProfile],
+    queryFn: getSandboxPositions,
+    refetchInterval: appSettings.sandbox_account_ms,
+    placeholderData: (prev) => prev,
+  })
   const rawPositions = posData?.positions ?? []
+
+  // Force-refresh table/account payloads immediately on profile transition
+  // (simulated <-> paper/live and paper <-> live), rather than waiting for
+  // polling intervals.
+  useEffect(() => {
+    qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+    qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+    qc.invalidateQueries({ queryKey: ['ib-positions'] })
+    void refetchPositions()
+    void refetchAccount()
+  }, [activeProfile, qc, refetchPositions, refetchAccount])
 
   useEffect(() => {
     if (!ibConnected) return undefined
@@ -315,8 +337,8 @@ export default function SandboxPanel() {
 
   // IB trade history – PAPER / LIVE orders persisted in the Trade table
   const { data: ibTradeHistoryData } = useQuery({
-    queryKey: ['ib-trade-history'],
-    queryFn: () => getTradeHistory(200),
+    queryKey: ['ib-trade-history', ibMode ?? 'paper'],
+    queryFn: () => getTradeHistory(200, (ibMode ?? 'paper').toUpperCase()),
     enabled: ibConnected,
     refetchInterval: appSettings.sandbox_trades_ms,
   })
@@ -345,6 +367,7 @@ export default function SandboxPanel() {
     if (switchedIntoIb || switchedIbMode) {
       setActivities([])
       prevTradeIdRef.current = null
+      ibSyncFirstSeenRef.current = {}
       setTradeMsg(null)
     }
     prevIbSessionRef.current = { connected: ibConnected, mode: ibMode }
@@ -355,6 +378,7 @@ export default function SandboxPanel() {
     if (prevProfileRef.current !== activeProfile) {
       setActivities([])
       prevTradeIdRef.current = null
+      ibSyncFirstSeenRef.current = {}
       setTradeMsg(null)
       prevProfileRef.current = activeProfile
     }
@@ -366,9 +390,25 @@ export default function SandboxPanel() {
 
     const ibOrders = ibOrdersData?.orders ?? []
     const ibPositions = ibPositionsData?.positions ?? []
-    const now = new Date().toLocaleTimeString()
+    const firstSeen = ibSyncFirstSeenRef.current
+
+    const getFirstSeenTs = (key, fallbackTs) => {
+      if (firstSeen[key] == null) {
+        firstSeen[key] = Number.isFinite(fallbackTs) && fallbackTs > 0 ? fallbackTs : Date.now()
+      }
+      return firstSeen[key]
+    }
 
     const orderEntries = ibOrders.map(o => ({
+      ...(function () {
+        const key = `order:${o.ib_order_id ?? `${o.symbol}:${o.side}`}`
+        const rawTs = o.created_at ? new Date(o.created_at).getTime() : Number.NaN
+        const ts = getFirstSeenTs(key, rawTs)
+        return {
+          time: new Date(ts).toLocaleTimeString(),
+          ts,
+        }
+      })(),
       type: 'trade',
       profile: activeProfile,
       side: o.side,
@@ -377,14 +417,20 @@ export default function SandboxPanel() {
       price: o.limit_price != null ? Number(o.limit_price) : null,
       label: `Open ${o.side} ${o.remaining ?? o.quantity} / ${o.quantity} ${o.symbol}`,
       sub: `Order #${o.ib_order_id} · ${o.status ?? 'Submitted'} · ${getIbOrderExpiryLabel(o)}`,
-      time: o.created_at ? new Date(o.created_at).toLocaleTimeString() : now,
-      ts: o.created_at ? new Date(o.created_at).getTime() : Date.now(),
       syncFromIb: true,
     }))
 
     const positionEntries = ibPositions
       .filter(p => Math.abs(Number(p.quantity) || 0) > 0)
       .map(p => ({
+        ...(function () {
+          const key = `position:${p.symbol}`
+          const ts = getFirstSeenTs(key, Number.NaN)
+          return {
+            time: new Date(ts).toLocaleTimeString(),
+            ts,
+          }
+        })(),
         type: 'trade',
         profile: activeProfile,
         side: (Number(p.quantity) || 0) >= 0 ? 'BUY' : 'SELL',
@@ -393,8 +439,6 @@ export default function SandboxPanel() {
         price: Number(p.avg_cost ?? 0),
         label: `Position ${p.symbol} ${Number(p.quantity).toFixed(2)} @ $${Number(p.avg_cost || 0).toFixed(2)}`,
         sub: `Market Value: $${Number(p.market_value || 0).toFixed(2)}`,
-        time: now,
-        ts: Date.now(),
       }))
 
     const entries = [...orderEntries, ...positionEntries]
@@ -1112,6 +1156,7 @@ export default function SandboxPanel() {
               ibMode={ibMode}
               accountData={accountData}
               positions={positions}
+              positionsRefreshing={isAccountFetching || isPositionsFetching}
               ibPositions={ibConnected ? (ibPositionsData?.positions ?? []) : []}
               quotes={quotes}
               totalEquity={totalEquity}

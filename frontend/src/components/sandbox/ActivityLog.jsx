@@ -58,6 +58,18 @@ function ActivityIcon({ type, side }) {
   return <ClockIcon className="h-3.5 w-3.5 text-slate-500 flex-shrink-0" />
 }
 
+function formatActivityTimestamp(activity) {
+  const ts = Number(activity?.ts)
+  if (!Number.isFinite(ts) || ts <= 0) return activity?.time || ''
+  return new Date(ts).toLocaleString(undefined, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 export default function ActivityLog({ activities }) {
   const [open, setOpen] = useState(false)
   const [dateFilter, setDateFilter] = useState('all')
@@ -81,7 +93,7 @@ export default function ActivityLog({ activities }) {
     : filtered.length
 
   return (
-    <div className="fixed bottom-12 right-4 z-40 w-80 select-none">
+    <div className="fixed bottom-12 right-4 z-40 w-[22rem] select-none">
       {/* Expanded panel — renders first so it appears ABOVE the toggle tab */}
       {open && (
         <div className="bg-dark-800 border border-b-0 border-dark-500 rounded-t-lg shadow-xl flex flex-col max-h-[calc(100vh-8rem)]">
@@ -119,7 +131,7 @@ export default function ActivityLog({ activities }) {
                     <p className="text-xs text-slate-300 leading-snug truncate">{a.label}</p>
                     {a.sub && <p className="text-[10px] text-slate-600 truncate mt-0.5">{a.sub}</p>}
                   </div>
-                  <span className="text-[10px] text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">{a.time}</span>
+                  <span className="text-[10px] text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">{formatActivityTimestamp(a)}</span>
                 </div>
               ))
             )}

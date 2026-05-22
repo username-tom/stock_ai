@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -316,7 +316,7 @@ async def place_order(req: OrderRequest, db: AsyncSession = Depends(get_db)):
             status=OrderStatus.FILLED,
             mode=TradingMode.SIMULATED,
             strategy_name=req.strategy_name,
-            filled_at=datetime.utcnow(),
+            filled_at=datetime.now(timezone.utc),
         )
         db.add(trade)
         await db.commit()
@@ -351,7 +351,7 @@ async def place_order(req: OrderRequest, db: AsyncSession = Depends(get_db)):
         mode=TradingMode(mode),
         ib_order_id=result.get("ib_order_id"),
         strategy_name=req.strategy_name,
-        filled_at=datetime.utcnow() if is_filled else None,
+        filled_at=datetime.now(timezone.utc) if is_filled else None,
     )
     db.add(trade)
     await db.commit()
@@ -407,11 +407,15 @@ async def cancel_order(ib_order_id: int, db: AsyncSession = Depends(get_db)):
 @router.get("/history")
 async def trade_history(
     limit: int = 100,
+    mode: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Trade).order_by(Trade.created_at.desc()).limit(limit)
-    )
+    q = select(Trade)
+    if mode:
+        mode_norm = mode.strip().upper()
+        if mode_norm in {"SIMULATED", "PAPER", "LIVE"}:
+            q = q.where(Trade.mode == TradingMode(mode_norm))
+    result = await db.execute(q.order_by(Trade.created_at.desc()).limit(limit))
     trades = result.scalars().all()
     return {
         "trades": [
