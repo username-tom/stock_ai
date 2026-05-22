@@ -115,8 +115,15 @@ class PortfolioManagerSettingsRequest(BaseModel):
     eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=1, le=480)
     eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=30)
-    sentiment_data_points: Optional[int] = Field(default=None, ge=10, le=5000)
+    sentiment_data_points: Optional[int] = Field(default=None, ge=35, le=5000)
     sentiment_interval: Optional[str] = None
+    ai_tag_strategy_enabled: Optional[bool] = None
+    ai_tag_strategies: Optional[dict[str, str]] = None
+    ai_tag_allow_overnight: Optional[bool] = None
+    ai_tag_action_mode: Optional[str] = Field(default=None, pattern="^(strategy_override|direct)$")
+    ai_tag_long_engine_off: Optional[bool] = None
+    ai_tag_long_tp_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    ai_tag_long_sl_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
 
 
 @router.get("/manager/state")

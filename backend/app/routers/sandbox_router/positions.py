@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,6 +25,7 @@ from app.services.ib_service import ib_service
 from app.services.local_storage import save_portfolio_state
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _should_force_engine_off_for_position(pos: SandboxPosition) -> bool:
@@ -96,15 +98,27 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
             avg_cost = float((ib_item or {}).get("avg_cost") or 0.0)
             market_price = avg_cost
             if ib_item is not None:
-                quote = await market_service.get_quote(symbol, source_preference="ib")
-                if isinstance(quote, dict) and "error" not in quote:
-                    market_price = float(
-                        quote.get("last_price")
-                        or quote.get("last")
-                        or quote.get("close")
-                        or avg_cost
-                        or 0.0
-                    )
+                ib_market_price = float((ib_item or {}).get("market_price") or (ib_item or {}).get("last_price") or 0.0)
+                ib_market_value = float((ib_item or {}).get("market_value") or 0.0)
+                if ib_market_price > 0:
+                    market_price = ib_market_price
+                elif quantity != 0 and ib_market_value != 0:
+                    market_price = abs(ib_market_value / quantity)
+
+                try:
+                    quote = await market_service.get_quote(symbol, source_preference="ib")
+                    if isinstance(quote, dict) and "error" not in quote:
+                        market_price = float(
+                            quote.get("last_price")
+                            or quote.get("last")
+                            or quote.get("close")
+                            or market_price
+                            or avg_cost
+                            or 0.0
+                        )
+                except Exception as exc:
+                    # Avoid failing /sandbox/positions when IB quote service has gaps.
+                    logger.warning("IB quote unavailable for %s in positions endpoint: %s", symbol, exc)
 
             market_value = quantity * market_price
             unrealized = (market_price - avg_cost) * quantity
@@ -120,6 +134,7 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "last_price": round(market_price, 4),
                 "strategy_name": local.strategy_name if local else None,
                 "strategy_enabled": bool(local.strategy_enabled) if local else False,
+                "pm_managed": bool(local.pm_managed) if local else False,
                 "last_signal": local.last_signal if local else None,
                 "last_run_at": local.last_run_at.isoformat() if local and local.last_run_at else None,
                 "engine_error": local.engine_error if local else None,

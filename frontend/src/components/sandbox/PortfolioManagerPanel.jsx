@@ -55,6 +55,7 @@ const DEFAULT_SENTIMENT_STRATEGIES = {
   bullish: 'sma_crossover',
   euphoric: 'rsi',
 }
+const MIN_SENTIMENT_DATA_POINTS = 35
 
 function buildDraftFromSettings(settings) {
   return {
@@ -85,7 +86,7 @@ function buildDraftFromSettings(settings) {
     eod_engine_shutoff_minutes_before_sell: settings.eod_engine_shutoff_minutes_before_sell ?? 120,
     eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 30,
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
-    sentiment_data_points: settings.sentiment_data_points ?? 10,
+    sentiment_data_points: Math.max(MIN_SENTIMENT_DATA_POINTS, Number(settings.sentiment_data_points ?? MIN_SENTIMENT_DATA_POINTS)),
     sentiment_interval: settings.sentiment_interval ?? '1m',
     ai_tag_strategy_enabled: settings.ai_tag_strategy_enabled ?? false,
     ai_tag_strategies: {
@@ -1229,11 +1230,11 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
               <SettingRow
                 label="Sentiment Data Points"
-                hint="Number of most recent bars used to determine sentiment (10-5000)."
+                hint="Number of most recent bars used to determine sentiment (35-5000)."
               >
                 <div className="flex items-center gap-2">
                   <input
-                    type="number" min={10} max={5000} step={1}
+                    type="number" min={MIN_SENTIMENT_DATA_POINTS} max={5000} step={1}
                     value={draft.sentiment_data_points}
                     onChange={e => updateDraft(d => ({ ...d, sentiment_data_points: e.target.value }))}
                     className="input w-28 text-sm py-1.5"

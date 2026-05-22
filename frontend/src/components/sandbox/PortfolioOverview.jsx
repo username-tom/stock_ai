@@ -13,7 +13,7 @@ import { getSandboxFundEvents } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { usePriceChangeTracking } from '../../hooks/usePriceChangeTracking'
 import { PIE_COLORS } from './sandboxConstants'
-import { fmt, fmtMoney } from './sandboxHelpers'
+import { backfillTradeAvgPrice, fmt, fmtMoney } from './sandboxHelpers'
 import MiniSparkline from '../dashboard/MiniSparkline'
 
 const BULL_COLOR = '#10b981'
@@ -57,6 +57,15 @@ function stratLabel(strategy_name) {
   }
   if (strategy_name.startsWith('custom:')) return 'Custom Script'
   return strategy_name.split(':')[0]
+}
+
+function strategyDisplayLabel(pos, managerSettings, aiTag) {
+  const aiDirectMode =
+    Boolean(managerSettings?.ai_tag_strategy_enabled)
+    && String(managerSettings?.ai_tag_action_mode ?? 'strategy_override') === 'direct'
+  const longTag = aiTag === 'LONG' || aiTag === 'STRONG LONG'
+  if (aiDirectMode && (longTag || Boolean(pos?.pm_managed))) return 'PM Direct Action'
+  return stratLabel(pos?.strategy_name)
 }
 
 function fmtUpperLimit(pos) {
@@ -268,6 +277,9 @@ export default function PortfolioOverview({
   const avgDailyRealizedPnlServer = numOrNull(realizedMetrics?.avg_daily_realized_pnl)
   const realizedTradeDaysServer = numOrNull(realizedMetrics?.realized_trade_days)
   const elapsedDaysServer = numOrNull(realizedMetrics?.elapsed_days)
+  const realizedPnlSumServer = numOrNull(realizedMetrics?.realized_pnl_sum)
+  const totalDepositedServer = numOrNull(realizedMetrics?.total_deposited)
+  const elapsedTradingDaysServer = numOrNull(realizedMetrics?.elapsed_trading_days) ?? elapsedDaysServer
 
   const realizedTradeLog = allTrades
     .map(t => ({ pnl: numOrNull(t.pnl), date: parsePointDate(t.created_at) }))
@@ -356,19 +368,48 @@ export default function PortfolioOverview({
   const elapsedTradingDaysFallback = firstRealizedDateFallback
     ? Math.max(1, countNyseTradingDays(firstRealizedDateFallback, new Date()))
     : null
+  const annualizationCapitalBase = (() => {
+    const candidates = [
+      totalDepositedServer,
+      numOrNull(totalDeposited),
+      numOrNull(accountData?.total_funds),
+    ]
+    for (const v of candidates) {
+      if (v != null && v > 0) return v
+    }
+    return null
+  })()
+
+  const annualizedReturnPctFromMetrics = (
+    annualizedReturnPctServer == null
+    && elapsedTradingDaysServer != null
+    && annualizationCapitalBase != null
+    && realizedPnlSumServer != null
+    && (realizedPnlSumServer / annualizationCapitalBase) > -1
+  )
+    ? ((Math.pow(1 + (realizedPnlSumServer / annualizationCapitalBase), 252 / elapsedTradingDaysServer) - 1) * 100)
+    : null
+
   const annualizedReturnPctFallback = (
     elapsedTradingDaysFallback != null
-    && totalDeposited > 0
-    && (realizedPnlSumFallback / totalDeposited) > -1
+    && annualizationCapitalBase != null
+    && (realizedPnlSumFallback / annualizationCapitalBase) > -1
   )
-    ? ((Math.pow(1 + (realizedPnlSumFallback / totalDeposited), 252 / elapsedTradingDaysFallback) - 1) * 100)
+    ? ((Math.pow(1 + (realizedPnlSumFallback / annualizationCapitalBase), 252 / elapsedTradingDaysFallback) - 1) * 100)
     : null
   const avgDailyRealizedPnlFallback = realizedTradeDaysFallback > 0 ? (realizedPnlSumFallback / realizedTradeDaysFallback) : null
 
-  const annualizedReturnPct = annualizedReturnPctServer ?? annualizedReturnPctFallback
+  const annualizedReturnPct = annualizedReturnPctServer ?? annualizedReturnPctFromMetrics ?? annualizedReturnPctFallback
+  const annualizedReturnSource = annualizedReturnPctServer != null
+    ? 'server'
+    : annualizedReturnPctFromMetrics != null
+    ? 'server-recomputed'
+    : annualizedReturnPctFallback != null
+    ? 'trade-log-fallback'
+    : 'unavailable'
   const avgDailyRealizedPnl = avgDailyRealizedPnlServer ?? avgDailyRealizedPnlFallback
   const realizedTradeDays = realizedTradeDaysServer ?? realizedTradeDaysFallback
-  const elapsedDays = elapsedDaysServer ?? elapsedTradingDaysFallback
+  const elapsedDays = elapsedTradingDaysServer ?? elapsedTradingDaysFallback
 
   useEffect(() => {
     if (!gainLossChartRef.current) return undefined
@@ -614,13 +655,17 @@ export default function PortfolioOverview({
           </div>
         </div>
 
-        <div className={`card ${annualizedReturnPct != null ? (annualizedReturnPct >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+        <div
+          className={`card ${annualizedReturnPct != null ? (annualizedReturnPct >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}
+          title={`Annualized return source: ${annualizedReturnSource}`}
+        >
           <div className="text-xs text-slate-500 mb-1">Annualized Return</div>
           <div className={`text-xl font-bold ${annualizedReturnPct == null ? 'text-slate-400' : annualizedReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
             {annualizedReturnPct == null ? '—' : `${annualizedReturnPct >= 0 ? '+' : ''}${annualizedReturnPct.toFixed(2)}%`}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
             {elapsedDays == null ? 'No realised history yet' : `${elapsedDays} trading day${elapsedDays !== 1 ? 's' : ''} from trade log`}
+            {annualizedReturnSource !== 'unavailable' ? ` · ${annualizedReturnSource}` : ''}
           </div>
         </div>
 
@@ -672,15 +717,15 @@ export default function PortfolioOverview({
                     const avgCost = Number(pos._effAvgCost ?? 0)
                     const q = quotes[pos.symbol]
                     const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
-                    const marketValuePrice = shares > 0 && Number.isFinite(Number(pos.market_value)) && Number(pos.market_value) > 0
-                      ? Number(pos.market_value) / shares
+                    const marketValuePrice = Math.abs(shares) > 0 && Number.isFinite(Number(pos.market_value)) && Math.abs(Number(pos.market_value)) > 0
+                      ? Math.abs(Number(pos.market_value) / shares)
                       : null
                     const mp = q?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
                     const mv = mp * shares
                     const costBasis = avgCost * shares
-                    const cashRemaining = Math.max(0, pos.allocated_funds - avgCost * shares)
+                    const cashRemaining = isSimulated ? Math.max(0, pos.allocated_funds - avgCost * shares) : null
                     const unreal = mv - costBasis
-                    const unrealPct = costBasis > 0 ? (unreal / costBasis) * 100 : null
+                    const unrealPct = Math.abs(costBasis) > 0 ? (unreal / Math.abs(costBasis)) * 100 : null
                     const realizedPct = pos.total_invested > 0.01 ? ((pos.realized_pnl ?? 0) / pos.total_invested) * 100 : null
                     const pd = effectivePieData.find(d => d.symbol === pos.symbol)
                     const priceColor = priceColors[pos.symbol]
@@ -721,8 +766,8 @@ export default function PortfolioOverview({
                           </div>
                         </td>
                         <td className="py-2 pl-2">
-                          {pos.strategy_name ? (
-                            <span className="text-xs text-blue-400/80">{stratLabel(pos.strategy_name)}</span>
+                          {strategyDisplayLabel(pos, managerSettings, aiTag) !== '—' ? (
+                            <span className="text-xs text-blue-400/80">{strategyDisplayLabel(pos, managerSettings, aiTag)}</span>
                           ) : (
                             <span className="text-xs text-slate-600">—</span>
                           )}
@@ -733,16 +778,16 @@ export default function PortfolioOverview({
                             <div className="text-amber-300">{lowerLimit}</div>
                           </div>
                         </td>
-                        <td className="text-right text-slate-300 font-mono">{Math.abs(shares) > 0 ? shares.toFixed(3) : '—'}</td>
+                        <td className="text-right text-slate-300 font-mono">{shares !== 0 ? shares.toFixed(3) : '—'}</td>
                         <td className="text-right text-slate-300 font-mono">{Math.abs(shares) > 0 ? fmtMoney(avgCost) : '—'}</td>
                         <td className={`text-right py-2 px-3 font-mono rounded transition-colors ${priceColor?.bgColor || ''} ${priceColor?.textColor || 'text-slate-200'}`}>
                           {fmtMoney(mp)}
                         </td>
-                        <td className="text-right text-slate-200 font-mono">{Math.abs(shares) > 0 ? fmtMoney(mv) : '—'}</td>
-                        <td className="text-right text-blue-300 font-mono">{cashRemaining > 0 ? fmtMoney(cashRemaining) : '—'}</td>
+                        <td className="text-right text-slate-200 font-mono">{shares !== 0 ? fmtMoney(mv) : '—'}</td>
+                        <td className="text-right text-blue-300 font-mono">{cashRemaining != null && cashRemaining > 0 ? fmtMoney(cashRemaining) : '—'}</td>
                         <td className="text-right text-slate-400">{pd ? `${pd.pct}%` : '—'}</td>
                         <td className={`text-right font-semibold font-mono ${unreal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {Math.abs(shares) > 0
+                          {shares !== 0
                             ? `${fmt(unreal)} (${unrealPct == null ? '—' : `${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%`})`
                             : '—'}
                         </td>
@@ -1142,21 +1187,52 @@ export default function PortfolioOverview({
           })()}
         </div>
         {(() => {
-          const tradeEntries = activities
+          const rawTradeEntries = activities
             .filter(a => a.type === 'trade' && (String(a.profile ?? 'simulated').toLowerCase() === activeProfile))
             .map((a, i) => ({
             id: a.tradeId != null ? `t-${a.tradeId}` : `ta-${a.ts ?? 0}-${a.symbol ?? ''}-${a.side ?? ''}-${i}`,
             kind: 'trade',
             side: a.side,
+            syncFromIb: a.syncFromIb === true,
+            ts: a.ts,
             date: new Date(a.ts).toISOString(),
             symbol: a.symbol,
             shares: a.shares,
             price: a.price,
+            marketValue: a.marketValue,
             label: a.label,
             total: (a.shares ?? 0) * (a.price ?? 0),
             pnl: a.pnl,
-            reason: a.reason,
+            reason: a.reason ?? a.sub ?? null,
           }))
+          const tradeEntries = backfillTradeAvgPrice(rawTradeEntries).map((entry) => {
+            const explicit = entry.pnl != null ? Number(entry.pnl) : Number.NaN
+            if (Number.isFinite(explicit)) {
+              return { ...entry, displayPnl: explicit }
+            }
+
+            const isIbSnapshot = entry.syncFromIb === true && String(entry.reason ?? '').startsWith('Market Value:')
+            if (isIbSnapshot) {
+              return { ...entry, displayPnl: null }
+            }
+
+            if (entry.side === 'SELL') {
+              const avg = Number(entry.avgPrice)
+              const qty = Number(entry.shares)
+              const mv = Number(entry.marketValue)
+              const px = Number(entry.price)
+              if (Number.isFinite(avg) && avg > 0 && Number.isFinite(qty) && qty !== 0) {
+                if (Number.isFinite(mv) && mv !== 0) {
+                  return { ...entry, displayPnl: mv - (avg * qty) }
+                }
+                if (Number.isFinite(px) && px > 0) {
+                  return { ...entry, displayPnl: (px - avg) * qty }
+                }
+              }
+            }
+
+            return { ...entry, displayPnl: null }
+          })
           const fundEntries = fundEvents.map(e => ({
             id: `f-${e.id}`,
             kind: e.event_type,
@@ -1188,6 +1264,7 @@ export default function PortfolioOverview({
                     <th className="text-left pb-2 font-medium">Type</th>
                     <th className="text-left pb-2 font-medium">Details</th>
                     <th className="text-right pb-2 font-medium">Shares</th>
+                    <th className="text-right pb-2 font-medium">Avg Price</th>
                     <th className="text-right pb-2 font-medium">Price</th>
                     <th className="text-right pb-2 font-medium">Amount</th>
                     <th className="text-right pb-2 font-medium">P&amp;L</th>
@@ -1229,15 +1306,20 @@ export default function PortfolioOverview({
                           )}
                         </td>
                         <td className="py-1.5 text-right font-mono text-slate-300">
-                          {entry.shares != null ? entry.shares.toFixed(3) : '—'}
+                          {entry.shares != null ? Number(entry.shares).toFixed(3) : '—'}
+                        </td>
+                        <td className="py-1.5 text-right font-mono text-slate-300">
+                          {entry.kind === 'trade' && entry.side === 'SELL' && !(entry.syncFromIb === true && String(entry.reason ?? '').startsWith('Market Value:')) && Number.isFinite(Number(entry.avgPrice)) && Number(entry.avgPrice) > 0
+                            ? `$${Number(entry.avgPrice).toFixed(2)}`
+                            : '—'}
                         </td>
                         <td className="py-1.5 text-right font-mono text-slate-300">
                           {entry.price != null ? `$${entry.price.toFixed(2)}` : '—'}
                         </td>
                         <td className="py-1.5 text-right font-mono text-slate-200">${entry.total.toFixed(2)}</td>
                         <td className="py-1.5 text-right font-mono">
-                          {entry.pnl != null
-                            ? <span className={entry.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{entry.pnl >= 0 ? '+' : ''}{entry.pnl.toFixed(2)}</span>
+                          {entry.displayPnl != null
+                            ? <span className={entry.displayPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{entry.displayPnl >= 0 ? '+' : ''}{entry.displayPnl.toFixed(2)}</span>
                             : <span className="text-slate-600">—</span>}
                         </td>
                         <td className="py-1.5 text-slate-400 max-w-[200px] truncate">

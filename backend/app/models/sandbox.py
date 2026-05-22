@@ -116,7 +116,7 @@ class PortfolioManagerSettings(Base):
     eod_engine_shutoff_minutes_before_sell = Column(Integer, default=120, nullable=False)
     eod_sell_window_minutes = Column(Integer, default=30, nullable=False)
     sentiment_lookback_days = Column(Integer, default=5, nullable=False)
-    sentiment_data_points = Column(Integer, default=10, nullable=False)
+    sentiment_data_points = Column(Integer, default=35, nullable=False)
     sentiment_interval = Column(String(10), default="1m", nullable=False)
     # AI tag (learner) strategy routing
     ai_tag_strategy_enabled = Column(Boolean, default=False, nullable=False)

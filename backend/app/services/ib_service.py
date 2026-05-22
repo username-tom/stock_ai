@@ -586,6 +586,30 @@ class IBService:
             if kind == "LMT" and limit_price is None:
                 return {"error": "limit_price is required for LMT orders."}
 
+            # Disallow opening/increasing short positions: SELL requires owned long shares.
+            if action == "SELL":
+                try:
+                    positions = await self.get_positions()
+                    owned_qty = 0.0
+                    target = symbol.upper()
+                    for pos in positions:
+                        if str(pos.get("symbol") or "").upper() != target:
+                            continue
+                        owned_qty = float(pos.get("quantity") or 0.0)
+                        break
+
+                    sell_qty = float(quantity)
+                    if owned_qty <= 0 or sell_qty - owned_qty > 1e-9:
+                        return {
+                            "error": (
+                                f"Short selling disabled: cannot SELL {sell_qty:.4f} {target} "
+                                f"with owned quantity {max(owned_qty, 0.0):.4f}."
+                            )
+                        }
+                except Exception as exc:
+                    logger.warning("SELL ownership check failed for %s: %s", symbol.upper(), exc)
+                    return {"error": "Unable to verify owned shares before SELL order."}
+
             contract = self._build_stock_contract(symbol)
             order = Order()
             order.action = action

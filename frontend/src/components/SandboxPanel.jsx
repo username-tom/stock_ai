@@ -123,6 +123,7 @@ export default function SandboxPanel() {
   const [activities, setActivities] = useState([])
   const [ibWatchlistSymbols, setIbWatchlistSymbols] = useState(() => readDashboardWatchlist())
   const prevTradeIdRef = useRef(null)
+  const tradeFirstSeenRef = useRef({})
   const ibSyncFirstSeenRef = useRef({})
   const prevIbSessionRef = useRef({ connected: false, mode: null })
   const prevProfileRef = useRef('simulated')
@@ -367,6 +368,7 @@ export default function SandboxPanel() {
     if (switchedIntoIb || switchedIbMode) {
       setActivities([])
       prevTradeIdRef.current = null
+      tradeFirstSeenRef.current = {}
       ibSyncFirstSeenRef.current = {}
       setTradeMsg(null)
     }
@@ -378,76 +380,18 @@ export default function SandboxPanel() {
     if (prevProfileRef.current !== activeProfile) {
       setActivities([])
       prevTradeIdRef.current = null
+      tradeFirstSeenRef.current = {}
       ibSyncFirstSeenRef.current = {}
       setTradeMsg(null)
       prevProfileRef.current = activeProfile
     }
   }, [activeProfile])
 
-  // In IB profiles, repopulate activity log from IB open orders and positions.
+  // In IB profiles, avoid synthetic open-order/position snapshot entries.
+  // Keep the log focused on persisted trade history + explicit user actions.
   useEffect(() => {
     if (!ibConnected) return
-
-    const ibOrders = ibOrdersData?.orders ?? []
-    const ibPositions = ibPositionsData?.positions ?? []
-    const firstSeen = ibSyncFirstSeenRef.current
-
-    const getFirstSeenTs = (key, fallbackTs) => {
-      if (firstSeen[key] == null) {
-        firstSeen[key] = Number.isFinite(fallbackTs) && fallbackTs > 0 ? fallbackTs : Date.now()
-      }
-      return firstSeen[key]
-    }
-
-    const orderEntries = ibOrders.map(o => ({
-      ...(function () {
-        const key = `order:${o.ib_order_id ?? `${o.symbol}:${o.side}`}`
-        const rawTs = o.created_at ? new Date(o.created_at).getTime() : Number.NaN
-        const ts = getFirstSeenTs(key, rawTs)
-        return {
-          time: new Date(ts).toLocaleTimeString(),
-          ts,
-        }
-      })(),
-      type: 'trade',
-      profile: activeProfile,
-      side: o.side,
-      symbol: o.symbol,
-      shares: Number(o.remaining ?? o.quantity ?? 0),
-      price: o.limit_price != null ? Number(o.limit_price) : null,
-      label: `Open ${o.side} ${o.remaining ?? o.quantity} / ${o.quantity} ${o.symbol}`,
-      sub: `Order #${o.ib_order_id} · ${o.status ?? 'Submitted'} · ${getIbOrderExpiryLabel(o)}`,
-      syncFromIb: true,
-    }))
-
-    const positionEntries = ibPositions
-      .filter(p => Math.abs(Number(p.quantity) || 0) > 0)
-      .map(p => ({
-        ...(function () {
-          const key = `position:${p.symbol}`
-          const ts = getFirstSeenTs(key, Number.NaN)
-          return {
-            time: new Date(ts).toLocaleTimeString(),
-            ts,
-          }
-        })(),
-        type: 'trade',
-        profile: activeProfile,
-        side: (Number(p.quantity) || 0) >= 0 ? 'BUY' : 'SELL',
-        symbol: p.symbol,
-        shares: Number(p.quantity ?? 0),
-        price: Number(p.avg_cost ?? 0),
-        label: `Position ${p.symbol} ${Number(p.quantity).toFixed(2)} @ $${Number(p.avg_cost || 0).toFixed(2)}`,
-        sub: `Market Value: $${Number(p.market_value || 0).toFixed(2)}`,
-      }))
-
-    const entries = [...orderEntries, ...positionEntries]
-    if (!entries.length) return
-    setActivities(prev => {
-      const keep = prev.filter(a => !(String(a.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase() && a.syncFromIb))
-      const synced = entries.map(e => ({ ...e, syncFromIb: true }))
-      return [...synced, ...keep].slice(0, 500)
-    })
+    setActivities(prev => prev.filter(a => a.syncFromIb !== true))
   }, [ibConnected, ibMode, ibOrdersData, ibPositionsData])
 
   // build activity log entries from trades + mutations
@@ -459,11 +403,20 @@ export default function SandboxPanel() {
     // Rebuild trade entries for the active profile so status transitions
     // (e.g. PENDING -> FILLED/CANCELLED) are reflected in-place.
     setActivities(prev => {
+      const firstSeen = tradeFirstSeenRef.current
       const tradeEntries = activeTrades
         .map(t => {
           const profile = ibConnected ? (t.mode ?? 'PAPER').toLowerCase() : activeProfile
           const status = String(t.status ?? '').toUpperCase()
           const isCancelled = status === 'CANCELLED'
+          const createdTs = t.created_at ? new Date(t.created_at).getTime() : Number.NaN
+          const fallbackKey = t.id != null
+            ? `trade:${t.id}`
+            : `order:${t.ib_order_id ?? `${t.symbol}:${t.side}:${t.quantity}:${t.price ?? ''}`}`
+          if (firstSeen[fallbackKey] == null) {
+            firstSeen[fallbackKey] = Date.now()
+          }
+          const ts = Number.isFinite(createdTs) && createdTs > 0 ? createdTs : firstSeen[fallbackKey]
           const sub = ibConnected && t.ib_order_id != null
             ? `IB #${t.ib_order_id} · ${status || 'Submitted'}`
             : (t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined)
@@ -482,8 +435,8 @@ export default function SandboxPanel() {
               t.pnl != null ? ` · PnL: ${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : ''
             }`,
             sub,
-            time: t.created_at ? new Date(t.created_at).toLocaleTimeString() : '',
-            ts: t.created_at ? new Date(t.created_at).getTime() : Date.now(),
+            time: new Date(ts).toLocaleTimeString(),
+            ts,
           }
         })
 
@@ -586,6 +539,7 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-trades'] })
       setActivities(prev => prev.filter(a => (a.profile ?? 'simulated') !== 'simulated'))
       prevTradeIdRef.current = null
+      tradeFirstSeenRef.current = {}
       setSelectedSymbol(null); setResetConfirm(false)
     },
   })
@@ -597,6 +551,7 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-trades'] })
       setActivities(prev => prev.filter(a => (a.profile ?? 'simulated') !== 'simulated'))
       prevTradeIdRef.current = null
+      tradeFirstSeenRef.current = {}
       setSelectedSymbol(null); setResetSoftConfirm(false)
     },
   })
@@ -658,10 +613,12 @@ export default function SandboxPanel() {
     onMutate: () => {
       setActivities([])
       prevTradeIdRef.current = null
+      tradeFirstSeenRef.current = {}
     },
     onSuccess: () => {
       setActivities([])
       prevTradeIdRef.current = null
+      tradeFirstSeenRef.current = {}
       qc.invalidateQueries({ queryKey: ['ib-status'] })
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
@@ -702,6 +659,7 @@ export default function SandboxPanel() {
       setPaperResetConfirm(false)
       setActivities(prev => prev.filter(a => (a.profile ?? 'simulated') !== 'paper'))
       prevTradeIdRef.current = null
+      tradeFirstSeenRef.current = {}
       setImportMsg({
         type: 'success',
         text: `Paper reset submitted: ${data.cancelled_orders ?? 0} order(s) cancelled, ${data.flatten_orders ?? 0} flatten order(s) placed.`,

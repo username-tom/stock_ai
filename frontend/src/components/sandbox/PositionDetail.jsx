@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getScripts, getHistory, getSandboxFundEvents } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
-import { fmt, fmtMoney, stratLabel } from './sandboxHelpers'
+import { backfillTradeAvgPrice, fmt, fmtMoney, stratLabel } from './sandboxHelpers'
 import StrategySelector from './StrategySelector'
 import TradeRow from './TradeRow'
 import CandlestickChart from '../charts/CandlestickChart'
@@ -77,6 +77,12 @@ export default function PositionDetail({
   })
   const chartData = histData?.data ?? []
   const prevClose = quotes?.[selectedSymbol]?.previous_close ?? histData?.prev_close ?? null
+  const selectedShares = Number(selectedPos?.shares ?? 0)
+  const hasPosition = Math.abs(selectedShares) > 0
+  const isLongPosition = selectedShares > 0
+  const marketEdgePct = hasPosition && Number(selectedPos?.avg_cost) > 0 && Number(selectedPrice) > 0
+    ? (((Number(selectedPrice) - Number(selectedPos.avg_cost)) / Number(selectedPos.avg_cost)) * 100) * (isLongPosition ? 1 : -1)
+    : null
 
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
@@ -383,7 +389,7 @@ export default function PositionDetail({
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Shares Held</div>
-          <div className="text-xl font-bold text-slate-100">{selectedPos.shares > 0 ? selectedPos.shares.toFixed(4) : '—'}</div>
+          <div className="text-xl font-bold text-slate-100">{hasPosition ? selectedShares.toFixed(4) : '—'}</div>
           {selectedPos.pending_shares > 0 && (
             <div className="flex items-center gap-1.5 mt-1.5 px-2 py-1 rounded-md bg-amber-900/20 border border-amber-700/30">
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
@@ -395,10 +401,10 @@ export default function PositionDetail({
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">Average Share Price</div>
-          <div className="text-xl font-bold text-slate-100">{selectedPos.shares > 0 ? `$${selectedPos.avg_cost?.toFixed(2)}` : '—'}</div>
-          {selectedPrice > 0 && selectedPos.shares > 0 && (
-            <div className={`text-xs mt-0.5 font-semibold ${selectedPrice >= selectedPos.avg_cost ? 'text-emerald-400' : 'text-red-400'}`}>
-              {selectedPrice >= selectedPos.avg_cost ? '+' : ''}{((selectedPrice - selectedPos.avg_cost) / selectedPos.avg_cost * 100).toFixed(2)}% vs market
+          <div className="text-xl font-bold text-slate-100">{hasPosition ? `$${selectedPos.avg_cost?.toFixed(2)}` : '—'}</div>
+          {marketEdgePct != null && (
+            <div className={`text-xs mt-0.5 font-semibold ${marketEdgePct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {marketEdgePct >= 0 ? '+' : ''}{marketEdgePct.toFixed(2)}% vs market
             </div>
           )}
         </div>
@@ -407,8 +413,8 @@ export default function PositionDetail({
           <div className="text-xl font-bold text-slate-100">{fmtMoney(selectedMarketValue)}</div>
           <div className={`text-xs mt-0.5 font-semibold ${selectedUnrealised >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
             {fmt(selectedUnrealised)}
-            {selectedPos.shares > 0 && selectedPos.avg_cost > 0 && (
-              <span> ({((selectedUnrealised / (selectedPos.avg_cost * selectedPos.shares)) * 100).toFixed(2)}%)</span>
+            {hasPosition && selectedPos.avg_cost > 0 && (
+              <span> ({((selectedUnrealised / (selectedPos.avg_cost * Math.abs(selectedShares))) * 100).toFixed(2)}%)</span>
             )}
           </div>
         </div>
@@ -958,18 +964,52 @@ export default function PositionDetail({
         <div className="overflow-y-auto max-h-80">
         {(() => {
           // Merge trades + fund events + allocation events into a single timeline, filtered by selectedSymbol
-          const tradeEntries = activities
+          const rawTradeEntries = activities
             .filter(a => a.type === 'trade' && a.symbol === selectedSymbol)
             .map((a, i) => ({
             id: a.tradeId != null ? `t-${a.tradeId}` : `ta-${a.ts ?? 0}-${a.symbol ?? ''}-${a.side ?? ''}-${i}`,
             kind: 'trade',
             side: a.side,
-            date: new Date(a.ts ?? Date.now()).toISOString(),
+            syncFromIb: a.syncFromIb === true,
+            symbol: a.symbol,
+            shares: a.shares,
+            price: a.price,
+            marketValue: a.marketValue,
+            ts: a.ts,
+            date: a.ts != null ? new Date(a.ts).toISOString() : null,
             label: a.label,
             sub: a.sub,
             pnl: a.pnl,
             total: (a.shares ?? 0) * (a.price ?? 0),
           }))
+          const tradeEntries = backfillTradeAvgPrice(rawTradeEntries).map((entry) => {
+            const explicit = entry.pnl != null ? Number(entry.pnl) : Number.NaN
+            if (Number.isFinite(explicit)) {
+              return { ...entry, displayPnl: explicit }
+            }
+
+            const isIbSnapshot = entry.syncFromIb === true && String(entry.sub ?? '').startsWith('Market Value:')
+            if (isIbSnapshot) {
+              return { ...entry, displayPnl: null }
+            }
+
+            if (entry.side === 'SELL') {
+              const avg = Number(entry.avgPrice)
+              const qty = Number(entry.shares)
+              const mv = Number(entry.marketValue)
+              const px = Number(entry.price)
+              if (Number.isFinite(avg) && avg > 0 && Number.isFinite(qty) && qty !== 0) {
+                if (Number.isFinite(mv) && mv !== 0) {
+                  return { ...entry, displayPnl: mv - (avg * qty) }
+                }
+                if (Number.isFinite(px) && px > 0) {
+                  return { ...entry, displayPnl: (px - avg) * qty }
+                }
+              }
+            }
+
+            return { ...entry, displayPnl: null }
+          })
           // Only show fund events that are not allocations and are not tied to a symbol (global deposits/withdrawals)
           const fundEntries = fundEvents
             .filter(e => !e.from_symbol && !e.to_symbol)
@@ -1036,13 +1076,16 @@ export default function PositionDetail({
                   <div className="flex-1 min-w-0">
                     <div className="flex items-baseline gap-2">
                       <span className="text-sm text-slate-200">{entry.label}</span>
-                      {entry.pnl != null && (
-                        <span className={`text-xs font-medium ${entry.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {entry.pnl >= 0 ? '+' : ''}{entry.pnl.toFixed(2)} PnL
+                      {entry.displayPnl != null && (
+                        <span className={`text-xs font-medium ${entry.displayPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {entry.displayPnl >= 0 ? '+' : ''}{entry.displayPnl.toFixed(2)} PnL
                         </span>
                       )}
                     </div>
                     {entry.sub && <div className="text-xs text-slate-500 mt-0.5 truncate">{entry.sub}</div>}
+                    {entry.kind === 'trade' && entry.side === 'SELL' && !(entry.syncFromIb === true && String(entry.sub ?? '').startsWith('Market Value:')) && Number.isFinite(Number(entry.avgPrice)) && Number(entry.avgPrice) > 0 && (
+                      <div className="text-xs text-slate-500 mt-0.5">Avg sell cost basis: ${Number(entry.avgPrice).toFixed(2)}</div>
+                    )}
                   </div>
                   <span className="text-xs text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">
                     {entry.date ? new Date(entry.date).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}

@@ -15,6 +15,7 @@ from app.database import get_db, AsyncSessionLocal
 from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
 from app.models.sandbox import SandboxPosition
 from app.routers.sandbox_router._helpers import offload_simulated_state
+from app.services import market_service
 from app.services.ib_service import ib_service
 from app.services.local_storage import (
     save_trade_logs_csv, save_trade_logs_json, list_trade_log_files,
@@ -342,15 +343,54 @@ async def place_order(req: OrderRequest, db: AsyncSession = Depends(get_db)):
     ib_status = str(result.get("status") or "").upper()
     is_filled = ib_status == "FILLED"
 
+    symbol = req.symbol.upper()
+    side = req.side.upper()
+
+    # For IB market orders we may not get an immediate fill price from TWS.
+    # Persist a best-effort reference price so activity rows can compute amount/PnL.
+    reference_price = float(req.limit_price) if req.limit_price is not None else None
+    if reference_price is None:
+        try:
+            quote = await market_service.get_quote(symbol, source_preference="ib")
+            if isinstance(quote, dict) and "error" not in quote:
+                candidate = quote.get("last_price") or quote.get("last") or quote.get("close")
+                if candidate is not None:
+                    price_num = float(candidate)
+                    if price_num > 0:
+                        reference_price = price_num
+        except Exception as exc:
+            logger.debug("IB quote lookup for order reference price failed (%s): %s", symbol, exc)
+
+    estimated_pnl = None
+    if side == "SELL":
+        try:
+            positions = await ib_service.get_positions()
+            position = next(
+                (
+                    p for p in positions
+                    if str(p.get("symbol") or "").upper() == symbol and float(p.get("quantity") or 0.0) > 0
+                ),
+                None,
+            )
+            if position is not None and reference_price is not None and reference_price > 0:
+                avg_cost = float(position.get("avg_cost") or 0.0)
+                held_qty = float(position.get("quantity") or 0.0)
+                sell_qty = min(float(req.quantity), max(0.0, held_qty))
+                if avg_cost > 0 and sell_qty > 0:
+                    estimated_pnl = round((reference_price - avg_cost) * sell_qty, 4)
+        except Exception as exc:
+            logger.debug("IB SELL PnL estimate failed (%s): %s", symbol, exc)
+
     trade = Trade(
-        symbol=req.symbol.upper(),
-        side=OrderSide(req.side.upper()),
+        symbol=symbol,
+        side=OrderSide(side),
         quantity=req.quantity,
-        price=req.limit_price or 0.0,
+        price=reference_price or 0.0,
         status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
         mode=TradingMode(mode),
         ib_order_id=result.get("ib_order_id"),
         strategy_name=req.strategy_name,
+        pnl=estimated_pnl,
         filled_at=datetime.now(timezone.utc) if is_filled else None,
     )
     db.add(trade)

@@ -62,6 +62,7 @@ def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict
         "avg_cost": p.avg_cost,
         "strategy_name": p.strategy_name,
         "strategy_enabled": p.strategy_enabled,
+        "pm_managed": bool(getattr(p, "pm_managed", False)),
         "last_signal": p.last_signal,
         "last_run_at": p.last_run_at.isoformat() if p.last_run_at else None,
         "engine_error": p.engine_error,

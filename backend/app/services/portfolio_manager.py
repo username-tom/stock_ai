@@ -31,6 +31,8 @@ from app.models.sandbox import SandboxPosition, SandboxTrade
 
 logger = logging.getLogger(__name__)
 
+_MIN_SENTIMENT_DATA_POINTS = 35
+
 # ── default settings ──────────────────────────────────────────────────────── #
 
 _settings: dict[str, Any] = {
@@ -81,7 +83,7 @@ _settings: dict[str, Any] = {
     "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
     "eod_sell_window_minutes": 30,        # minutes before market close to start sell-only mode
     "sentiment_lookback_days": 5,         # days of historical data for sentiment calc
-    "sentiment_data_points": 10,          # number of recent bars used for sentiment calc
+    "sentiment_data_points": _MIN_SENTIMENT_DATA_POINTS,  # number of recent bars used for sentiment calc
     "sentiment_interval": "1m",           # interval: 1m, 5m, 15m, 1h, daily, etc.
 }
 
@@ -186,7 +188,10 @@ async def _load_settings_from_db() -> None:
             _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
             _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 30) or 30)
             _settings["sentiment_lookback_days"] = int(getattr(row, "sentiment_lookback_days", 5) or 5)
-            _settings["sentiment_data_points"] = int(getattr(row, "sentiment_data_points", 10) or 10)
+            _settings["sentiment_data_points"] = max(
+                _MIN_SENTIMENT_DATA_POINTS,
+                int(getattr(row, "sentiment_data_points", _MIN_SENTIMENT_DATA_POINTS) or _MIN_SENTIMENT_DATA_POINTS),
+            )
             _settings["sentiment_interval"] = getattr(row, "sentiment_interval", "1m") or "1m"
             _settings["ai_tag_strategy_enabled"] = bool(getattr(row, "ai_tag_strategy_enabled", False))
             _settings["ai_tag_strategies"] = _load_strategy_map(
@@ -233,7 +238,12 @@ async def _save_settings_to_db() -> None:
         row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
         row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 30) or 30)
         row.sentiment_lookback_days = int(_settings.get("sentiment_lookback_days", 5) or 5)
-        row.sentiment_data_points = int(_settings.get("sentiment_data_points", 10) or 10)
+        row.sentiment_data_points = int(
+            max(
+                _MIN_SENTIMENT_DATA_POINTS,
+                int(_settings.get("sentiment_data_points", _MIN_SENTIMENT_DATA_POINTS) or _MIN_SENTIMENT_DATA_POINTS),
+            )
+        )
         row.sentiment_interval = _settings.get("sentiment_interval", "1m") or "1m"
         row.ai_tag_strategy_enabled = bool(_settings.get("ai_tag_strategy_enabled", False))
         row.ai_tag_strategies = json.dumps(_settings.get("ai_tag_strategies", {}), sort_keys=True)
@@ -261,6 +271,13 @@ def update_manager_settings(new: dict) -> dict:
         if k in allowed:
             _settings[k] = v
 
+    # Keep enough bars so RSI/MACD/SMA sub-signals can contribute.
+    if "sentiment_data_points" in new:
+        _settings["sentiment_data_points"] = max(
+            _MIN_SENTIMENT_DATA_POINTS,
+            int(_settings.get("sentiment_data_points", _MIN_SENTIMENT_DATA_POINTS) or _MIN_SENTIMENT_DATA_POINTS),
+        )
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -281,6 +298,8 @@ def update_manager_settings(new: dict) -> dict:
                 if syms:
                     await _refresh_scores(syms)
                 await _apply_sentiment_strategies()
+                if _settings.get("ai_tag_strategy_enabled", False):
+                    await _apply_ai_tag_strategies()
             loop.create_task(_refresh_and_apply())
         if any(key in new for key in ("ai_tag_strategy_enabled", "ai_tag_strategies")):
             loop.create_task(_apply_ai_tag_strategies())
@@ -293,7 +312,10 @@ async def _fetch_bars(symbol: str) -> pd.DataFrame:
     """Fetch recent intraday bars for scoring (re-uses the shared market_service helper)."""
     from app.services.market_service import get_intraday_df
     lookback_days = _settings.get("sentiment_lookback_days", 5)
-    data_points = max(1, int(_settings.get("sentiment_data_points", 10) or 10))
+    data_points = max(
+        _MIN_SENTIMENT_DATA_POINTS,
+        int(_settings.get("sentiment_data_points", _MIN_SENTIMENT_DATA_POINTS) or _MIN_SENTIMENT_DATA_POINTS),
+    )
     interval = _settings.get("sentiment_interval", "1m")
     range_str = f"{lookback_days}d"
     # Force YF for sentiment scoring – IB pacing is preserved for trading
@@ -1918,6 +1940,8 @@ async def refresh_sentiment_routing() -> None:
     # routing-mode change takes effect without waiting for the next PM tick.
     if _state.get("scores"):
         await _apply_sentiment_strategies()
+        if _settings.get("ai_tag_strategy_enabled", False):
+            await _apply_ai_tag_strategies()
 
 
 async def run_portfolio_manager() -> None:

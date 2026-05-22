@@ -49,7 +49,7 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN eod_engine_shutoff_minutes_before_sell INTEGER NOT NULL DEFAULT 120",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN eod_sell_window_minutes INTEGER NOT NULL DEFAULT 30",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_lookback_days INTEGER NOT NULL DEFAULT 5",
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_data_points INTEGER NOT NULL DEFAULT 10",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_data_points INTEGER NOT NULL DEFAULT 35",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_interval VARCHAR(10) NOT NULL DEFAULT '1m'",
         # sandbox_account total_deposited column (added to track cumulative deposits for repair logic)
         "ALTER TABLE sandbox_account ADD COLUMN total_deposited REAL NOT NULL DEFAULT 0.0",
@@ -106,6 +106,8 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_sl_pct REAL NOT NULL DEFAULT 0.0",
         # Rename legacy strategy name 'bollinger' → 'bollinger_bands' on any existing positions
         "UPDATE sandbox_positions SET strategy_name = 'bollinger_bands' WHERE strategy_name = 'bollinger'",
+        # Keep enough bars so PM RSI/MACD/SMA sentiment scoring is meaningful.
+        "UPDATE portfolio_manager_settings SET sentiment_data_points = 35 WHERE sentiment_data_points IS NULL OR sentiment_data_points < 35",
     ]
     for stmt in migrations:
         try:
