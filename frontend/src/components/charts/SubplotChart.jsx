@@ -389,7 +389,7 @@ function OneDayChart({
       {/* RSI panel */}
       {hasRSI && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
@@ -411,7 +411,7 @@ function OneDayChart({
       {/* MACD panel */}
       {hasMACD && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => v?.toFixed(2)} />
@@ -438,7 +438,7 @@ function OneDayChart({
       {/* Stochastic panel */}
       {hasStoch && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
@@ -461,7 +461,7 @@ function OneDayChart({
       {/* ATR panel */}
       {hasATR && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => `$${v?.toFixed(2)}`} />
@@ -481,7 +481,7 @@ function OneDayChart({
       {/* OBV panel */}
       {hasOBV && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => fmtOBV(v)} />
@@ -959,7 +959,11 @@ export default function SubplotChart({
               width={60}
               tickFormatter={v => `$${v.toFixed(0)}`}
             />
-            <Tooltip content={<PriceTooltip prevClose={prevClose} indicators={indicators} />} />
+            <Tooltip
+              content={showSharedHoverTooltip
+                ? <PriceTooltip prevClose={prevClose} indicators={indicators} />
+                : () => null}
+            />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-p-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
             ))}
@@ -985,7 +989,7 @@ export default function SubplotChart({
       {/* RSI panel */}
       {hasRSI && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
@@ -1007,7 +1011,7 @@ export default function SubplotChart({
       {/* MACD panel */}
       {hasMACD && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => v?.toFixed(2)} />
@@ -1034,7 +1038,7 @@ export default function SubplotChart({
       {/* Stochastic panel */}
       {hasStoch && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
@@ -1057,7 +1061,7 @@ export default function SubplotChart({
       {/* ATR panel */}
       {hasATR && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => `$${v?.toFixed(2)}`} />
@@ -1077,7 +1081,7 @@ export default function SubplotChart({
       {/* OBV panel */}
       {hasOBV && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => fmtOBV(v)} />

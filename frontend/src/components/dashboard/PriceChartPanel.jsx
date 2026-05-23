@@ -244,6 +244,7 @@ export default function PriceChartPanel({
             indicators={indicators}
             prevClose={chartPrevClose}
             hidePremarketAfterOpen={false}
+            showFloatingTooltip={false}
             height={220}
             viewWindow={syncedViewWindow}
             onViewWindowChange={setSyncedViewWindow}

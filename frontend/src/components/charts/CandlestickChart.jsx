@@ -157,6 +157,7 @@ function CandlestickInner({
   indicators = null,
   warmupData = null,
   hidePremarketAfterOpen = true,
+  showFloatingTooltip = true,
   viewWindow,
   onViewWindowChange,
   hoverState,
@@ -614,7 +615,7 @@ function CandlestickInner({
         </svg>
 
       {/* Floating tooltip */}
-        {activeHover && (
+        {showFloatingTooltip && activeHover && (
           <TooltipBox
             bar={{ ...activeHover.bar, prev_close: prevClose }}
             x={activeHover.x}
