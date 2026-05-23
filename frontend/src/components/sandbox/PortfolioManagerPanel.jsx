@@ -55,7 +55,121 @@ const DEFAULT_SENTIMENT_STRATEGIES = {
   bullish: 'sma_crossover',
   euphoric: 'rsi',
 }
+
+// 5×5 default matrix: rows = PM market sentiment, columns = AI learner tag
+// Rationale:
+//   Crash    — high volatility, oversold bounces & momentum shorts dominate
+//   Bearish  — trend continuation with oscillator confirmation
+//   Neutral  — range-bound; mean-reversion & volatility breakout
+//   Bullish  — trend following; short pullbacks use oscillators
+//   Euphoric — momentum peaks; fade overbought conditions for shorts
+const DEFAULT_SENTIMENT_MATRIX = {
+  crash: {
+    'STRONG LONG': 'stoch_rsi',    // oversold bounce with high conviction
+    'LONG':        'rsi',           // classic oversold reversal signal
+    'NEUTRAL':     'williams_r',    // %R distance from lows in volatile crash
+    'SHORT':       'stoch_rsi',     // overbought on relief rally → short
+    'STRONG SHORT':'williams_r',    // momentum continuation of crash
+  },
+  bearish: {
+    'STRONG LONG': 'macd',          // MACD crossover for counter-trend long
+    'LONG':        'bollinger_bands',// mean-reversion to upper band
+    'NEUTRAL':     'rsi',           // RSI divergence / oversold in bearish
+    'SHORT':       'stochastic',    // stochastic confirms bearish momentum
+    'STRONG SHORT':'stoch_rsi',     // combined oscillator for strong short
+  },
+  neutral: {
+    'STRONG LONG': 'sma_crossover', // SMA breakout when AI says strong long
+    'LONG':        'macd',          // developing trend in neutral market
+    'NEUTRAL':     'bollinger_bands',// ideal for range-bound consolidation
+    'SHORT':       'stochastic',    // stochastic short in ranging market
+    'STRONG SHORT':'cci',           // CCI overbought extreme for strong short
+  },
+  bullish: {
+    'STRONG LONG': 'sma_crossover', // classic trend-following in bull market
+    'LONG':        'macd',          // MACD momentum confirmation in uptrend
+    'NEUTRAL':     'bollinger_bands',// Bollinger squeeze breakout in bull trend
+    'SHORT':       'rsi',           // RSI pullback signal in bull market
+    'STRONG SHORT':'stochastic',    // stochastic overbought for larger pullbacks
+  },
+  euphoric: {
+    'STRONG LONG': 'cci',           // CCI momentum for late-stage bull surge
+    'LONG':        'macd',          // MACD for last-leg continuation
+    'NEUTRAL':     'bollinger_bands',// Bollinger squeeze then expansion at peaks
+    'SHORT':       'rsi',           // RSI overbought critical in euphoric markets
+    'STRONG SHORT':'stoch_rsi',     // stoch_rsi identifies major reversal peaks
+  },
+}
+// Cell action options for the sentiment matrix
+// trade      = normal signal-driven trading (default)
+// hold       = buy & hold — enter once, engine pauses until tag changes
+// engine_off = pause engine entirely — no new entries allowed
+// force_sell = liquidate existing position immediately
+// no_trade   = skip this cycle entirely
+const CELL_ACTION_OPTIONS = [
+  { value: 'trade',       label: '↺ Trade',        color: '#475569' },
+  { value: 'hold',        label: '⚓ Buy & Hold',   color: '#7c3aed' },
+  { value: 'engine_off',  label: '⏸ Engine Off',   color: '#dc2626' },
+  { value: 'force_sell',  label: '⚡ Force Sell',   color: '#f97316' },
+  { value: 'no_trade',    label: '— Skip Cycle',    color: '#64748b' },
+]
+const CELL_ACTION_LABELS = Object.fromEntries(CELL_ACTION_OPTIONS.map(o => [o.value, o.label]))
+const CELL_ACTION_COLORS = Object.fromEntries(CELL_ACTION_OPTIONS.map(o => [o.value, o.color]))
+
+const DEFAULT_SENTIMENT_MATRIX_ACTIONS = {
+  crash: {
+    'STRONG LONG': 'hold',        // AI detected bottom — buy & hold the recovery
+    'LONG':        'trade',       // cautious long in crash — let engine decide
+    'NEUTRAL':     'no_trade',    // unclear signal during crash — skip cycle
+    'SHORT':       'engine_off',  // crash + AI short confirmed — pause engine
+    'STRONG SHORT':'engine_off',  // strong conviction crash short — full stop
+  },
+  bearish: {
+    'STRONG LONG': 'trade',
+    'LONG':        'trade',
+    'NEUTRAL':     'trade',
+    'SHORT':       'trade',
+    'STRONG SHORT':'engine_off',  // double bear conviction — pause engine
+  },
+  neutral: {
+    'STRONG LONG': 'trade',
+    'LONG':        'trade',
+    'NEUTRAL':     'trade',
+    'SHORT':       'trade',
+    'STRONG SHORT':'trade',
+  },
+  bullish: {
+    'STRONG LONG': 'hold',        // confirmed bull trend + AI long — buy & hold
+    'LONG':        'trade',
+    'NEUTRAL':     'trade',
+    'SHORT':       'trade',
+    'STRONG SHORT':'force_sell',  // bull market but AI flips strong short — exit now
+  },
+  euphoric: {
+    'STRONG LONG': 'hold',        // peak momentum + AI long — hold the surge
+    'LONG':        'hold',        // euphoric phase + long — ride it
+    'NEUTRAL':     'trade',
+    'SHORT':       'trade',
+    'STRONG SHORT':'force_sell',  // euphoric peak + AI strong short — major reversal, exit
+  },
+}
+
 const MIN_SENTIMENT_DATA_POINTS = 35
+
+function buildDefaultSentimentMatrix(marketStrategies) {
+  const matrix = {}
+  SENTIMENT_BUCKETS.forEach(pm => {
+    // Start from the curated 2D defaults
+    matrix[pm] = { ...DEFAULT_SENTIMENT_MATRIX[pm] }
+    // If an explicit per-row override is provided (i.e. differs from the flat default),
+    // apply it uniformly across all AI tag columns to preserve backward compatibility.
+    const override = marketStrategies?.[pm]
+    if (override && override !== DEFAULT_SENTIMENT_STRATEGIES[pm]) {
+      AI_TAG_BUCKETS.forEach(ai => { matrix[pm][ai] = override })
+    }
+  })
+  return matrix
+}
 
 function buildDraftFromSettings(settings) {
   return {
@@ -71,14 +185,6 @@ function buildDraftFromSettings(settings) {
     reallocation_enabled: settings.reallocation_enabled ?? true,
     reallocation_mode: settings.reallocation_mode ?? 'to_stock',
     allow_buy_outside_allocation: settings.allow_buy_outside_allocation ?? false,
-    market_sentiment_strategies: {
-      ...DEFAULT_SENTIMENT_STRATEGIES,
-      ...(settings.market_sentiment_strategies ?? {}),
-    },
-    symbol_sentiment_strategies: {
-      ...DEFAULT_SENTIMENT_STRATEGIES,
-      ...(settings.symbol_sentiment_strategies ?? {}),
-    },
     sentiment_strategy_enabled: settings.sentiment_strategy_enabled ?? true,
     stop_loss_pct: settings.stop_loss_pct ?? 0,
     take_profit_pct: settings.take_profit_pct ?? 0,
@@ -88,7 +194,7 @@ function buildDraftFromSettings(settings) {
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
     sentiment_data_points: Math.max(MIN_SENTIMENT_DATA_POINTS, Number(settings.sentiment_data_points ?? MIN_SENTIMENT_DATA_POINTS)),
     sentiment_interval: settings.sentiment_interval ?? '1m',
-    ai_tag_strategy_enabled: settings.ai_tag_strategy_enabled ?? false,
+    ai_tag_strategy_enabled: settings.ai_tag_strategy_enabled ?? true,
     ai_sentiment_change_enabled: settings.ai_sentiment_change_enabled ?? true,
     ai_tag_strategies: {
       ...DEFAULT_AI_TAG_STRATEGIES,
@@ -103,6 +209,30 @@ function buildDraftFromSettings(settings) {
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.75,
     auto_trade_buy_price_offset_pct: settings.auto_trade_buy_price_offset_pct ?? 0.1,
     auto_trade_sell_price_offset_pct: settings.auto_trade_sell_price_offset_pct ?? 0.1,
+    sentiment_matrix_strategies: (() => {
+      const base = buildDefaultSentimentMatrix({
+        ...DEFAULT_SENTIMENT_STRATEGIES,
+        ...(settings.market_sentiment_strategies ?? {}),
+      })
+      if (settings.sentiment_matrix_strategies && typeof settings.sentiment_matrix_strategies === 'object') {
+        SENTIMENT_BUCKETS.forEach(pm => {
+          if (settings.sentiment_matrix_strategies[pm]) {
+            base[pm] = { ...base[pm], ...settings.sentiment_matrix_strategies[pm] }
+          }
+        })
+      }
+      return base
+    })(),
+    sentiment_matrix_actions: (() => {
+      const base = {}
+      SENTIMENT_BUCKETS.forEach(pm => {
+        base[pm] = { ...DEFAULT_SENTIMENT_MATRIX_ACTIONS[pm] }
+        if (settings.sentiment_matrix_actions?.[pm]) {
+          base[pm] = { ...base[pm], ...settings.sentiment_matrix_actions[pm] }
+        }
+      })
+      return base
+    })(),
   }
 }
 
@@ -168,13 +298,18 @@ function stratDisplayName(val, scripts, templates) {
   return val
 }
 
-function sanitizeSentimentMap(map) {
-  return Object.fromEntries(
-    Object.entries(map).map(([k, v]) => [
-      k,
-      (v === CUSTOM_SCRIPT_KEY || v === TEMPLATE_SCRIPT_KEY) ? (DEFAULT_SENTIMENT_STRATEGIES[k] ?? 'rsi') : v,
-    ])
-  )
+function sanitizeSentimentMatrix(matrix) {
+  const result = {}
+  SENTIMENT_BUCKETS.forEach(pm => {
+    result[pm] = {}
+    AI_TAG_BUCKETS.forEach(ai => {
+      const val = matrix?.[pm]?.[ai]
+      result[pm][ai] = (val === CUSTOM_SCRIPT_KEY || val === TEMPLATE_SCRIPT_KEY)
+        ? (DEFAULT_SENTIMENT_STRATEGIES[pm] ?? 'rsi')
+        : (val ?? DEFAULT_SENTIMENT_STRATEGIES[pm] ?? 'rsi')
+    })
+  })
+  return result
 }
 
 function buildImportDraft(baseSettings, imported) {
@@ -189,20 +324,163 @@ function buildImportDraft(baseSettings, imported) {
     candidate.transfer_pct = Math.round(payload.transfer_pct * 100)
   }
 
-  candidate.market_sentiment_strategies = {
-    ...baseDraft.market_sentiment_strategies,
-    ...(payload.market_sentiment_strategies ?? {}),
-  }
-  candidate.symbol_sentiment_strategies = {
-    ...baseDraft.symbol_sentiment_strategies,
-    ...(payload.symbol_sentiment_strategies ?? {}),
-  }
   candidate.ai_tag_strategies = {
     ...baseDraft.ai_tag_strategies,
     ...(payload.ai_tag_strategies ?? {}),
   }
 
+  candidate.sentiment_matrix_strategies = (() => {
+    const base = buildDefaultSentimentMatrix({
+      ...DEFAULT_SENTIMENT_STRATEGIES,
+      ...(payload.market_sentiment_strategies ?? {}),
+    })
+    if (payload.sentiment_matrix_strategies && typeof payload.sentiment_matrix_strategies === 'object') {
+      SENTIMENT_BUCKETS.forEach(pm => {
+        if (payload.sentiment_matrix_strategies[pm]) {
+          base[pm] = { ...base[pm], ...payload.sentiment_matrix_strategies[pm] }
+        }
+      })
+    }
+    return base
+  })()
+
+  candidate.sentiment_matrix_actions = (() => {
+    const base = {}
+    SENTIMENT_BUCKETS.forEach(pm => {
+      base[pm] = { ...DEFAULT_SENTIMENT_MATRIX_ACTIONS[pm] }
+      if (payload.sentiment_matrix_actions?.[pm]) {
+        base[pm] = { ...base[pm], ...payload.sentiment_matrix_actions[pm] }
+      }
+    })
+    return base
+  })()
+
   return candidate
+}
+
+function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOptions, scripts, templates }) {
+  function updateCell(pm, ai, newVal) {
+    updateDraft(d => ({
+      ...d,
+      sentiment_matrix_strategies: {
+        ...d.sentiment_matrix_strategies,
+        [pm]: { ...(d.sentiment_matrix_strategies?.[pm] ?? {}), [ai]: newVal },
+      },
+    }))
+  }
+
+  function updateActionCell(pm, ai, newAction) {
+    updateDraft(d => ({
+      ...d,
+      sentiment_matrix_actions: {
+        ...d.sentiment_matrix_actions,
+        [pm]: { ...(d.sentiment_matrix_actions?.[pm] ?? {}), [ai]: newAction },
+      },
+    }))
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-dark-600">
+      <table className="w-full border-collapse text-[11px]">
+        <thead>
+          <tr>
+            <th className="px-3 py-2 text-left font-semibold text-slate-500 uppercase tracking-wide border-b border-r border-dark-600 bg-dark-800 whitespace-nowrap">
+              PM ↓ / AI →
+            </th>
+            {AI_TAG_BUCKETS.map(ai => (
+              <th
+                key={ai}
+                className="px-2 py-2 text-center font-semibold border-b border-r border-dark-600 bg-dark-800 last:border-r-0 whitespace-nowrap"
+                style={{ color: AI_TAG_COLORS[ai] }}
+              >
+                {AI_TAG_LABELS[ai]}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {SENTIMENT_BUCKETS.map((pm, pmIdx) => (
+            <tr key={pm} className={pmIdx % 2 === 0 ? 'bg-dark-900/70' : 'bg-dark-800/40'}>
+              <td
+                className="px-3 py-2 font-semibold border-r border-b border-dark-600 whitespace-nowrap"
+                style={{ color: classColor(pm) }}
+              >
+                {SENTIMENT_LABELS[pm]}
+              </td>
+              {AI_TAG_BUCKETS.map(ai => {
+                const val = draft.sentiment_matrix_strategies?.[pm]?.[ai] ?? DEFAULT_SENTIMENT_MATRIX[pm]?.[ai] ?? DEFAULT_SENTIMENT_STRATEGIES[pm]
+                const action = draft.sentiment_matrix_actions?.[pm]?.[ai] ?? DEFAULT_SENTIMENT_MATRIX_ACTIONS[pm]?.[ai] ?? 'trade'
+                const { type: valType, scriptId, templateFilename } = parseStrategyValue(val)
+                const actionOpt = CELL_ACTION_OPTIONS.find(o => o.value === action) ?? CELL_ACTION_OPTIONS[0]
+                return (
+                  <td
+                    key={ai}
+                    className={`p-1.5 border-b border-r border-dark-600 align-top last:border-r-0 ${pmIdx === SENTIMENT_BUCKETS.length - 1 ? 'border-b-0' : ''}`}
+                  >
+                    <select
+                      className="input text-[11px] py-0.5 w-full min-w-[100px]"
+                      disabled={!editSettings}
+                      value={valType}
+                      onChange={e => updateCell(pm, ai, e.target.value)}
+                    >
+                      {strategyOptions.map(s => (
+                        <option key={s.type} value={s.type}>{s.type}</option>
+                      ))}
+                      <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
+                      <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
+                    </select>
+                    {valType === CUSTOM_SCRIPT_KEY && (
+                      <select
+                        className="input text-[11px] py-0.5 w-full mt-0.5"
+                        disabled={!editSettings}
+                        value={scriptId ?? ''}
+                        onChange={e => {
+                          const sid = e.target.value
+                          updateCell(pm, ai, sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY)
+                        }}
+                      >
+                        <option value="">— select script —</option>
+                        {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                    )}
+                    {valType === TEMPLATE_SCRIPT_KEY && (
+                      <select
+                        className="input text-[11px] py-0.5 w-full mt-0.5"
+                        disabled={!editSettings}
+                        value={templateFilename ?? ''}
+                        onChange={e => {
+                          const fn = e.target.value
+                          updateCell(pm, ai, fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY)
+                        }}
+                      >
+                        <option value="">— select template —</option>
+                        {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
+                      </select>
+                    )}
+                    <select
+                      className="w-full mt-1 text-[10px] font-semibold rounded px-1.5 py-0.5 cursor-pointer border appearance-none"
+                      style={{
+                        backgroundColor: actionOpt.color + '22',
+                        color: actionOpt.color,
+                        borderColor: actionOpt.color + '55',
+                      }}
+                      disabled={!editSettings}
+                      value={action}
+                      onChange={e => updateActionCell(pm, ai, e.target.value)}
+                    >
+                      {CELL_ACTION_OPTIONS.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))}
+                    </select>
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 function CollapsibleSection({ title, badge, children, isOpen, onToggle }) {
@@ -329,8 +607,16 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           ...freshDefaults,
           ...current.draft,
           ai_tag_strategies: { ...freshDefaults.ai_tag_strategies, ...(current.draft.ai_tag_strategies ?? {}) },
-          market_sentiment_strategies: { ...freshDefaults.market_sentiment_strategies, ...(current.draft.market_sentiment_strategies ?? {}) },
-          symbol_sentiment_strategies: { ...freshDefaults.symbol_sentiment_strategies, ...(current.draft.symbol_sentiment_strategies ?? {}) },
+          sentiment_matrix_actions: (() => {
+            const base = {}
+            SENTIMENT_BUCKETS.forEach(pm => {
+              base[pm] = { ...(freshDefaults.sentiment_matrix_actions?.[pm] ?? DEFAULT_SENTIMENT_MATRIX_ACTIONS[pm]) }
+              if (current.draft.sentiment_matrix_actions?.[pm]) {
+                base[pm] = { ...base[pm], ...current.draft.sentiment_matrix_actions[pm] }
+              }
+            })
+            return base
+          })(),
         }
         setDraft(mergedDraft)
         setEditSettings(!!current.editSettings)
@@ -433,9 +719,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
   function handleSave() {
     if (!draft) return
-    const hasIncomplete = (map) =>
-      Object.values(map).some(v => v === CUSTOM_SCRIPT_KEY || v === TEMPLATE_SCRIPT_KEY)
-    if (hasIncomplete(draft.market_sentiment_strategies) || hasIncomplete(draft.symbol_sentiment_strategies)) {
+    const matrixIncomplete = SENTIMENT_BUCKETS.some(pm =>
+      AI_TAG_BUCKETS.some(ai => {
+        const v = draft.sentiment_matrix_strategies?.[pm]?.[ai]
+        return v === CUSTOM_SCRIPT_KEY || v === TEMPLATE_SCRIPT_KEY
+      })
+    )
+    if (matrixIncomplete) {
       setSentimentError('Select a specific script or template for every sentiment bucket before saving.')
       return
     }
@@ -454,8 +744,6 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       reallocation_enabled: draft.reallocation_enabled,
       reallocation_mode: draft.reallocation_mode,
       allow_buy_outside_allocation: draft.allow_buy_outside_allocation,
-      market_sentiment_strategies: sanitizeSentimentMap(draft.market_sentiment_strategies),
-      symbol_sentiment_strategies: sanitizeSentimentMap(draft.symbol_sentiment_strategies),
       sentiment_strategy_enabled: draft.sentiment_strategy_enabled,
       stop_loss_pct: Number(draft.stop_loss_pct),
       take_profit_pct: Number(draft.take_profit_pct),
@@ -477,6 +765,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       pending_price_drift_cancel_pct: Number(draft.pending_price_drift_cancel_pct),
       auto_trade_buy_price_offset_pct: Number(draft.auto_trade_buy_price_offset_pct),
       auto_trade_sell_price_offset_pct: Number(draft.auto_trade_sell_price_offset_pct),
+      sentiment_matrix_strategies: sanitizeSentimentMatrix(draft.sentiment_matrix_strategies),
+      sentiment_matrix_actions: draft.sentiment_matrix_actions ?? {},
     })
   }
 
@@ -524,14 +814,6 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   }
 
   const strategyOptions = strategyData?.strategies ?? []
-  const marketSentimentStrategies = {
-    ...DEFAULT_SENTIMENT_STRATEGIES,
-    ...(settings.market_sentiment_strategies ?? {}),
-  }
-  const symbolSentimentStrategies = {
-    ...DEFAULT_SENTIMENT_STRATEGIES,
-    ...(settings.symbol_sentiment_strategies ?? {}),
-  }
 
   const symbolCount = Object.keys(scores).length
   const sentimentCounts = SENTIMENT_BUCKETS.reduce((acc, bucket) => {
@@ -742,26 +1024,47 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         )}
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-        <div className="bg-dark-800/70 border border-dark-600 rounded-lg p-3 space-y-1.5">
-          <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Market Sentiment Strategies</div>
-          <div className="flex flex-wrap gap-1.5">
-            {SENTIMENT_BUCKETS.map(sentiment => (
-              <span key={`market-${sentiment}`} className="text-[11px] text-slate-400 bg-dark-700 px-2 py-0.5 rounded-md">
-                {SENTIMENT_LABELS[sentiment]}: {stratDisplayName(marketSentimentStrategies[sentiment], scripts, templates)}
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="bg-dark-800/70 border border-dark-600 rounded-lg p-3 space-y-1.5">
-          <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Symbol Sentiment Strategies</div>
-          <div className="flex flex-wrap gap-1.5">
-            {SENTIMENT_BUCKETS.map(sentiment => (
-              <span key={`symbol-${sentiment}`} className="text-[11px] text-slate-400 bg-dark-700 px-2 py-0.5 rounded-md">
-                {SENTIMENT_LABELS[sentiment]}: {stratDisplayName(symbolSentimentStrategies[sentiment], scripts, templates)}
-              </span>
-            ))}
-          </div>
+      <div className="bg-dark-800/70 border border-dark-600 rounded-lg p-3 space-y-2">
+        <div className="text-xs font-semibold text-slate-300 uppercase tracking-wider">Sentiment Strategy Matrix</div>
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-[11px]">
+            <thead>
+              <tr>
+                <th className="px-2 py-1 text-left text-slate-500 font-medium border-b border-r border-dark-600 whitespace-nowrap">PM \ AI</th>
+                {AI_TAG_BUCKETS.map(ai => (
+                  <th key={ai} className="px-2 py-1 text-center font-semibold border-b border-r border-dark-600 last:border-r-0 whitespace-nowrap" style={{ color: AI_TAG_COLORS[ai] }}>
+                    {AI_TAG_LABELS[ai]}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {SENTIMENT_BUCKETS.map((pm, pmIdx) => {
+                const matrixRow = settings.sentiment_matrix_strategies?.[pm] ?? {}
+                return (
+                  <tr key={pm} className={pmIdx % 2 === 0 ? 'bg-dark-900/50' : ''}>
+                    <td className="px-2 py-1 font-semibold border-r border-b border-dark-600 whitespace-nowrap" style={{ color: classColor(pm) }}>
+                      {SENTIMENT_LABELS[pm]}
+                    </td>
+                    {AI_TAG_BUCKETS.map(ai => {
+                      const val = matrixRow[ai] ?? DEFAULT_SENTIMENT_MATRIX[pm]?.[ai]
+                      const action = settings.sentiment_matrix_actions?.[pm]?.[ai] ?? DEFAULT_SENTIMENT_MATRIX_ACTIONS[pm]?.[ai] ?? 'trade'
+                      return (
+                        <td key={ai} className="px-2 py-1 border-r border-b border-dark-600 last:border-r-0 text-center">
+                          <div className="text-slate-400">{stratDisplayName(val, scripts, templates)}</div>
+                          {action !== 'trade' && (
+                            <div className="text-[10px] font-bold mt-0.5" style={{ color: CELL_ACTION_COLORS[action] }}>
+                              {CELL_ACTION_LABELS[action]}
+                            </div>
+                          )}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -1290,16 +1593,16 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
               </SettingRow>
             </CollapsibleSection>
 
-            {/* ── Sentiment Strategy Switching ── */}
+            {/* ── Sentiment & AI Strategy Matrix ── */}
             <CollapsibleSection
-              title="Sentiment Strategy Switching"
-              badge={draft.sentiment_strategy_enabled ? 'Enabled' : 'Disabled'}
+              title="Sentiment & AI Strategy Matrix"
+              badge={draft.sentiment_strategy_enabled && draft.ai_tag_strategy_enabled ? 'Active' : draft.sentiment_strategy_enabled ? 'Partial' : 'Disabled'}
               isOpen={openSections.sentimentStrategy}
               onToggle={() => toggleSection('sentimentStrategy')}
             >
               <SettingRow
                 label="Sentiment Strategy Switching"
-                hint="When enabled, the portfolio manager automatically updates the strategy for each symbol based on its assigned sentiment mode."
+                hint="When enabled, the portfolio manager automatically selects the strategy and action for each symbol based on its PM sentiment and AI tag combination."
               >
                 <label className="flex items-center gap-2 cursor-pointer">
                   <div
@@ -1316,162 +1619,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
               </SettingRow>
 
               <SettingRow
-                label="Market Sentiment Strategy"
-                hint="Choose the default strategy to use under each overall market sentiment."
-              >
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {SENTIMENT_BUCKETS.map(sentiment => {
-                    const current = draft.market_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]
-                    const { type: currentType, scriptId: currentScriptId, templateFilename: currentTemplateFn } = parseStrategyValue(current)
-                    return (
-                      <div key={`market-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
-                        <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
-                        <select
-                          className="input text-xs py-1.5"
-                          value={currentType}
-                          onChange={e => {
-                            const newType = e.target.value
-                            updateDraft(d => ({
-                              ...d,
-                              market_sentiment_strategies: {
-                                ...d.market_sentiment_strategies,
-                                [sentiment]: newType,
-                              },
-                            }))
-                          }}
-                        >
-                          {strategyOptions.map(s => <option key={`market-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
-                          <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
-                          <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
-                        </select>
-                        {currentType === CUSTOM_SCRIPT_KEY && (
-                          <select
-                            className="input text-xs py-1.5"
-                            value={currentScriptId ?? ''}
-                            onChange={e => {
-                              const sid = e.target.value
-                              updateDraft(d => ({
-                                ...d,
-                                market_sentiment_strategies: {
-                                  ...d.market_sentiment_strategies,
-                                  [sentiment]: sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY,
-                                },
-                              }))
-                            }}
-                          >
-                            <option value="">— select script —</option>
-                            {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                          </select>
-                        )}
-                        {currentType === TEMPLATE_SCRIPT_KEY && (
-                          <select
-                            className="input text-xs py-1.5"
-                            value={currentTemplateFn ?? ''}
-                            onChange={e => {
-                              const fn = e.target.value
-                              updateDraft(d => ({
-                                ...d,
-                                market_sentiment_strategies: {
-                                  ...d.market_sentiment_strategies,
-                                  [sentiment]: fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY,
-                                },
-                              }))
-                            }}
-                          >
-                            <option value="">— select template —</option>
-                            {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
-                          </select>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              </SettingRow>
-
-              <SettingRow
-                label="Symbol Sentiment Strategy"
-                hint="Choose the default strategy to use under each individual symbol sentiment."
-              >
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {SENTIMENT_BUCKETS.map(sentiment => {
-                  const current = draft.symbol_sentiment_strategies[sentiment] ?? DEFAULT_SENTIMENT_STRATEGIES[sentiment]
-                  const { type: currentType, scriptId: currentScriptId, templateFilename: currentTemplateFn } = parseStrategyValue(current)
-                  return (
-                    <div key={`symbol-row-${sentiment}`} className="bg-dark-900/60 border border-dark-600 rounded-md p-2 space-y-1">
-                      <div className="text-xs text-slate-400">{SENTIMENT_LABELS[sentiment]}</div>
-                      <select
-                        className="input text-xs py-1.5"
-                        value={currentType}
-                        onChange={e => {
-                          const newType = e.target.value
-                          updateDraft(d => ({
-                            ...d,
-                            symbol_sentiment_strategies: {
-                              ...d.symbol_sentiment_strategies,
-                              [sentiment]: newType,
-                            },
-                          }))
-                        }}
-                      >
-                        {strategyOptions.map(s => <option key={`symbol-${sentiment}-${s.type}`} value={s.type}>{s.type}</option>)}
-                        <option value={CUSTOM_SCRIPT_KEY}>⚙ Custom Script</option>
-                        <option value={TEMPLATE_SCRIPT_KEY}>📄 Template</option>
-                      </select>
-                      {currentType === CUSTOM_SCRIPT_KEY && (
-                        <select
-                          className="input text-xs py-1.5"
-                          value={currentScriptId ?? ''}
-                          onChange={e => {
-                            const sid = e.target.value
-                            updateDraft(d => ({
-                              ...d,
-                              symbol_sentiment_strategies: {
-                                ...d.symbol_sentiment_strategies,
-                                [sentiment]: sid ? `custom:${sid}` : CUSTOM_SCRIPT_KEY,
-                              },
-                            }))
-                          }}
-                        >
-                          <option value="">— select script —</option>
-                          {scripts.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                        </select>
-                      )}
-                      {currentType === TEMPLATE_SCRIPT_KEY && (
-                        <select
-                          className="input text-xs py-1.5"
-                          value={currentTemplateFn ?? ''}
-                          onChange={e => {
-                            const fn = e.target.value
-                            updateDraft(d => ({
-                              ...d,
-                              symbol_sentiment_strategies: {
-                                ...d.symbol_sentiment_strategies,
-                                [sentiment]: fn ? `template:${fn}` : TEMPLATE_SCRIPT_KEY,
-                              },
-                            }))
-                          }}
-                        >
-                          <option value="">— select template —</option>
-                          {templates.map(t => <option key={t.filename} value={t.filename}>{t.name ?? t.filename}</option>)}
-                        </select>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </SettingRow>
-            </CollapsibleSection>
-
-            {/* ── AI Tag Strategy Routing ── */}
-            <CollapsibleSection
-              title="AI Tag Strategy Routing"
-              badge={draft.ai_sentiment_change_enabled ? (draft.ai_tag_strategy_enabled ? 'Enabled' : 'Configured') : 'Disabled'}
-              isOpen={openSections.aiTag}
-              onToggle={() => toggleSection('aiTag')}
-            >
-              <SettingRow
                 label="AI Sentiment Changes"
-                hint="Master switch for AI-driven strategy/trade changes. Turn this off to prevent AI sentiment from altering PM actions."
+                hint="Master switch for AI-driven strategy and action changes. Disable to prevent AI sentiment from altering PM behaviour."
               >
                 <label className="flex items-center gap-2 cursor-pointer">
                   <div
@@ -1489,7 +1638,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
               <SettingRow
                 label="AI Tag Strategy Switching"
-                hint="When enabled, the portfolio manager automatically updates the strategy for each position based on its AI learner tag. WATCH tag always keeps the current default day-trading strategy unchanged."
+                hint="When enabled, the matrix below drives strategy and action selection for each PM × AI sentiment combination."
               >
                 <label className="flex items-center gap-2 cursor-pointer">
                   <div
@@ -1506,12 +1655,12 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
               </SettingRow>
 
               {!draft.ai_sentiment_change_enabled ? (
-                <div className="text-xs text-slate-500">AI sentiment changes are disabled. Current strategy configuration is preserved but not actively applied by PM.</div>
+                <div className="text-xs text-slate-500">AI sentiment changes are disabled. Matrix configuration is preserved but not actively applied by PM.</div>
               ) : draft.ai_tag_strategy_enabled && (
                 <>
                   <SettingRow
                     label="Action Mode"
-                    hint="Strategy Override: PM sets the strategy name per AI tag, the engine executes trades. Direct Actions: PM directly buys/sells LONG/STRONG LONG positions without the engine — bypasses engine shutoff windows."
+                    hint="Strategy Override: PM sets the strategy per AI tag; the engine executes trades. Direct Actions: PM directly buys/sells LONG/STRONG LONG positions without the engine."
                   >
                     <div className="flex gap-0.5 p-0.5 bg-dark-900 rounded-lg">
                       {[
@@ -1535,53 +1684,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   </SettingRow>
 
                   <SettingRow
-                    label="AI Tag Strategies"
-                    hint={draft.ai_tag_action_mode === 'direct'
-                      ? 'In Direct Actions mode, LONG/STRONG LONG are managed by PM directly. Strategies below apply to NEUTRAL, SHORT, and STRONG SHORT.'
-                      : 'Choose the strategy for each AI learner tag. Leave Neutral empty to keep the existing strategy. WATCH always uses the default engine (no override).'}
-                  >
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {AI_TAG_BUCKETS.map(tag => {
-                        const isLong = tag === 'LONG' || tag === 'STRONG LONG'
-                        const directManaged = draft.ai_tag_action_mode === 'direct' && isLong
-                        const current = draft.ai_tag_strategies[tag] ?? DEFAULT_AI_TAG_STRATEGIES[tag] ?? ''
-                        return (
-                          <div key={`aitag-row-${tag}`} className={`border rounded-md p-2 space-y-1 ${directManaged ? 'bg-dark-900/30 border-dark-700 opacity-60' : 'bg-dark-900/60 border-dark-600'}`}>
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[11px] font-bold" style={{ color: AI_TAG_COLORS[tag] }}>{AI_TAG_LABELS[tag]}</span>
-                              {directManaged && <span className="text-[10px] text-violet-400">PM direct</span>}
-                            </div>
-                            {directManaged ? (
-                              <span className="text-[11px] text-slate-500 italic">Bought/sold directly by PM</span>
-                            ) : (
-                              <select
-                                className="input text-xs py-1.5"
-                                disabled={!editSettings}
-                                value={current}
-                                onChange={e => updateDraft(d => ({
-                                  ...d,
-                                  ai_tag_strategies: { ...d.ai_tag_strategies, [tag]: e.target.value },
-                                }))}
-                              >
-                                <option value="">— no override —</option>
-                                {strategyOptions.map(s => <option key={`aitag-${tag}-${s.type}`} value={s.type}>{s.type}</option>)}
-                              </select>
-                            )}
-                          </div>
-                        )
-                      })}
-                      <div className="bg-dark-900/40 border border-dark-700 rounded-md p-2">
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <span className="text-[11px] font-bold text-slate-500">Watch</span>
-                        </div>
-                        <span className="text-[11px] text-slate-500 italic">Uses default day-trading engine — no override</span>
-                      </div>
-                    </div>
-                  </SettingRow>
-
-                  <SettingRow
                     label="Allow Overnight for Long Tags"
-                    hint="When enabled, LONG/STRONG LONG positions are exempt from end-of-day liquidation. In Direct mode, the PM position simply stays open. In Strategy Override mode, the engine skips EOD sell for these positions."
+                    hint="LONG/STRONG LONG positions are exempt from end-of-day liquidation. In Direct mode the PM position stays open; in Strategy Override mode the engine skips EOD sell for these positions."
                   >
                     <label className="flex items-center gap-2 cursor-pointer">
                       <div
@@ -1597,41 +1701,42 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     </label>
                   </SettingRow>
 
-                  <SettingRow
-                    label="Long Take Profit %"
-                    hint="Sell when price rises this % above avg cost. 0 = disabled. In Direct mode: PM sells directly. In Strategy Override + Long Hold mode: PM re-enables engine after selling."
-                  >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={100} step={0.1}
-                        disabled={!editSettings}
-                        value={draft.ai_tag_long_tp_pct}
-                        onChange={e => updateDraft(d => ({ ...d, ai_tag_long_tp_pct: e.target.value }))}
-                        className="input w-28 text-sm py-1.5"
-                      />
-                      <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_tp_pct) > 0 ? '' : ' (off)'}</span>
-                    </div>
-                  </SettingRow>
-
-                  <SettingRow
-                    label="Long Stop Loss %"
-                    hint="Sell when price drops this % below avg cost. 0 = disabled."
-                  >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={100} step={0.1}
-                        disabled={!editSettings}
-                        value={draft.ai_tag_long_sl_pct}
-                        onChange={e => updateDraft(d => ({ ...d, ai_tag_long_sl_pct: e.target.value }))}
-                        className="input w-28 text-sm py-1.5"
-                      />
-                      <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_sl_pct) > 0 ? '' : ' (off)'}</span>
-                    </div>
-                  </SettingRow>
+                  <div className="grid grid-cols-2 gap-3">
+                    <SettingRow
+                      label="Long Take Profit %"
+                      hint="Sell when price rises this % above avg cost. 0 = disabled."
+                    >
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number" min={0} max={100} step={0.1}
+                          disabled={!editSettings}
+                          value={draft.ai_tag_long_tp_pct}
+                          onChange={e => updateDraft(d => ({ ...d, ai_tag_long_tp_pct: e.target.value }))}
+                          className="input w-24 text-sm py-1.5"
+                        />
+                        <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_tp_pct) > 0 ? '' : ' (off)'}</span>
+                      </div>
+                    </SettingRow>
+                    <SettingRow
+                      label="Long Stop Loss %"
+                      hint="Sell when price drops this % below avg cost. 0 = disabled."
+                    >
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number" min={0} max={100} step={0.1}
+                          disabled={!editSettings}
+                          value={draft.ai_tag_long_sl_pct}
+                          onChange={e => updateDraft(d => ({ ...d, ai_tag_long_sl_pct: e.target.value }))}
+                          className="input w-24 text-sm py-1.5"
+                        />
+                        <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_sl_pct) > 0 ? '' : ' (off)'}</span>
+                      </div>
+                    </SettingRow>
+                  </div>
 
                   <SettingRow
                     label="No-Loss AI Sell Guard"
-                    hint="When enabled, AI-driven sells are blocked if they would realize a loss. The position is held and retried later."
+                    hint="Block AI-driven sells that would realize a loss. The position is held and retried later."
                   >
                     <label className="flex items-center gap-2 cursor-pointer">
                       <div
@@ -1649,7 +1754,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
                   <SettingRow
                     label="Pending Price Drift Cancel %"
-                    hint="Cancel pending BUY orders when market price drifts from pending fill/limit by at least this percentage. Applies to simulated and IB pending-buy cancels."
+                    hint="Cancel pending BUY orders when market price drifts from the pending fill/limit by at least this percentage."
                   >
                     <div className="flex items-center gap-1">
                       <input
@@ -1666,7 +1771,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   {draft.ai_tag_action_mode !== 'direct' && (
                     <SettingRow
                       label="Long Hold Mode"
-                      hint="After a BUY fills for a LONG or STRONG LONG position, disable the strategy engine so the position is held without short-term signal interference. The engine re-enables when TP/SL is hit or the AI tag changes."
+                      hint="After a BUY fills for a LONG/STRONG LONG position, disable the strategy engine so the position is held. Re-enables when TP/SL is hit or the AI tag changes."
                     >
                       <label className="flex items-center gap-2 cursor-pointer">
                         <div
@@ -1684,6 +1789,20 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   )}
                 </>
               )}
+
+              <SettingRow
+                label="Strategy & Action Matrix"
+                hint="Each cell defines the trading strategy (top) and engine action (bottom) for a PM sentiment row × AI tag column. Actions: ↺ Trade (normal), ⚓ Buy & Hold (enter once, hold), ⏸ Engine Off (pause entries), ⚡ Force Sell (exit immediately), — Skip Cycle (no action)."
+              >
+                <SentimentMatrixTable
+                  draft={draft}
+                  updateDraft={updateDraft}
+                  editSettings={editSettings}
+                  strategyOptions={strategyOptions}
+                  scripts={scripts}
+                  templates={templates}
+                />
+              </SettingRow>
             </CollapsibleSection>
 
             {/* ── Risk & End of Day ── */}

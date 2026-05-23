@@ -215,6 +215,30 @@ async def _load_settings_from_db() -> None:
             _sell_offset = getattr(row, "auto_trade_sell_price_offset_pct", None)
             _settings["auto_trade_buy_price_offset_pct"] = 0.1 if _buy_offset is None else float(_buy_offset)
             _settings["auto_trade_sell_price_offset_pct"] = 0.1 if _sell_offset is None else float(_sell_offset)
+            # Restore cached scores so the UI shows previous values immediately.
+            try:
+                raw = getattr(row, "cached_scores", None)
+                if raw:
+                    loaded = json.loads(raw)
+                    if isinstance(loaded, dict) and loaded:
+                        _state["scores"] = loaded
+            except Exception:
+                pass
+
+
+async def _save_scores_to_db() -> None:
+    """Persist current in-memory scores to the DB cache column."""
+    try:
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import select as sa_select
+            from app.models.sandbox import PortfolioManagerSettings
+            res = await db.execute(sa_select(PortfolioManagerSettings).where(PortfolioManagerSettings.id == 1))
+            row = res.scalar_one_or_none()
+            if row:
+                row.cached_scores = json.dumps(_state["scores"])
+                await db.commit()
+    except Exception as exc:
+        logger.debug("PM score cache write error: %s", exc)
 
 
 async def _save_settings_to_db() -> None:
@@ -327,6 +351,11 @@ def update_manager_settings(new: dict) -> dict:
 
 # ── scoring ───────────────────────────────────────────────────────────────── #
 
+# Scoring can tolerate bars up to this many seconds old – avoids hammering YF
+# every 2-minute PM tick and reuses whatever the trading engine already cached.
+_PM_SCORE_CACHE_TTL = 600.0  # 10 minutes
+
+
 async def _fetch_bars(symbol: str) -> pd.DataFrame:
     """Fetch recent intraday bars for scoring (re-uses the shared market_service helper)."""
     from app.services.market_service import get_intraday_df
@@ -339,7 +368,11 @@ async def _fetch_bars(symbol: str) -> pd.DataFrame:
     range_str = f"{lookback_days}d"
     # Force YF for sentiment scoring – IB pacing is preserved for trading
     # signals and scoring doesn't need tick-level data accuracy.
-    df = await get_intraday_df(symbol, range_=range_str, interval=interval, include_pre_post=False, force_yf=True)
+    # Use a long cache TTL so PM scoring reuses data already fetched by the
+    # trading engine / chart requests instead of triggering a fresh YF download.
+    df = await get_intraday_df(symbol, range_=range_str, interval=interval,
+                               include_pre_post=False, force_yf=True,
+                               cache_ttl_override=_PM_SCORE_CACHE_TTL)
     bars = df[["Close", "Volume"]]
     return bars.tail(data_points)
 
@@ -430,6 +463,10 @@ async def _refresh_scores(symbols: list[str]) -> None:
 
     await asyncio.gather(*[_score_one(s) for s in symbols], return_exceptions=True)
     _state["last_score_at"] = datetime.now(timezone.utc)
+    try:
+        asyncio.get_running_loop().create_task(_save_scores_to_db())
+    except RuntimeError:
+        pass
 
 
 # ── sentiment strategy helpers ────────────────────────────────────────────── #
@@ -2123,6 +2160,22 @@ async def run_portfolio_manager() -> None:
     await refresh_sentiment_routing()
     logger.info("Portfolio Manager task started (enabled=%s).", _settings["enabled"])
 
+    # Score immediately on startup when PM is enabled but scores are cold
+    # (no DB cache yet, first-ever run, or new symbols added).
+    # This ensures the UI shows sentiment without waiting for the first loop tick.
+    if _settings.get("enabled") and not _state.get("scores"):
+        try:
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import select as sa_select
+                res = await db.execute(sa_select(SandboxPosition))
+                syms = [p.symbol for p in res.scalars().all()]
+            if syms:
+                await _refresh_scores(syms)
+                await _apply_sentiment_strategies()
+                await _apply_ai_tag_strategies()
+        except Exception as exc:
+            logger.warning("PM startup score error: %s", exc)
+
     last_transfer = 0.0
     last_score = 0.0
 
@@ -2133,6 +2186,26 @@ async def run_portfolio_manager() -> None:
             continue
 
         from app.services.sandbox_engine import _ET, _market_is_active, _regular_session_is_open
+
+        now = asyncio.get_event_loop().time()
+
+        # Refresh scores regardless of market hours — YF returns historical
+        # data on weekends and holidays so sentiment stays current even when
+        # the market is closed.  Only trading operations need an open market.
+        if now - last_score >= _settings["indicator_interval_s"]:
+            try:
+                async with AsyncSessionLocal() as db:
+                    from sqlalchemy import select as sa_select
+                    res = await db.execute(sa_select(SandboxPosition))
+                    syms = [p.symbol for p in res.scalars().all()]
+                if syms:
+                    await _refresh_scores(syms)
+                    await _apply_sentiment_strategies()
+                    await _apply_ai_tag_strategies()
+            except Exception as exc:
+                logger.warning("PM score refresh error: %s", exc)
+            last_score = now
+
         if not _market_is_active():
             continue
 
@@ -2151,8 +2224,6 @@ async def run_portfolio_manager() -> None:
                     logger.warning("PM day-start engine re-enable error: %s", exc)
                 _state["last_engine_reenable_day"] = day_key
 
-        now = asyncio.get_event_loop().time()
-
         # Cancel pending orders when sentiment worsens or entering EOD sell window
         try:
             await _cancel_bearish_pending_orders()
@@ -2170,21 +2241,6 @@ async def run_portfolio_manager() -> None:
             await _attempt_ib_eod_liquidation()
         except Exception as exc:
             logger.warning("PM IB EOD liquidation error: %s", exc)
-
-        # Refresh scores on interval
-        if now - last_score >= _settings["indicator_interval_s"]:
-            try:
-                async with AsyncSessionLocal() as db:
-                    from sqlalchemy import select as sa_select
-                    res = await db.execute(sa_select(SandboxPosition))
-                    syms = [p.symbol for p in res.scalars().all()]
-                if syms:
-                    await _refresh_scores(syms)
-                    await _apply_sentiment_strategies()
-                    await _apply_ai_tag_strategies()
-            except Exception as exc:
-                logger.warning("PM score refresh error: %s", exc)
-            last_score = now
 
         # In IB mode, consume latest engine signals and route execution through PM.
         try:

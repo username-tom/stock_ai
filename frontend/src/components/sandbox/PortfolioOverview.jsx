@@ -19,6 +19,8 @@ import MiniSparkline from '../dashboard/MiniSparkline'
 const BULL_COLOR = '#10b981'
 const BEAR_COLOR = '#ef4444'
 const NEUTRAL_COLOR = '#64748b'
+const EUPHORIC_COLOR = '#a855f7'
+const CRASH_COLOR = '#f97316'
 const AI_TAG_CELL_STYLES = {
   'STRONG LONG': 'text-emerald-300',
   LONG: 'text-emerald-400',
@@ -37,8 +39,10 @@ function scoreToClassification(score) {
 }
 
 function classColor(cls) {
-  if (cls === 'bullish' || cls === 'euphoric') return BULL_COLOR
-  if (cls === 'bearish' || cls === 'crash') return BEAR_COLOR
+  if (cls === 'euphoric') return EUPHORIC_COLOR
+  if (cls === 'crash') return CRASH_COLOR
+  if (cls === 'bullish') return BULL_COLOR
+  if (cls === 'bearish') return BEAR_COLOR
   return NEUTRAL_COLOR
 }
 
@@ -757,6 +761,10 @@ export default function PortfolioOverview({
                               {pmScores[pos.symbol] ? (
                                 <span className="text-xs font-semibold" style={{ color: classColor(pmScores[pos.symbol].classification) }}>
                                   {classLabel(pmScores[pos.symbol].classification)}
+                                </span>
+                              ) : managerSettings?.enabled ? (
+                                <span className="inline-flex items-center gap-1 animate-pulse">
+                                  <span className="inline-block w-10 h-2 rounded bg-slate-700" />
                                 </span>
                               ) : (
                                 <span className="text-xs text-slate-600">—</span>

@@ -1613,7 +1613,8 @@ INTRADAY_DF_TTL = 55   # seconds – just under the 60 s engine tick so each tic
 IB_INTRADAY_DF_TTL = 60
 
 async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
-                          include_pre_post: bool = False, force_yf: bool = False) -> Any:
+                          include_pre_post: bool = False, force_yf: bool = False,
+                          cache_ttl_override: float | None = None) -> Any:
     """Return a pandas DataFrame of recent OHLCV bars for *symbol*.
 
     This is a shared helper used by the sandbox engine and portfolio manager
@@ -1621,6 +1622,9 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
     INTRADAY_DF_TTL seconds so that multiple engine positions tracking the
     same symbol only trigger one Yahoo Finance request per tick cycle, and
     Yahoo rate-limits (429) are avoided.
+
+    Pass *cache_ttl_override* to accept older cached data (e.g. PM scoring
+    can tolerate 10-minute-old bars and avoids redundant YF fetches).
     """
     import pandas as pd  # optional heavy import – kept local
 
@@ -1646,7 +1650,7 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
         ib_bar_size = ib_bar_size_map.get(resolved_interval, "1 min")
 
     cache_key = f"intraday_df:{source}:{sym}:{range_}:{resolved_interval}:{'pre' if include_pre_post else 'reg'}"
-    ttl = (
+    ttl = cache_ttl_override if cache_ttl_override is not None else (
         max(IB_INTRADAY_DF_TTL, _ib_effective_hist_gap(ib_bar_size, "TRADES", not include_pre_post))
         if source == "ib"
         else INTRADAY_DF_TTL

@@ -115,6 +115,8 @@ async def _migrate(conn):
         "UPDATE sandbox_positions SET strategy_name = 'bollinger_bands' WHERE strategy_name = 'bollinger'",
         # Keep enough bars so PM RSI/MACD/SMA sentiment scoring is meaningful.
         "UPDATE portfolio_manager_settings SET sentiment_data_points = 35 WHERE sentiment_data_points IS NULL OR sentiment_data_points < 35",
+        # portfolio_manager_settings cached scores (persist between restarts for instant UI display)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN cached_scores TEXT NOT NULL DEFAULT '{}'",
     ]
     for stmt in migrations:
         try:

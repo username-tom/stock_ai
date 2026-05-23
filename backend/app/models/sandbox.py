@@ -132,4 +132,5 @@ class PortfolioManagerSettings(Base):
     pending_price_drift_cancel_pct = Column(Float, default=0.75, nullable=False)
     auto_trade_buy_price_offset_pct = Column(Float, default=0.1, nullable=False)
     auto_trade_sell_price_offset_pct = Column(Float, default=0.1, nullable=False)
+    cached_scores = Column(Text, nullable=False, server_default=text("'{}'"))
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

@@ -10,6 +10,8 @@ import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
 const BULL_COLOR = '#10b981'
 const BEAR_COLOR = '#ef4444'
 const NEUTRAL_COLOR = '#64748b'
+const EUPHORIC_COLOR = '#a855f7'
+const CRASH_COLOR = '#f97316'
 const LEARNER_COLORS = {
   'STRONG LONG': 'bg-emerald-900/25 text-emerald-300 border border-emerald-700/40',
   LONG: 'bg-emerald-900/20 text-emerald-300 border border-emerald-700/30',
@@ -28,8 +30,10 @@ function scoreToClassification(score) {
 }
 
 function pmClassColor(cls) {
-  if (cls === 'bullish' || cls === 'euphoric') return BULL_COLOR
-  if (cls === 'bearish' || cls === 'crash') return BEAR_COLOR
+  if (cls === 'euphoric') return EUPHORIC_COLOR
+  if (cls === 'crash') return CRASH_COLOR
+  if (cls === 'bullish') return BULL_COLOR
+  if (cls === 'bearish') return BEAR_COLOR
   return NEUTRAL_COLOR
 }
 
@@ -205,10 +209,11 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
             ? (pos.last_signal === 1 ? 'buy' : pos.last_signal === -1 ? 'sell' : 'hold')
             : null
           const sig = scriptSig ?? quotesignal(quote)
-          if (!pmScore && !sig) return null
+          const pmLoading = !pmScore && Boolean(managerSettings?.enabled)
+          if (!pmScore && !pmLoading && !sig) return null
           return (
             <div className="mt-1 flex flex-wrap gap-1">
-              {pmScore && (
+              {pmScore ? (
                 <div
                   className="inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium border-opacity-50"
                   style={{
@@ -220,7 +225,12 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
                 >
                   {pmClassLabel(pmScore.classification)} PM
                 </div>
-              )}
+              ) : pmLoading ? (
+                <div className="inline-flex items-center px-1.5 py-0.5 rounded border border-slate-700 bg-slate-800/40 animate-pulse gap-1">
+                  <span className="block w-8 h-2 rounded bg-slate-600/70" />
+                  <span className="block w-4 h-2 rounded bg-slate-700/70" />
+                </div>
+              ) : null}
               {sig && (
                 <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
                   {scriptSig ? '⚡ ' : ''}{SIGNAL_LABELS[sig]}
@@ -246,10 +256,11 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
               ? (pos.last_signal === 1 ? 'buy' : pos.last_signal === -1 ? 'sell' : 'hold')
               : null
             const sig = scriptSig ?? quotesignal(quote)
-            if (!pmScore && !sig) return null
+            const pmLoading = !pmScore && Boolean(managerSettings?.enabled)
+            if (!pmScore && !pmLoading && !sig) return null
             return (
               <div className="flex flex-wrap gap-1">
-                {pmScore && (
+                {pmScore ? (
                   <div
                     className="inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium border-opacity-50"
                     style={{
@@ -261,7 +272,12 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
                   >
                     {pmClassLabel(pmScore.classification)} PM
                   </div>
-                )}
+                ) : pmLoading ? (
+                  <div className="inline-flex items-center px-1.5 py-0.5 rounded border border-slate-700 bg-slate-800/40 animate-pulse gap-1">
+                    <span className="block w-8 h-2 rounded bg-slate-600/70" />
+                    <span className="block w-4 h-2 rounded bg-slate-700/70" />
+                  </div>
+                ) : null}
                 {sig && (
                   <div className={`inline-flex items-center px-1.5 py-0.5 rounded border text-xs font-medium ${SIGNAL_COLORS[sig]}`}>
                     {scriptSig ? '⚡ ' : ''}{SIGNAL_LABELS[sig]}
