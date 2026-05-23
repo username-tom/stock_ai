@@ -1,6 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
-import { getStrategies, runBacktest, runSentimentBacktest, getScripts, getBuiltinTemplates } from '../api/client'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import {
+  getStrategies,
+  runBacktest,
+  runSentimentBacktest,
+  runSandboxBacktest,
+  getScripts,
+  getBuiltinTemplates,
+  getSandboxPositions,
+  getPortfolioManagerState,
+} from '../api/client'
 import SymbolAutocomplete from './shared/SymbolAutocomplete'
 import { getReportFilename } from '../utils/reportPaths'
 import {
@@ -13,6 +22,7 @@ import {
   ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline'
 import BacktestResultsPanel from './backtest/BacktestResultsPanel'
+import SandboxResultsView from './backtest/SandboxResultsView'
 
 const WATCHLIST_KEY = 'dashboard_watchlist'
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
@@ -116,6 +126,7 @@ const DEFAULT_SENT_STRATS = {
 }
 
 export default function BacktestPanel() {
+  const qc = useQueryClient()
   const defaultEndDate = getTodayDateString()
   const defaultStartDate = getOneWeekAgoDateString(defaultEndDate)
 
@@ -245,6 +256,75 @@ export default function BacktestPanel() {
     })
   }
 
+  // ── Sandbox + PM batch backtest ─────────────────────────────────────── //
+  const [sandboxForm, setSandboxForm] = useState({
+    start_date: defaultStartDate,
+    end_date: defaultEndDate,
+    initial_capital: 10000,
+    commission: 0.005,
+    day_trade: true,
+    use_sentiment_routing: true,
+    allocation_mode: 'proportional',
+    symbols_override: '', // optional comma-separated override
+  })
+  const [sandboxResult, setSandboxResult] = useState(null)
+  const [sandboxProgress, setSandboxProgress] = useState(0)
+  const sandboxProgressRef = useRef(null)
+
+  const { data: sandboxPositionsData, isLoading: sandboxPositionsLoading } = useQuery({
+    queryKey: ['sandbox-positions'],
+    queryFn: getSandboxPositions,
+    refetchOnWindowFocus: false,
+  })
+  const { data: pmData } = useQuery({
+    queryKey: ['pm-state'],
+    queryFn: getPortfolioManagerState,
+    refetchOnWindowFocus: false,
+  })
+
+  const sandboxMutation = useMutation({
+    mutationFn: (payload) => runSandboxBacktest(payload),
+    onSuccess: (data) => {
+      clearInterval(sandboxProgressRef.current)
+      setSandboxProgress(100)
+      setTimeout(() => setSandboxProgress(0), 600)
+      setSandboxResult(data)
+      qc.invalidateQueries({ queryKey: ['reports'] })
+    },
+    onError: () => {
+      clearInterval(sandboxProgressRef.current)
+      setSandboxProgress(0)
+    },
+  })
+
+  useEffect(() => () => clearInterval(sandboxProgressRef.current), [])
+
+  const handleSandboxSubmit = (e) => {
+    e.preventDefault()
+    setSandboxProgress(0)
+    const tradingDays = estimateTradingDays(sandboxForm.start_date, sandboxForm.end_date)
+    const tickMs = Math.min(600, Math.max(80, tradingDays * 120 / 25))
+    let cur = 0
+    clearInterval(sandboxProgressRef.current)
+    sandboxProgressRef.current = setInterval(() => {
+      cur += 1
+      setSandboxProgress(Math.min(cur, 99))
+      if (cur >= 99) clearInterval(sandboxProgressRef.current)
+    }, tickMs)
+    const overrideSymbols = sandboxForm.symbols_override
+      .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+    sandboxMutation.mutate({
+      start_date: sandboxForm.start_date,
+      end_date: sandboxForm.end_date,
+      initial_capital: sandboxForm.initial_capital,
+      commission: sandboxForm.commission,
+      day_trade: sandboxForm.day_trade,
+      use_sentiment_routing: sandboxForm.use_sentiment_routing,
+      allocation_mode: sandboxForm.allocation_mode,
+      ...(overrideSymbols.length > 0 ? { symbols: overrideSymbols } : {}),
+    })
+  }
+
   const isCustomScript = form.strategy_type === CUSTOM_SCRIPT_KEY
   const isTemplate = form.strategy_type === TEMPLATE_SCRIPT_KEY
   const scripts = scriptsData?.scripts ?? []
@@ -359,6 +439,13 @@ export default function BacktestPanel() {
               className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${mode === 'sentiment' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'}`}
             >
               Advanced — Sentiment
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('sandbox')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${mode === 'sandbox' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'}`}
+            >
+              Sandbox + PM
             </button>
           </div>
         </div>
@@ -1310,6 +1397,285 @@ export default function BacktestPanel() {
             </div>
           </div>
         )}
+
+        {mode === 'sandbox' && (() => {
+          const positions = sandboxPositionsData?.positions ?? []
+          const watchlistPositions = positions.filter(p => p.is_on_watchlist !== false)
+          const pmSettings = pmData?.settings ?? {}
+          const symbolsOverride = sandboxForm.symbols_override
+            .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+          const effectiveSymbols = symbolsOverride.length > 0
+            ? symbolsOverride
+            : watchlistPositions.map(p => p.symbol)
+          const totalAllocated = watchlistPositions.reduce(
+            (s, p) => s + Math.max(0, Number(p.allocated_funds) || 0), 0
+          )
+          const previewRows = effectiveSymbols.map(sym => {
+            const pos = positions.find(p => p.symbol === sym)
+            const alloc = Math.max(0, Number(pos?.allocated_funds) || 0)
+            let capShare = 0
+            if (sandboxForm.allocation_mode === 'equal' || totalAllocated <= 0) {
+              capShare = effectiveSymbols.length
+                ? sandboxForm.initial_capital / effectiveSymbols.length
+                : 0
+            } else {
+              capShare = sandboxForm.initial_capital * (alloc / totalAllocated)
+            }
+            return {
+              symbol: sym,
+              strategy: pos?.strategy_name ?? null,
+              allocated: alloc,
+              capital: capShare,
+            }
+          })
+          const r = sandboxResult?.result ?? {}
+          const m = sandboxResult?.metrics ?? {}
+          return (
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              {/* Sandbox Config */}
+              <form onSubmit={handleSandboxSubmit} className="card space-y-4 xl:col-span-1">
+                <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider flex items-center gap-2">
+                  Sandbox + PM Backtest
+                  <span className="text-amber-400 text-xs font-normal normal-case">Watchlist Portfolio</span>
+                </h2>
+                <p className="text-xs text-slate-500 -mt-2">
+                  Runs a backtest for every symbol in the current sandbox watchlist using PM
+                  settings (stop-loss, take-profit, EOD, sentiment routing). Capital is split
+                  per the chosen allocation mode and results are aggregated.
+                </p>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="label">Start Date</label>
+                    <input
+                      className="input"
+                      type="date"
+                      value={sandboxForm.start_date}
+                      onChange={e => setSandboxForm(f => ({ ...f, start_date: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="label mb-0">End Date</label>
+                      <button
+                        type="button"
+                        className="text-xs text-emerald-400 hover:text-emerald-300"
+                        onClick={() => setSandboxForm(f => ({ ...f, end_date: getTodayDateString() }))}
+                      >
+                        Today
+                      </button>
+                    </div>
+                    <input
+                      className="input"
+                      type="date"
+                      value={sandboxForm.end_date}
+                      onChange={e => setSandboxForm(f => ({ ...f, end_date: e.target.value }))}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="label">Initial Capital ($)</label>
+                  <input
+                    className="input"
+                    type="number"
+                    value={sandboxForm.initial_capital}
+                    onChange={e => setSandboxForm(f => ({ ...f, initial_capital: parseFloat(e.target.value) || 0 }))}
+                  />
+                </div>
+
+                <div>
+                  <label className="label">Commission</label>
+                  <select
+                    className="input"
+                    value={String(sandboxForm.commission)}
+                    onChange={e => setSandboxForm(f => ({ ...f, commission: parseFloat(e.target.value) }))}
+                  >
+                    {COMMISSION_PRESETS.filter(p => p.value !== null).map(p => (
+                      <option key={p.label} value={String(p.value)}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="label">Allocation Mode</label>
+                  <select
+                    className="input"
+                    value={sandboxForm.allocation_mode}
+                    onChange={e => setSandboxForm(f => ({ ...f, allocation_mode: e.target.value }))}
+                  >
+                    <option value="proportional">Proportional to sandbox allocated_funds</option>
+                    <option value="equal">Equal split across symbols</option>
+                  </select>
+                </div>
+
+                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-3">
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <div className="relative">
+                      <input
+                        type="checkbox"
+                        className="sr-only peer"
+                        checked={sandboxForm.use_sentiment_routing}
+                        onChange={e => setSandboxForm(f => ({ ...f, use_sentiment_routing: e.target.checked }))}
+                      />
+                      <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-amber-500 transition-colors" />
+                      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-slate-200">
+                        {sandboxForm.use_sentiment_routing ? 'Sentiment-Routed Strategies' : 'Per-Position Strategy'}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {sandboxForm.use_sentiment_routing
+                          ? "Use PM's market sentiment strategy map (5 buckets)"
+                          : 'Use each sandbox position\'s assigned strategy_name'}
+                      </div>
+                    </div>
+                  </label>
+
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <div className="relative">
+                      <input
+                        type="checkbox"
+                        className="sr-only peer"
+                        checked={sandboxForm.day_trade}
+                        onChange={e => setSandboxForm(f => ({ ...f, day_trade: e.target.checked }))}
+                      />
+                      <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-amber-500 transition-colors" />
+                      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-slate-200">Day Trade Mode</div>
+                      <div className="text-xs text-slate-500">Use intraday data when available</div>
+                    </div>
+                  </label>
+                </div>
+
+                <div>
+                  <label className="label">Override Symbols (optional)</label>
+                  <input
+                    className="input"
+                    type="text"
+                    placeholder="e.g. AAPL, MSFT, NVDA"
+                    value={sandboxForm.symbols_override}
+                    onChange={e => setSandboxForm(f => ({ ...f, symbols_override: e.target.value }))}
+                  />
+                  <p className="text-xs text-slate-500 mt-1">
+                    Leave blank to use all sandbox watchlist symbols
+                    {watchlistPositions.length > 0 ? ` (${watchlistPositions.length} on watchlist)` : ''}.
+                  </p>
+                </div>
+
+                {/* PM settings preview */}
+                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-1.5">
+                  <div className="text-xs text-slate-500 uppercase tracking-wider">Active PM Settings</div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-400">
+                    <span>Stop Loss</span>
+                    <span className="font-mono text-slate-200">{Number(pmSettings.stop_loss_pct ?? 0).toFixed(2)}%</span>
+                    <span>Take Profit</span>
+                    <span className="font-mono text-slate-200">{Number(pmSettings.take_profit_pct ?? 0).toFixed(2)}%</span>
+                    <span>Hold Overnight</span>
+                    <span className="font-mono text-slate-200">{pmSettings.hold_positions_overnight ? 'Yes' : 'No'}</span>
+                    <span>EOD Window</span>
+                    <span className="font-mono text-slate-200">{pmSettings.eod_sell_window_minutes ?? 30}m</span>
+                    <span>Sentiment Warmup</span>
+                    <span className="font-mono text-slate-200">{pmSettings.sentiment_data_points ?? 35}</span>
+                  </div>
+                </div>
+
+                {/* Allocation preview */}
+                {previewRows.length > 0 && (
+                  <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30">
+                    <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">
+                      Capital Split ({previewRows.length} symbols)
+                    </div>
+                    <div className="max-h-40 overflow-y-auto space-y-0.5 text-xs">
+                      {previewRows.map(row => (
+                        <div key={row.symbol} className="grid grid-cols-3 gap-2 py-0.5 border-b border-dark-700/40">
+                          <span className="font-semibold text-slate-200">{row.symbol}</span>
+                          <span className="text-slate-500 truncate">{row.strategy ?? '—'}</span>
+                          <span className="font-mono text-right text-amber-300">${row.capital.toFixed(0)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {sandboxPositionsLoading && (
+                  <div className="text-xs text-slate-500">Loading sandbox positions…</div>
+                )}
+
+                {/* Progress bar */}
+                {sandboxMutation.isPending && (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs text-slate-400">
+                      <span>Running per-symbol backtests…</span>
+                      <span>{sandboxProgress}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-dark-700 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full transition-all duration-200 ease-linear"
+                        style={{ width: `${sandboxProgress}%`, background: 'linear-gradient(90deg,#f59e0b,#fbbf24)' }} />
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="btn-primary w-full justify-center"
+                  disabled={sandboxMutation.isPending || effectiveSymbols.length === 0}
+                  style={sandboxMutation.isPending ? {} : { background: 'linear-gradient(90deg,#d97706,#f59e0b)' }}
+                >
+                  {sandboxMutation.isPending ? (
+                    <><ArrowPathIcon className="h-4 w-4 animate-spin" />Running…</>
+                  ) : (
+                    <><ArrowPathIcon className="h-4 w-4" />Run Sandbox Backtest</>
+                  )}
+                </button>
+
+                {effectiveSymbols.length === 0 && !sandboxPositionsLoading && (
+                  <div className="text-xs text-amber-400/80">
+                    No watchlist symbols found. Add some in the Sandbox panel or enter overrides above.
+                  </div>
+                )}
+
+                {sandboxMutation.isError && (
+                  <div className="flex items-start gap-2 p-3 bg-red-900/20 border border-red-700/30 rounded-lg text-sm text-red-400">
+                    <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 shrink-0" />
+                    {sandboxMutation.error?.response?.data?.detail || sandboxMutation.error?.message || 'Unknown error'}
+                  </div>
+                )}
+                {sandboxMutation.isSuccess && (
+                  <div className="flex items-center gap-2 p-3 bg-amber-900/20 border border-amber-700/30 rounded-lg text-sm text-amber-300">
+                    <CheckCircleIcon className="h-4 w-4" />
+                    Sandbox backtest complete — report saved.
+                  </div>
+                )}
+              </form>
+
+              {/* Sandbox Results */}
+              <div className="xl:col-span-2 space-y-5">
+                {sandboxResult ? (
+                  <SandboxResultsView result={r} metrics={m} />
+                ) : sandboxMutation.isPending ? (
+                  <div className="card flex flex-col items-center justify-center h-64 gap-3 text-slate-400">
+                    <ArrowPathIcon className="h-8 w-8 animate-spin text-amber-400" />
+                    <p className="text-sm">Running sandbox backtest…</p>
+                    <p className="text-xs text-slate-600">Backtesting {effectiveSymbols.length} symbol(s) in parallel</p>
+                  </div>
+                ) : (
+                  <div className="card flex flex-col items-center justify-center h-64 text-slate-500 gap-2">
+                    <ArrowPathIcon className="h-10 w-10 text-slate-600 mb-1" />
+                    <p className="font-medium">Configure and run a sandbox backtest</p>
+                    <p className="text-xs text-slate-600 text-center max-w-xs">
+                      Backtests every symbol in your sandbox watchlist using current PM
+                      settings. Capital is split across symbols and results are aggregated.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+        })()}
     </div>
   )
 }

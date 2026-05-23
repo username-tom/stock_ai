@@ -27,6 +27,7 @@ export const getBulkExternalSentiment = (symbols, force = false) =>
 export const getStrategies = () => api.get('/backtest/strategies').then(r => r.data)
 export const runBacktest = (payload) => api.post('/backtest/run', payload).then(r => r.data)
 export const runSentimentBacktest = (payload) => api.post('/backtest/run-sentiment', payload).then(r => r.data)
+export const runSandboxBacktest = (payload) => api.post('/backtest/run-sandbox', payload).then(r => r.data)
 export const getReports = () => api.get('/backtest/reports').then(r => r.data)
 export const getReport = (id) => api.get(`/backtest/reports/${id}`).then(r => r.data)
 export const deleteReport = (id) => api.delete(`/backtest/reports/${id}`).then(r => r.data)

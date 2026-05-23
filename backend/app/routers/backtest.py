@@ -400,6 +400,490 @@ async def run_backtest_endpoint(
     }
 
 
+# ── Sandbox + Portfolio Manager batch backtest ───────────────────────────── #
+
+class SandboxBacktestRequest(BaseModel):
+    start_date: str = Field(..., example="2024-01-01")
+    end_date: str = Field(..., example="2024-12-31")
+    initial_capital: float = Field(default=10000.0, ge=1000)
+    commission: float = Field(default=0.001, ge=0, le=0.05)
+    data_source: DataSource = Field(default="auto")
+    day_trade: bool = Field(default=True)
+    symbols: list[str] | None = Field(
+        default=None,
+        description="Override watchlist; if omitted, uses all sandbox watchlist symbols.",
+    )
+    use_sentiment_routing: bool = Field(
+        default=True,
+        description=(
+            "When True, run each symbol with sentiment-driven strategy switching using PM's "
+            "market_sentiment_strategies map. When False, use the strategy_name assigned to "
+            "each sandbox position (falling back to sma_crossover)."
+        ),
+    )
+    allocation_mode: str = Field(
+        default="proportional",
+        description="'proportional' splits capital by allocated_funds; 'equal' splits evenly.",
+    )
+
+
+def _build_sandbox_activity_log(per_symbol: list[dict]) -> list[dict]:
+    """Flatten per-symbol trades into a chronological activity log.
+
+    Each completed trade produces a BUY and SELL entry so the log mirrors what
+    a trader would see in an order history view.
+    """
+    events: list[dict] = []
+    for entry in per_symbol:
+        sym = entry.get("symbol")
+        strat = entry.get("strategy")
+        for t in entry.get("trades") or []:
+            qty = t.get("quantity")
+            entry_date = t.get("entry_date")
+            exit_date = t.get("exit_date")
+            entry_price = t.get("entry_price")
+            exit_price = t.get("exit_price")
+            pnl = t.get("pnl")
+            commission = t.get("commission") or 0.0
+            entry_strategy = t.get("entry_strategy") or strat
+            exit_reason = t.get("exit_reason") or ""
+            if entry_date is not None:
+                events.append({
+                    "timestamp": entry_date,
+                    "symbol": sym,
+                    "side": "BUY",
+                    "price": entry_price,
+                    "quantity": qty,
+                    "value": (entry_price or 0) * (qty or 0),
+                    "strategy": entry_strategy,
+                    "pnl": None,
+                    "exit_reason": None,
+                    "commission": commission,
+                })
+            if exit_date is not None:
+                events.append({
+                    "timestamp": exit_date,
+                    "symbol": sym,
+                    "side": "SELL",
+                    "price": exit_price,
+                    "quantity": qty,
+                    "value": (exit_price or 0) * (qty or 0),
+                    "strategy": entry_strategy,
+                    "pnl": pnl,
+                    "exit_reason": exit_reason,
+                    "commission": commission,
+                })
+    events.sort(key=lambda e: (str(e.get("timestamp") or ""), e.get("symbol") or ""))
+    return events
+
+
+@router.post("/run-sandbox")
+async def run_sandbox_backtest_endpoint(
+    req: SandboxBacktestRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Backtest the current sandbox watchlist using PM settings.
+
+    Splits ``initial_capital`` across watchlist symbols (proportional to each
+    position's ``allocated_funds`` or evenly), then runs an individual backtest
+    per symbol with PM-derived risk settings. Returns aggregate metrics, a
+    combined equity curve, and per-symbol results.
+    """
+    from app.models.sandbox import SandboxPosition
+    from app.services.portfolio_manager import get_manager_settings
+    from app.services.backtester import run_sentiment_backtest as _run_sent
+
+    if req.allocation_mode not in ("proportional", "equal"):
+        raise HTTPException(status_code=400, detail="allocation_mode must be 'proportional' or 'equal'.")
+
+    # Pull watchlist + per-symbol strategy assignments from sandbox.
+    rows = (await db.execute(select(SandboxPosition))).scalars().all()
+    by_symbol = {p.symbol.upper(): p for p in rows if p.symbol}
+    if req.symbols:
+        symbols = [s.strip().upper() for s in req.symbols if s.strip()]
+    else:
+        symbols = sorted(
+            p.symbol.upper() for p in rows
+            if p.symbol and bool(getattr(p, "is_on_watchlist", True))
+        )
+    if not symbols:
+        raise HTTPException(
+            status_code=400,
+            detail="No watchlist symbols found in sandbox. Add positions or pass `symbols`.",
+        )
+
+    pm = get_manager_settings()
+    sentiment_strategies = dict(pm.get("market_sentiment_strategies") or {
+        "crash": "rsi", "bearish": "macd", "neutral": "bollinger_bands",
+        "bullish": "sma_crossover", "euphoric": "rsi",
+    })
+    stop_loss_pct = float(pm.get("stop_loss_pct") or 0.0)
+    take_profit_pct = float(pm.get("take_profit_pct") or 0.0)
+    hold_overnight = bool(pm.get("hold_positions_overnight", True))
+    eod_window = int(pm.get("eod_sell_window_minutes") or 30)
+    sentiment_warmup = int(pm.get("sentiment_data_points") or 35)
+
+    # Capital split.
+    if req.allocation_mode == "proportional":
+        weights = {
+            s: max(0.0, float(getattr(by_symbol.get(s), "allocated_funds", 0.0) or 0.0))
+            for s in symbols
+        }
+        total_w = sum(weights.values())
+        if total_w <= 0:
+            per_symbol_capital = {s: req.initial_capital / len(symbols) for s in symbols}
+        else:
+            per_symbol_capital = {
+                s: round(req.initial_capital * (weights[s] / total_w), 2) for s in symbols
+            }
+    else:
+        per_symbol_capital = {s: req.initial_capital / len(symbols) for s in symbols}
+
+    # Pre-load any custom scripts referenced by per-symbol strategies or sentiment map.
+    needed_script_ids: set[int] = set()
+    template_filenames: dict[str, str] = {}  # filename → code
+
+    def _classify_strategy(name: str | None) -> tuple[str, int | None, str | None]:
+        """Return (kind, script_id, template_filename). kind ∈ {builtin, custom, template}."""
+        if not name:
+            return ("builtin", None, None)
+        if name.startswith("custom:"):
+            try:
+                return ("custom", int(name[7:]), None)
+            except ValueError:
+                return ("builtin", None, None)
+        if name.startswith("template:"):
+            return ("template", None, name[9:])
+        return ("builtin", None, None)
+
+    if not req.use_sentiment_routing:
+        for s in symbols:
+            kind, sid, tfn = _classify_strategy(getattr(by_symbol.get(s), "strategy_name", None))
+            if kind == "custom" and sid is not None:
+                needed_script_ids.add(sid)
+            elif kind == "template" and tfn:
+                template_filenames[tfn] = ""
+    else:
+        for stype in sentiment_strategies.values():
+            if isinstance(stype, str) and stype.startswith("custom:"):
+                try:
+                    needed_script_ids.add(int(stype[7:]))
+                except ValueError:
+                    pass
+
+    custom_scripts: dict[int, str] = {}
+    if needed_script_ids:
+        res = await db.execute(
+            select(CustomScript).where(CustomScript.id.in_(needed_script_ids))
+        )
+        for row in res.scalars().all():
+            custom_scripts[row.id] = row.script_code
+
+    from pathlib import Path
+    _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+    for fn in list(template_filenames.keys()):
+        if "/" in fn or "\\" in fn or ".." in fn:
+            template_filenames.pop(fn, None)
+            continue
+        path = _TEMPLATES_DIR / fn
+        if path.exists():
+            template_filenames[fn] = path.read_text(encoding="utf-8")
+        else:
+            template_filenames.pop(fn, None)
+
+    # Run all per-symbol backtests in parallel.
+    async def _run_one(sym: str) -> dict:
+        cap = per_symbol_capital.get(sym, 0.0)
+        if cap <= 0:
+            return {"symbol": sym, "skipped": True, "reason": "no capital allocated"}
+        try:
+            if req.use_sentiment_routing:
+                res = await asyncio.to_thread(
+                    _run_sent,
+                    symbol=sym,
+                    start_date=req.start_date,
+                    end_date=req.end_date,
+                    initial_capital=cap,
+                    commission=req.commission,
+                    data_source=req.data_source,
+                    day_trade=req.day_trade,
+                    sentiment_strategies=sentiment_strategies,
+                    sentiment_warmup=sentiment_warmup,
+                    stop_loss_pct=stop_loss_pct,
+                    take_profit_pct=take_profit_pct,
+                    hold_positions_overnight=hold_overnight,
+                    eod_sell_window_minutes=eod_window,
+                    custom_scripts=custom_scripts or None,
+                )
+            else:
+                kind, sid, tfn = _classify_strategy(
+                    getattr(by_symbol.get(sym), "strategy_name", None)
+                )
+                script_code: str | None = None
+                eff_type = "sma_crossover"
+                if kind == "custom" and sid is not None and sid in custom_scripts:
+                    script_code = custom_scripts[sid]
+                    eff_type = "custom_script"
+                elif kind == "template" and tfn and tfn in template_filenames:
+                    script_code = template_filenames[tfn]
+                    eff_type = f"template:{tfn}"
+                elif kind == "builtin":
+                    raw = getattr(by_symbol.get(sym), "strategy_name", None) or "sma_crossover"
+                    eff_type = raw
+                res = await asyncio.to_thread(
+                    run_backtest,
+                    symbol=sym,
+                    strategy_type=eff_type,
+                    start_date=req.start_date,
+                    end_date=req.end_date,
+                    initial_capital=cap,
+                    commission=req.commission,
+                    script_code=script_code,
+                    data_source=req.data_source,
+                    day_trade=req.day_trade,
+                    hold_positions_overnight=hold_overnight,
+                    eod_sell_window_minutes=eod_window,
+                )
+            return {"symbol": sym, "result": res}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Sandbox backtest failed for %s", sym)
+            return {"symbol": sym, "error": str(exc), "initial_capital": cap}
+
+    per_results = await asyncio.gather(*[_run_one(s) for s in symbols])
+
+    # Aggregate per-symbol metrics.
+    per_symbol_summary: list[dict] = []
+    aggregate_equity: dict[str, float] = {}
+    aggregate_initial_remaining = 0.0  # capital for symbols that errored / had no data
+    total_trades = 0
+    aggregate_final = 0.0
+    all_trade_pnls: list[float] = []
+    wins = 0
+    closed_trades = 0
+
+    for entry in per_results:
+        sym = entry["symbol"]
+        cap = per_symbol_capital.get(sym, 0.0)
+        if entry.get("error") or entry.get("skipped"):
+            per_symbol_summary.append({
+                "symbol": sym,
+                "initial_capital": cap,
+                "final_value": cap,
+                "total_return_pct": 0.0,
+                "total_trades": 0,
+                "win_rate_pct": 0.0,
+                "strategy": getattr(by_symbol.get(sym), "strategy_name", None),
+                "error": entry.get("error") or entry.get("reason"),
+            })
+            aggregate_initial_remaining += cap
+            aggregate_final += cap
+            continue
+        res = entry["result"]
+        m = res["metrics"]
+        raw_ohlcv = res.get("ohlcv") or []
+        # Downsample OHLCV to keep payload reasonable across many symbols.
+        MAX_OHLCV_POINTS = 800
+        if len(raw_ohlcv) > MAX_OHLCV_POINTS:
+            step = max(1, len(raw_ohlcv) // MAX_OHLCV_POINTS)
+            ohlcv_out = raw_ohlcv[::step]
+            # Always keep the last bar so the chart ends at end_date.
+            if raw_ohlcv and ohlcv_out[-1] is not raw_ohlcv[-1]:
+                ohlcv_out.append(raw_ohlcv[-1])
+        else:
+            ohlcv_out = raw_ohlcv
+        per_symbol_summary.append({
+            "symbol": sym,
+            "initial_capital": cap,
+            "final_value": m.get("final_value"),
+            "total_return_pct": m.get("total_return_pct"),
+            "sharpe_ratio": m.get("sharpe_ratio"),
+            "max_drawdown_pct": m.get("max_drawdown_pct"),
+            "win_rate_pct": m.get("win_rate_pct"),
+            "total_trades": m.get("total_trades"),
+            "strategy": res.get("strategy_type"),
+            "interval": res.get("interval"),
+            "trades": res.get("trades", []),
+            "ohlcv": ohlcv_out,
+            "equity_curve": res.get("equity_curve", []),
+        })
+        total_trades += int(m.get("total_trades") or 0)
+        aggregate_final += float(m.get("final_value") or cap)
+        for t in res.get("trades", []):
+            pnl = t.get("pnl")
+            if pnl is None:
+                continue
+            try:
+                pv = float(pnl)
+            except (TypeError, ValueError):
+                continue
+            all_trade_pnls.append(pv)
+            closed_trades += 1
+            if pv > 0:
+                wins += 1
+        for point in res.get("equity_curve", []):
+            d = point.get("date")
+            v = point.get("value")
+            if d is None or v is None:
+                continue
+            aggregate_equity[d] = aggregate_equity.get(d, 0.0) + float(v)
+
+    # Add baseline (errored / skipped symbol capital) to every aggregate point so totals balance.
+    if aggregate_initial_remaining > 0 and aggregate_equity:
+        for k in list(aggregate_equity.keys()):
+            aggregate_equity[k] += aggregate_initial_remaining
+
+    equity_curve = [
+        {"date": d, "value": round(v, 2)}
+        for d, v in sorted(aggregate_equity.items())
+    ]
+
+    total_return_pct = (
+        ((aggregate_final - req.initial_capital) / req.initial_capital * 100.0)
+        if req.initial_capital > 0 else 0.0
+    )
+    win_rate_pct = (wins / closed_trades * 100.0) if closed_trades else 0.0
+
+    # Aggregate risk metrics computed from the portfolio-level equity curve.
+    # Annualisation is calendar-time (CAGR) so the portfolio is treated like an
+    # ETF / NAV series rather than a bar-count based single-symbol backtest.
+    # This avoids inflating returns when the backtest window is short or when
+    # the equity curve has gaps for symbols that didn't trade every day.
+    annualized_return_pct: float | None = None
+    sharpe_ratio: float | None = None
+    max_drawdown_pct: float | None = None
+    if equity_curve:
+        import math as _math
+        values = [float(p["value"]) for p in equity_curve]
+        n_bars = len(values)
+        bars_per_year = 252.0
+
+        # Calendar-day span for CAGR-style annualisation.
+        cal_days: float = 0.0
+        try:
+            _s = datetime.strptime(req.start_date, "%Y-%m-%d")
+            _e = datetime.strptime(req.end_date, "%Y-%m-%d")
+            cal_days = max((_e - _s).days, 0)
+        except (ValueError, TypeError):
+            cal_days = 0.0
+
+        # Annualised return (CAGR): (final/initial) ^ (365.25 / calendar_days) - 1
+        if (
+            req.initial_capital > 0
+            and aggregate_final > 0
+            and cal_days > 0
+        ):
+            n_years = cal_days / 365.25
+            if n_years > 0:
+                annualized_return_pct = round(
+                    ((aggregate_final / req.initial_capital) ** (1.0 / n_years) - 1.0) * 100.0,
+                    2,
+                )
+        # Sharpe ratio (rf=0), still computed per equity-curve bar (assumed daily).
+        if n_bars > 1:
+            rets = [
+                (values[i] - values[i - 1]) / values[i - 1]
+                for i in range(1, n_bars)
+                if values[i - 1] > 0
+            ]
+            if len(rets) > 1:
+                mean_r = sum(rets) / len(rets)
+                var_r = sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1)
+                std_r = _math.sqrt(var_r)
+                if std_r > 0:
+                    sharpe_ratio = round((mean_r / std_r) * _math.sqrt(bars_per_year), 2)
+                else:
+                    sharpe_ratio = 0.0
+        # Max drawdown
+        peak = values[0]
+        worst = 0.0
+        for v in values:
+            if v > peak:
+                peak = v
+            if peak > 0:
+                dd = (v - peak) / peak
+                if dd < worst:
+                    worst = dd
+        max_drawdown_pct = round(worst * 100.0, 2)
+
+    metrics = {
+        "final_value": round(aggregate_final, 2),
+        "total_return_pct": round(total_return_pct, 4),
+        "annualized_return_pct": annualized_return_pct,
+        "sharpe_ratio": sharpe_ratio,
+        "max_drawdown_pct": max_drawdown_pct,
+        "win_rate_pct": round(win_rate_pct, 2),
+        "total_trades": total_trades,
+        "symbols_run": sum(1 for r in per_results if not r.get("error") and not r.get("skipped")),
+        "symbols_failed": sum(1 for r in per_results if r.get("error")),
+    }
+
+    # Persist a summary report.
+    name = (
+        f"SANDBOX_{'sentiment' if req.use_sentiment_routing else 'positions'}"
+        f"_{req.start_date}_to_{req.end_date}"
+    )
+    parameters_payload = {
+        "symbols": symbols,
+        "use_sentiment_routing": req.use_sentiment_routing,
+        "allocation_mode": req.allocation_mode,
+        "pm_settings": {
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "hold_positions_overnight": hold_overnight,
+            "eod_sell_window_minutes": eod_window,
+            "sentiment_strategies": sentiment_strategies,
+            "sentiment_warmup": sentiment_warmup,
+        },
+        "per_symbol_capital": per_symbol_capital,
+    }
+    result_data_payload = {
+        "equity_curve": equity_curve,
+        "trades": [],
+        "ohlcv": [],
+        "per_symbol": per_symbol_summary,
+        "activity_log": _build_sandbox_activity_log(per_symbol_summary),
+        "initial_capital": req.initial_capital,
+        "per_symbol_capital": per_symbol_capital,
+        "use_sentiment_routing": req.use_sentiment_routing,
+        "pm_settings": parameters_payload["pm_settings"],
+    }
+    report = BacktestReport(
+        name=name,
+        symbol=",".join(symbols)[:20] or "SANDBOX",
+        strategy_type="sandbox_portfolio",
+        parameters=parameters_payload,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        initial_capital=req.initial_capital,
+        final_value=metrics["final_value"],
+        total_return_pct=metrics["total_return_pct"],
+        annualized_return_pct=metrics["annualized_return_pct"],
+        sharpe_ratio=metrics["sharpe_ratio"],
+        max_drawdown_pct=metrics["max_drawdown_pct"],
+        win_rate_pct=metrics["win_rate_pct"],
+        total_trades=metrics["total_trades"],
+        result_data=result_data_payload,
+    )
+    db.add(report)
+    await db.commit()
+    await db.refresh(report)
+
+    return {
+        "id": report.id,
+        "name": name,
+        "metrics": metrics,
+        "result": {
+            "equity_curve": equity_curve,
+            "per_symbol": per_symbol_summary,
+            "initial_capital": req.initial_capital,
+            "per_symbol_capital": per_symbol_capital,
+            "pm_settings": parameters_payload["pm_settings"],
+            "use_sentiment_routing": req.use_sentiment_routing,
+            "activity_log": result_data_payload["activity_log"],
+        },
+    }
+
+
 @router.get("/reports")
 async def list_reports(db: AsyncSession = Depends(get_db)):
     """List all saved backtest reports (summary only)."""

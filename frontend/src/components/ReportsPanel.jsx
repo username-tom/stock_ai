@@ -4,12 +4,14 @@ import { useLocation } from 'react-router-dom'
 import { getReports, getReport, deleteReport } from '../api/client'
 import EquityChart from './charts/EquityChart'
 import SubplotChart from './charts/SubplotChart'
+import SandboxResultsView from './backtest/SandboxResultsView'
 import { getReportFilename } from '../utils/reportPaths'
 import {
   DocumentChartBarIcon,
   TrashIcon,
   ArrowTopRightOnSquareIcon,
   ChevronRightIcon,
+  ChevronLeftIcon,
   ArrowDownTrayIcon,
   CodeBracketIcon,
   ChevronDownIcon,
@@ -136,6 +138,7 @@ export default function ReportsPanel() {
   const [selected, setSelected] = useState(null)
   const [scriptOpen, setScriptOpen] = useState(false)
   const [search, setSearch] = useState('')
+  const [listCollapsed, setListCollapsed] = useState(false)
 
   const {
     data: listData,
@@ -186,15 +189,36 @@ export default function ReportsPanel() {
   const advancedSettings = extractAdvancedSentimentSettings(detail)
 
   return (
-    <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-100">Reports</h1>
-        <p className="text-sm text-slate-400 mt-0.5">Saved backtest reports</p>
+    <div className="p-3 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-slate-100">Reports</h1>
+          <p className="text-xs text-slate-500">Saved backtest reports</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setListCollapsed(v => !v)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-300 bg-dark-800 hover:bg-dark-700 border border-dark-500 rounded-md transition-colors"
+          title={listCollapsed ? 'Show report list' : 'Hide report list'}
+        >
+          {listCollapsed ? (
+            <>
+              <ChevronRightIcon className="h-3.5 w-3.5" />
+              Show list ({filtered.length})
+            </>
+          ) : (
+            <>
+              <ChevronLeftIcon className="h-3.5 w-3.5" />
+              Hide list
+            </>
+          )}
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <div className={listCollapsed ? 'block' : 'grid grid-cols-1 xl:grid-cols-4 gap-3'}>
         {/* List */}
-        <div className="card xl:col-span-1 space-y-2 max-h-[80vh] overflow-y-auto">
+        {!listCollapsed && (
+        <div className="card xl:col-span-1 space-y-2 max-h-[85vh] overflow-y-auto p-3">
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">
             {filtered.length}{q ? ` of ${reports.length}` : ''} Report{reports.length !== 1 ? 's' : ''}
           </h2>
@@ -233,7 +257,7 @@ export default function ReportsPanel() {
           {filtered.map(r => (
             <button
               key={r.id}
-              onClick={() => { setSelected(r.id); setScriptOpen(false) }}
+              onClick={() => { setSelected(r.id); setScriptOpen(false); setListCollapsed(true) }}
               className={`w-full text-left p-3 rounded-lg border transition-all ${
                 selected === r.id
                   ? 'border-emerald-600/50 bg-emerald-600/10'
@@ -257,15 +281,20 @@ export default function ReportsPanel() {
             </button>
           ))}
         </div>
+        )}
 
         {/* Detail */}
-        <div className="xl:col-span-2 space-y-5">
+        <div className={listCollapsed ? 'space-y-3' : 'xl:col-span-3 space-y-3'}>
           {selected && detail && !detailLoading ? (
             <>
               <div className="card">
                 <div className="flex items-start justify-between mb-4">
                   <div>
-                    <h2 className="font-bold text-lg text-slate-100">{detail.symbol} — {detail.strategy_type}</h2>
+                    <h2 className="font-bold text-lg text-slate-100">
+                      {detail.strategy_type === 'sandbox_portfolio'
+                        ? `Sandbox Portfolio — ${(detail.result_data?.per_symbol?.length ?? 0)} symbols`
+                        : `${detail.symbol} — ${detail.strategy_type}`}
+                    </h2>
                     <p className="text-sm text-slate-400">{detail.start_date} → {detail.end_date}</p>
                   </div>
                   <div className="flex gap-2">
@@ -388,8 +417,17 @@ export default function ReportsPanel() {
                 </div>
               )}
 
+              {/* Sandbox-portfolio: dedicated multi-symbol view (activity log, per-symbol
+                  charts with buy/sell markers, realized equity curve) */}
+              {detail.strategy_type === 'sandbox_portfolio' && (
+                <SandboxResultsView
+                  result={detail.result_data ?? {}}
+                  metrics={detail.metrics ?? {}}
+                />
+              )}
+
               {/* Equity curve */}
-              {detail.result_data?.equity_curve?.length > 0 && (
+              {detail.strategy_type !== 'sandbox_portfolio' && detail.result_data?.equity_curve?.length > 0 && (
                 <div className="card">
                   <h3 className="font-medium text-slate-200 mb-4">Equity Curve</h3>
                   <EquityChart
@@ -400,7 +438,7 @@ export default function ReportsPanel() {
                 </div>
               )}
 
-              {reportOhlcvWithSignals.length > 0 && (
+              {detail.strategy_type !== 'sandbox_portfolio' && reportOhlcvWithSignals.length > 0 && (
                 <div className="card">
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="font-medium text-slate-200">Price Chart</h3>
@@ -411,7 +449,7 @@ export default function ReportsPanel() {
               )}
 
               {/* Trades */}
-              {detail.result_data?.trades?.length > 0 && (
+              {detail.strategy_type !== 'sandbox_portfolio' && detail.result_data?.trades?.length > 0 && (
                 <div className="card">
                   <h3 className="font-medium text-slate-200 mb-3">
                     Trade Log ({detail.result_data.trades.length} trades)
