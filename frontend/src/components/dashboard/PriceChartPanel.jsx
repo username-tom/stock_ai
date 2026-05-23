@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { BriefcaseIcon } from '@heroicons/react/24/outline'
-import SubplotChart from '../charts/SubplotChart'
+import SubplotChart, { SharedPriceTooltip } from '../charts/SubplotChart'
 import CandlestickChart from '../charts/CandlestickChart'
 
 function ChartSkeleton() {
@@ -100,15 +100,25 @@ export default function PriceChartPanel({
   isInWatchlist = false,
 }) {
   const navigate = useNavigate()
+  const chartAreaRef = useRef(null)
   const [syncedViewWindow, setSyncedViewWindow] = useState({ startRatio: 0, endRatio: 1 })
   const [syncedHoverState, setSyncedHoverState] = useState(null)
+  const [hoverPoint, setHoverPoint] = useState(null)
+  const [hoverCursorX, setHoverCursorX] = useState(null)
 
   useEffect(() => {
     setSyncedViewWindow({ startRatio: 0, endRatio: 1 })
     setSyncedHoverState(null)
+    setHoverPoint(null)
+    setHoverCursorX(null)
   }, [chartSymbol, chartPeriod, chartType, histData?.data?.length])
 
   const isCandlestick = chartType === 'candles'
+  const hoverChartX = hoverPoint?.__chartX
+  const effectiveHoverX = Number.isFinite(hoverCursorX) ? hoverCursorX : hoverChartX
+  const shouldPlaceTooltipRight = Number.isFinite(effectiveHoverX)
+    ? effectiveHoverX < 360
+    : false
   const ibTelemetry = histData?.ib_telemetry ?? quoteTelemetry
   const effectiveGap = ibTelemetry?.effective_request_gap_seconds
   const pacingReason = ibTelemetry?.last_pacing_error
@@ -207,10 +217,27 @@ export default function PriceChartPanel({
           </button>
         ))}
       </div>
-      {histLoading ? (
-        <ChartSkeleton />
-      ) : isCandlestick ? (
-        <div className="space-y-1">
+      <div
+        ref={chartAreaRef}
+        className="relative"
+        onMouseMove={(event) => {
+          const rect = chartAreaRef.current?.getBoundingClientRect()
+          if (!rect) return
+          setHoverCursorX(event.clientX - rect.left)
+        }}
+        onMouseLeave={() => setHoverCursorX(null)}
+      >
+        {hoverPoint && (
+          <div
+            className={`pointer-events-none absolute top-0 z-20 pb-2 ${shouldPlaceTooltipRight ? 'right-3' : 'left-3'}`}
+          >
+            <SharedPriceTooltip dataPoint={hoverPoint} label={hoverPoint.date} prevClose={chartPrevClose} indicators={indicators} />
+          </div>
+        )}
+        {histLoading ? (
+          <ChartSkeleton />
+        ) : isCandlestick ? (
+          <div className="space-y-1">
           <CandlestickChart
             data={histData?.data ?? []}
             warmupData={warmupData ?? undefined}
@@ -222,6 +249,8 @@ export default function PriceChartPanel({
             onViewWindowChange={setSyncedViewWindow}
             hoverState={syncedHoverState}
             onHoverStateChange={setSyncedHoverState}
+            onHoverPointChange={setHoverPoint}
+            showSharedHoverTooltip={false}
           />
           <SubplotChart
             data={histData?.data ?? []}
@@ -234,20 +263,25 @@ export default function PriceChartPanel({
             onViewWindowChange={setSyncedViewWindow}
             hoverState={syncedHoverState}
             onHoverStateChange={setSyncedHoverState}
+            onHoverPointChange={setHoverPoint}
+            showSharedHoverTooltip={false}
           />
-        </div>
-      ) : (
-        <SubplotChart
-          data={histData?.data ?? []}
-          warmupData={warmupData ?? undefined}
-          height={220}
-          indicators={indicators}
-          period={chartPeriod}
-          prevClose={chartPrevClose}
-          hoverState={syncedHoverState}
-          onHoverStateChange={setSyncedHoverState}
-        />
-      )}
+          </div>
+        ) : (
+          <SubplotChart
+            data={histData?.data ?? []}
+            warmupData={warmupData ?? undefined}
+            height={220}
+            indicators={indicators}
+            period={chartPeriod}
+            prevClose={chartPrevClose}
+            hoverState={syncedHoverState}
+            onHoverStateChange={setSyncedHoverState}
+            onHoverPointChange={setHoverPoint}
+            showSharedHoverTooltip={false}
+          />
+        )}
+      </div>
     </div>
   )
 }

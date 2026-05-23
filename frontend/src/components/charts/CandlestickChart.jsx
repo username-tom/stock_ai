@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useCallback, useMemo, Component } from 'react'
+import { useRef, useState, useEffect, useCallback, Component } from 'react'
 import { enrichData, enrichDataWithWarmup } from './indicators'
 
 const BB_UPPER = '#60a5fa'
@@ -172,11 +172,12 @@ function CandlestickInner({
   useEffect(() => {
     const updateWidth = () => {
       if (containerRef.current) {
-        setWidth(containerRef.current.offsetWidth)
+        setWidth(containerRef.current.getBoundingClientRect().width)
       }
     }
-    updateWidth();
-    if (!containerRef.current) return;
+
+    updateWidth()
+    if (!containerRef.current) return
     const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width))
     ro.observe(containerRef.current)
     window.addEventListener('resize', updateWidth)
@@ -343,19 +344,7 @@ function CandlestickInner({
     return acc
   }, [])
 
-  const sharedHoverBar = useMemo(() => {
-    const hoverDate = hoverState?.source === 'subplot' ? hoverState.date : null
-    if (!hoverDate) return null
-    const idx = visibleBars.findIndex((bar) => bar.date === hoverDate)
-    if (idx < 0) return null
-    return {
-      bar: visibleBars[idx],
-      x: xOf(idx),
-      y: Math.max(0, PAD_TOP + 10),
-    }
-  }, [PAD_TOP, hoverState?.date, hoverState?.source, visibleBars, xOf])
-
-  const activeHover = hovered ?? sharedHoverBar
+  const activeHover = hovered
 
   const maxZoomInBars = Math.min(24, bars.length)
   const isZoomed = safeStart > 0 || safeEnd < (bars.length - 1)
@@ -453,7 +442,6 @@ function CandlestickInner({
 
   const handleWheel = useCallback((e) => {
     e.preventDefault()
-    if (!bars.length || !plotW) return
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
     const mx = e.clientX - rect.left - PAD_LEFT

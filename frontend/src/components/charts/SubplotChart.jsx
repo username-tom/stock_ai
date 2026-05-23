@@ -48,7 +48,7 @@ const SignalDot = (props) => {
 // Shared tooltip helpers
 // ---------------------------------------------------------------------------
 
-const TT_BASE = "bg-[#0f172a] border border-[#1e293b] rounded-lg p-3 text-xs shadow-2xl min-w-[180px] space-y-0.5"
+const TT_BASE = "bg-[rgba(15,23,42,0.72)] backdrop-blur-[1px] border border-[#1e293b] rounded-lg p-3 text-xs shadow-2xl min-w-[180px] space-y-0.5"
 
 function fmtVol(v) {
   if (v == null) return '—'
@@ -125,7 +125,18 @@ function OneDayTooltip({ active, payload, label, prevClose, indicators = {} }) {
   )
 }
 
-function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, height = 240, hoverState = null, onHoverStateChange }) {
+function OneDayChart({
+  data,
+  period = '1d',
+  prevClose,
+  syncId,
+  indicators = {},
+  height = 240,
+  hoverState = null,
+  onHoverStateChange,
+  onHoverPointChange,
+  showSharedHoverTooltip = true,
+}) {
   if (!data.length) return null
 
   // Keep only the latest day(s) based on selected short period.
@@ -197,12 +208,25 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
     const payload = event?.activePayload?.[0]?.payload
     const date = payload?.date ?? event?.activeLabel ?? null
     if (!date) return
+    const resolvedPoint = payload ?? segmented.find((d) => d.date === date) ?? null
+    const hoverX = event?.activeCoordinate?.x ?? event?.chartX ?? null
+    const chartWidth = event?.chartWidth ?? null
     onHoverStateChange?.({ date, source: 'subplot' })
-  }, [onHoverStateChange])
+    onHoverPointChange?.(
+      resolvedPoint
+        ? {
+            ...resolvedPoint,
+            __chartX: hoverX,
+            __chartWidth: chartWidth,
+          }
+        : null
+    )
+  }, [onHoverPointChange, onHoverStateChange, segmented])
 
   const handleHoverLeave = useCallback(() => {
     onHoverStateChange?.(null)
-  }, [onHoverStateChange])
+    onHoverPointChange?.(null)
+  }, [onHoverPointChange, onHoverStateChange])
 
   // Subtle background tint for off-hours zones only
   const sessionAreas = []
@@ -274,7 +298,11 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
             tickFormatter={v => `$${v.toFixed(2)}`}
           />
           <YAxis yAxisId="vol" orientation="left" domain={[0, maxVol * 5]} hide />
-          <Tooltip content={<OneDayTooltip prevClose={prevClose} indicators={indicators} />} />
+          <Tooltip
+            content={showSharedHoverTooltip
+              ? <OneDayTooltip prevClose={prevClose} indicators={indicators} />
+              : () => null}
+          />
 
           {/* Subtle off-hours background tint */}
           {sessionAreas.map((a, i) => (
@@ -551,7 +579,7 @@ function PriceTooltip({ active, payload, label, prevClose, indicators = {} }) {
   )
 }
 
-function SharedPriceTooltip({ dataPoint, label, prevClose, indicators = {} }) {
+export function SharedPriceTooltip({ dataPoint, label, prevClose, indicators = {} }) {
   if (!dataPoint) return null
   return <PriceTooltip active payload={[{ payload: dataPoint }]} label={label ?? dataPoint.date} prevClose={prevClose} indicators={indicators} />
 }
@@ -684,6 +712,8 @@ export default function SubplotChart({
   onViewWindowChange,
   hoverState,
   onHoverStateChange,
+  showSharedHoverTooltip = true,
+  onHoverPointChange,
 }) {
   const syncId = useId()
   const containerRef = useRef(null)
@@ -783,19 +813,36 @@ export default function SubplotChart({
     setDragState(null)
   }, [])
 
-  const externalHover = hoverState?.source === 'candlestick' ? hoverState.date : null
+  const externalHover = hoverState?.date ?? null
   const externalHoverPoint = externalHover ? visibleSampled.find((d) => d.date === externalHover) : null
+
+  useEffect(() => {
+    onHoverPointChange?.(externalHoverPoint ?? null)
+  }, [externalHoverPoint, onHoverPointChange])
 
   const handleHoverMove = useCallback((event) => {
     const payload = event?.activePayload?.[0]?.payload
     const date = payload?.date ?? event?.activeLabel ?? null
     if (!date) return
+    const resolvedPoint = payload ?? visibleSampled.find((d) => d.date === date) ?? null
+    const hoverX = event?.activeCoordinate?.x ?? event?.chartX ?? null
+    const chartWidth = event?.chartWidth ?? null
     onHoverStateChange?.({ date, source: 'subplot' })
-  }, [onHoverStateChange])
+    onHoverPointChange?.(
+      resolvedPoint
+        ? {
+            ...resolvedPoint,
+            __chartX: hoverX,
+            __chartWidth: chartWidth,
+          }
+        : null
+    )
+  }, [onHoverPointChange, onHoverStateChange, visibleSampled])
 
   const handleHoverLeave = useCallback(() => {
     onHoverStateChange?.(null)
-  }, [onHoverStateChange])
+    onHoverPointChange?.(null)
+  }, [onHoverPointChange, onHoverStateChange])
 
   const handleWheel = useCallback((e) => {
     e.preventDefault()
@@ -842,6 +889,8 @@ export default function SubplotChart({
           indicators={indicators}
           prevClose={prevClose}
           syncId={syncId}
+          onHoverPointChange={onHoverPointChange}
+          showSharedHoverTooltip={showSharedHoverTooltip}
         />
       </div>
     )
@@ -891,8 +940,8 @@ export default function SubplotChart({
           <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v4h4" /></svg>
         </SubplotIconButton>
       </div>
-      {externalHoverPoint && !hidePricePanel && (
-        <div className="pointer-events-none absolute left-3 top-8 z-20">
+      {showSharedHoverTooltip && externalHoverPoint && (
+        <div className="flex justify-start px-3 pb-2">
           <SharedPriceTooltip dataPoint={externalHoverPoint} label={externalHoverPoint.date} prevClose={prevClose} indicators={indicators} />
         </div>
       )}
@@ -931,11 +980,6 @@ export default function SubplotChart({
             {hasMA200 && <Line type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} name="MA(200)" isAnimationActive={false} />}
           </ComposedChart>
         </ResponsiveContainer>
-      )}
-      {externalHoverPoint && (
-        <div className="pointer-events-none absolute left-3 top-8 z-20">
-          <SharedPriceTooltip dataPoint={externalHoverPoint} label={externalHoverPoint.date} prevClose={prevClose} indicators={indicators} />
-        </div>
       )}
 
       {/* RSI panel */}
