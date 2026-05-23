@@ -193,23 +193,25 @@ function CandlestickInner({
   const chartHeight = Math.max(120, height - CONTROL_ROW_H)
   const PAD_TOP    = 16
   const PAD_BOTTOM = 24
-  const PAD_LEFT   = 8
-  const PAD_RIGHT  = 72
+  const PAD_LEFT   = 0
+  const PAD_RIGHT  = 70
   const VOL_HEIGHT = Math.round(chartHeight * 0.18)
   const plotW = width  - PAD_LEFT - PAD_RIGHT
   const plotH = chartHeight - PAD_TOP  - PAD_BOTTOM
 
-  const rawBars = data.filter(d =>
-    d.open != null && d.high != null && d.low != null && d.close != null
-  )
+  const rawBars = data.filter(d => d != null && d.date != null)
   const enrichedBars = warmupData?.length
     ? enrichDataWithWarmup(warmupData, rawBars)
     : enrichData(rawBars)
   const isIntraday = enrichedBars.some(d => isIntradayLabel(d.date))
   const hidePremarket = isIntraday && hidePremarketAfterOpen && shouldHidePremarket()
-  /* filter: hide pre-market after 10:30 ET for intraday series only */
+  /* Session-time filter is opt-in via `hidePremarketAfterOpen`.
+     - true  (PositionDetail default): clip early pre-market (<07:30 ET), and
+       collapse to regular session (>=09:30 ET) once we're past 10:30 ET.
+     - false (Dashboard): keep every bar so the candlestick range matches the
+       paired subplot, which never drops pre/post-market data. */
   const minTime = hidePremarket ? '09:30' : '07:30'
-  const bars = isIntraday
+  const bars = (isIntraday && hidePremarketAfterOpen)
     ? enrichedBars.filter(d => timeOf(d.date) >= minTime)
     : enrichedBars
   const isControlled = viewWindow != null && typeof onViewWindowChange === 'function'
@@ -247,11 +249,12 @@ function CandlestickInner({
   const visibleBars = bars.slice(safeStart, safeEnd + 1)
   const n = visibleBars.length
 
-  /* price scale */
-  const allP = visibleBars.flatMap(d => [d.low, d.high])
+  /* price scale � some bars (e.g. early pre-market prints) carry only close
+     and would poison Math.min/max with NaN, so filter to finite values. */
+  const allP = visibleBars.flatMap(d => [d.low, d.high, d.close].filter(Number.isFinite))
   if (prevClose != null) allP.push(prevClose)
-  const minP = Math.min(...allP)
-  const maxP = Math.max(...allP)
+  const minP = allP.length ? Math.min(...allP) : 0
+  const maxP = allP.length ? Math.max(...allP) : 1
   const padP = (maxP - minP) * 0.06 || 1
   const lo   = minP - padP
   const hi   = maxP + padP
@@ -346,6 +349,41 @@ function CandlestickInner({
   }, [])
 
   const activeHover = hovered
+
+  // Resolve highlighted bar index: prefer local hover, fall back to external
+  // hoverState arriving from a sibling subplot chart. The subplot may sample/
+  // filter `data` differently than the candlestick (it downsamples by stride
+  // and doesn't drop null-OHLC rows), so the hovered date won't always exist
+  // verbatim in `visibleBars`. We therefore match by *nearest* date in the
+  // already-sorted bar list rather than requiring equality.
+  const localHoverIdx = activeHover
+    ? visibleBars.findIndex(b => b.date === activeHover.bar?.date)
+    : -1
+  const externalHoverDate = hoverState && hoverState.source !== 'candlestick'
+    ? hoverState.date
+    : null
+  const externalHoverIdx = (() => {
+    if (!externalHoverDate || !visibleBars.length) return -1
+    // Bars are chronologically sorted and use the same lexically-sortable date
+    // format ("YYYY-MM-DD" or "MM/DD HH:MM"). Find the largest date <= target,
+    // then compare to the next bar to pick the truly closer one.
+    let lower = -1
+    for (let i = 0; i < visibleBars.length; i++) {
+      if (visibleBars[i].date <= externalHoverDate) lower = i
+      else break
+    }
+    if (lower < 0) return 0
+    if (lower + 1 >= visibleBars.length) return lower
+    const lowerDate = visibleBars[lower].date
+    const upperDate = visibleBars[lower + 1].date
+    // Cheap string distance: pick whichever neighbor sits closer to target.
+    const distLower = Math.abs(externalHoverDate.localeCompare(lowerDate))
+    const distUpper = Math.abs(externalHoverDate.localeCompare(upperDate))
+    return distUpper < distLower ? lower + 1 : lower
+  })()
+  const highlightIdx = localHoverIdx >= 0 ? localHoverIdx : externalHoverIdx
+  const highlightWidth = Math.max(bandwidth, 2)
+  const highlightX = highlightIdx >= 0 ? xOf(highlightIdx) - highlightWidth / 2 : 0
 
   const maxZoomInBars = Math.min(24, bars.length)
   const isZoomed = safeStart > 0 || safeEnd < (bars.length - 1)
@@ -569,8 +607,26 @@ function CandlestickInner({
           )
         })}
 
+        {/* Vertical hover highlight band � aligns this chart with subplot
+            crosshairs by tinting the column for the active timestamp. */}
+        {highlightIdx >= 0 && (
+          <rect
+            x={highlightX}
+            y={PAD_TOP}
+            width={highlightWidth}
+            height={plotH}
+            fill="#94a3b8"
+            fillOpacity={0.12}
+            pointerEvents="none"
+          />
+        )}
+
         {/* Candlesticks */}
         {visibleBars.map((d, i) => {
+          // Skip bars without a full OHLC quad (e.g. single-print pre-market
+          // bars). The x slot is still reserved so subsequent bars line up
+          // with the paired subplot's time axis.
+          if (d.open == null || d.high == null || d.low == null || d.close == null) return null
           const x     = xOf(i)
           const isUp  = d.close >= d.open
           const color = isUp ? '#22c55e' : '#ef4444'
@@ -597,14 +653,6 @@ function CandlestickInner({
         {hasMA50 && renderSeries('ma_50', MA_50)}
         {hasMA100 && renderSeries('ma_100', MA_100)}
         {hasMA200 && renderSeries('ma_200', MA_200, 1.1)}
-
-        {/* Hover crosshair */}
-        {activeHover && (
-          <line
-            x1={activeHover.x} y1={PAD_TOP} x2={activeHover.x} y2={PAD_TOP + plotH}
-            stroke="#475569" strokeWidth={1} strokeDasharray="2 2"
-          />
-        )}
 
         {/* X-axis labels */}
         {xTicks.map(i => (

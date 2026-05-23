@@ -3,6 +3,7 @@ import {
   ComposedChart, Line, Bar, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
+
 import { enrichData, enrichDataWithWarmup } from './indicators'
 
 const PRICE_COLOR = '#94a3b8'
@@ -18,6 +19,10 @@ const BUY_COLOR = '#4ade80'
 const SELL_COLOR = '#f87171'
 const STOCH_K = '#34d399'
 const STOCH_D = '#f59e0b'
+const STOCHRSI_K = '#a3e635'
+const STOCHRSI_D = '#fb923c'
+const CCI_COLOR = '#e879f9'
+const WILLIAMS_R_COLOR = '#38bdf8'
 const ATR_COLOR = '#c084fc'
 const OBV_COLOR = '#38bdf8'
 const MA_9   = '#22d3ee'
@@ -255,7 +260,10 @@ function OneDayChart({
   const hasMA50   = (indicators.ma50   !== false) && segmented.some(d => d.ma_50  != null)
   const hasMA100  = (indicators.ma100  !== false) && segmented.some(d => d.ma_100 != null)
   const hasMA200  = (indicators.ma200  !== false) && segmented.some(d => d.ma_200 != null)
-  const hasStoch  = (indicators.stoch  !== false) && segmented.some(d => d.stoch_k != null)
+  const hasStoch     = (indicators.stoch     !== false) && segmented.some(d => d.stoch_k    != null)
+  const hasStochRSI  = (indicators.stochRsi  !== false) && segmented.some(d => d.stochrsi_k != null)
+  const hasCCI       = (indicators.cci       !== false) && segmented.some(d => d.cci        != null)
+  const hasWilliamsR = (indicators.williamsR !== false) && segmented.some(d => d.williams_r != null)
   const hasATR    = (indicators.atr    !== false) && segmented.some(d => d.atr     != null)
   const hasOBV    = (indicators.obv    !== false) && segmented.some(d => d.obv     != null)
 
@@ -387,7 +395,7 @@ function OneDayChart({
       </ResponsiveContainer>
 
       {/* RSI panel */}
-      {hasRSI && (
+      {hasRSI && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -406,10 +414,11 @@ function OneDayChart({
             <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">RSI</div>
+      </>)}
 
       {/* MACD panel */}
-      {hasMACD && (
+      {hasMACD && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -433,10 +442,11 @@ function OneDayChart({
             <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">MACD</div>
+      </>)}
 
-      {/* Stochastic panel */}
-      {hasStoch && (
+      {/* Stochastic panel — 1D */}
+      {hasStoch && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -456,10 +466,82 @@ function OneDayChart({
             <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} name="Stoch %D" />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">Stoch</div>
+      </>)}
+
+      {/* StochRSI panel — 1D */}
+      {hasStochRSI && (<>
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
+            <Tooltip content={<StochRSITooltip />} position={{ y: 50 }} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-sr-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-sr-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="stochrsi_k" stroke={STOCHRSI_K} strokeWidth={1}   dot={false} isAnimationActive={false} name="StochRSI %K" />
+            <Line type="monotone" dataKey="stochrsi_d" stroke={STOCHRSI_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} name="StochRSI %D" />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">StochRSI</div>
+      </>)}
+
+      {/* CCI panel — 1D */}
+      {hasCCI && (<>
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => v?.toFixed(0)} />
+            <Tooltip content={<CCITooltip />} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-cc-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-cc-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            <ReferenceLine y={100}  stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={-100} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={0}    stroke="#475569" strokeOpacity={0.5} />
+            <Line type="monotone" dataKey="cci" stroke={CCI_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="CCI(14)" />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">CCI</div>
+      </>)}
+
+      {/* Williams %R panel — 1D */}
+      {hasWilliamsR && (<>
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            <XAxis {...xAxisProps} />
+            <YAxis orientation="right" domain={[-100, 0]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
+            <Tooltip content={<WilliamsRTooltip />} position={{ y: 50 }} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-wr-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.45} />
+            ))}
+            {dayLines.map((x, i) => (
+              <ReferenceLine key={`day-wr-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            <ReferenceLine y={-20} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={-80} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="williams_r" stroke={WILLIAMS_R_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="%R(14)" />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">Williams %R</div>
+      </>)}
 
       {/* ATR panel */}
-      {hasATR && (
+      {hasATR && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -476,10 +558,11 @@ function OneDayChart({
             <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="ATR(14)" />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">ATR</div>
+      </>)}
 
       {/* OBV panel */}
-      {hasOBV && (
+      {hasOBV && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -496,7 +579,8 @@ function OneDayChart({
             <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} isAnimationActive={false} name="OBV" />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">OBV</div>
+      </>)}
     </div>
   )
 }
@@ -643,6 +727,61 @@ function ATRTooltip({ active, payload }) {
   return (
     <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl min-w-[140px]">
       <TTRow label="ATR(14)" value={`$${d.atr.toFixed(3)}`} className="text-purple-400" />
+    </div>
+  )
+}
+
+function StochRSITooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (d?.stochrsi_k == null && d?.stochrsi_d == null) return null
+  const k = d.stochrsi_k
+  const overbought = k != null && k >= 80
+  const oversold   = k != null && k <= 20
+  const kColor = overbought ? 'text-red-400' : oversold ? 'text-emerald-400' : 'text-lime-300'
+  const badge  = overbought ? 'Overbought' : oversold ? 'Oversold' : null
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl space-y-0.5 min-w-[130px]">
+      <div className="text-slate-500 font-medium mb-0.5">StochRSI</div>
+      {d.stochrsi_k != null && <TTRow label="%K" value={d.stochrsi_k.toFixed(2)} className={kColor} />}
+      {d.stochrsi_d != null && <TTRow label="%D" value={d.stochrsi_d.toFixed(2)} className="text-orange-400" />}
+      {badge && <div className={`text-[10px] ${kColor} opacity-75 text-right pt-0.5`}>{badge}</div>}
+    </div>
+  )
+}
+
+function CCITooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (d?.cci == null) return null
+  const cci = d.cci
+  const overbought = cci >= 100
+  const oversold   = cci <= -100
+  const color = overbought ? 'text-red-400' : oversold ? 'text-emerald-400' : 'text-fuchsia-400'
+  const badge = overbought ? 'Overbought' : oversold ? 'Oversold' : null
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl flex items-center gap-2">
+      <span className="text-slate-500">CCI</span>
+      <span className={`font-mono font-semibold ${color}`}>{cci.toFixed(2)}</span>
+      {badge && <span className={`text-[10px] ${color} opacity-70`}>{badge}</span>}
+    </div>
+  )
+}
+
+function WilliamsRTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  if (d?.williams_r == null) return null
+  const wr = d.williams_r
+  const overbought = wr >= -20
+  const oversold   = wr <= -80
+  const color = overbought ? 'text-red-400' : oversold ? 'text-emerald-400' : 'text-sky-400'
+  const badge = overbought ? 'Overbought' : oversold ? 'Oversold' : null
+  return (
+    <div className="bg-[#0f172a] border border-[#1e293b] rounded-md px-2.5 py-1.5 text-xs shadow-2xl flex items-center gap-2">
+      <span className="text-slate-500">%R</span>
+      <span className={`font-mono font-semibold ${color}`}>{wr.toFixed(2)}</span>
+      {badge && <span className={`text-[10px] ${color} opacity-70`}>{badge}</span>}
     </div>
   )
 }
@@ -813,8 +952,26 @@ export default function SubplotChart({
     setDragState(null)
   }, [])
 
-  const externalHover = hoverState?.date ?? null
-  const externalHoverPoint = externalHover ? visibleSampled.find((d) => d.date === externalHover) : null
+  const rawExternalDate = hoverState?.date ?? null
+  const externalHoverPoint = (() => {
+    if (!rawExternalDate || !visibleSampled.length) return null
+    const exact = visibleSampled.find(d => d.date === rawExternalDate)
+    if (exact) return exact
+    // Nearest-date fallback for when candlestick dates aren't in visibleSampled
+    let lower = -1
+    for (let i = 0; i < visibleSampled.length; i++) {
+      if (visibleSampled[i].date <= rawExternalDate) lower = i
+      else break
+    }
+    if (lower < 0) return visibleSampled[0]
+    if (lower + 1 >= visibleSampled.length) return visibleSampled[lower]
+    const distLower = Math.abs(rawExternalDate.localeCompare(visibleSampled[lower].date))
+    const distUpper = Math.abs(rawExternalDate.localeCompare(visibleSampled[lower + 1].date))
+    return distUpper < distLower ? visibleSampled[lower + 1] : visibleSampled[lower]
+  })()
+  // Snapped to an actual key in visibleSampled — used for ReferenceLine x props
+  const externalHover = externalHoverPoint?.date ?? null
+  const isCandlestickHover = hoverState?.source === 'candlestick'
 
   useEffect(() => {
     onHoverPointChange?.(externalHoverPoint ?? null)
@@ -908,14 +1065,17 @@ export default function SubplotChart({
   const hasMA50   = (indicators.ma50   !== false) && sampled.some(d => d.ma_50  != null)
   const hasMA100  = (indicators.ma100  !== false) && sampled.some(d => d.ma_100 != null)
   const hasMA200  = (indicators.ma200  !== false) && sampled.some(d => d.ma_200 != null)
-  const hasStoch  = (indicators.stoch  !== false) && sampled.some(d => d.stoch_k != null)
+  const hasStoch     = (indicators.stoch     !== false) && sampled.some(d => d.stoch_k    != null)
+  const hasStochRSI  = (indicators.stochRsi  !== false) && sampled.some(d => d.stochrsi_k != null)
+  const hasCCI       = (indicators.cci       !== false) && sampled.some(d => d.cci        != null)
+  const hasWilliamsR = (indicators.williamsR !== false) && sampled.some(d => d.williams_r != null)
   const hasATR    = (indicators.atr    !== false) && sampled.some(d => d.atr     != null)
   const hasOBV    = (indicators.obv    !== false) && sampled.some(d => d.obv     != null)
 
   const priceHeight = height
   const oscHeight = 100
 
-  if (hidePricePanel && !hasRSI && !hasMACD && !hasStoch && !hasATR && !hasOBV) {
+  if (hidePricePanel && !hasRSI && !hasMACD && !hasStoch && !hasStochRSI && !hasCCI && !hasWilliamsR && !hasATR && !hasOBV) {
     return null
   }
 
@@ -929,18 +1089,20 @@ export default function SubplotChart({
       onMouseLeave={handleMouseUpOrLeave}
       onWheel={handleWheel}
     >
-      <div className="flex items-center justify-end gap-0.5 pr-1 h-[22px]">
-        <SubplotIconButton title="Zoom in" onClick={() => zoomBy(true, 0.5)}>
-          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M11 8v6M8 11h6M20 20l-3.5-3.5" /></svg>
-        </SubplotIconButton>
-        <SubplotIconButton title="Zoom out" onClick={() => zoomBy(false, 0.5)}>
-          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M8 11h6M20 20l-3.5-3.5" /></svg>
-        </SubplotIconButton>
-        <SubplotIconButton title="Reset view" onClick={resetView} disabled={!isZoomed}>
-          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v4h4" /></svg>
-        </SubplotIconButton>
-      </div>
-      {showSharedHoverTooltip && externalHoverPoint && (
+      {!hidePricePanel && (
+        <div className="flex items-center justify-end gap-0.5 pr-1 h-[22px]">
+          <SubplotIconButton title="Zoom in" onClick={() => zoomBy(true, 0.5)}>
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M11 8v6M8 11h6M20 20l-3.5-3.5" /></svg>
+          </SubplotIconButton>
+          <SubplotIconButton title="Zoom out" onClick={() => zoomBy(false, 0.5)}>
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M8 11h6M20 20l-3.5-3.5" /></svg>
+          </SubplotIconButton>
+          <SubplotIconButton title="Reset view" onClick={resetView} disabled={!isZoomed}>
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v4h4" /></svg>
+          </SubplotIconButton>
+        </div>
+      )}
+      {showSharedHoverTooltip && isCandlestickHover && externalHoverPoint && (
         <div className="flex justify-start px-3 pb-2">
           <SharedPriceTooltip dataPoint={externalHoverPoint} label={externalHoverPoint.date} prevClose={prevClose} indicators={indicators} />
         </div>
@@ -952,6 +1114,7 @@ export default function SubplotChart({
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis
+              orientation="right"
               domain={['auto', 'auto']}
               tick={{ fill: '#64748b', fontSize: 10 }}
               tickLine={false}
@@ -987,12 +1150,12 @@ export default function SubplotChart({
       )}
 
       {/* RSI panel */}
-      {hasRSI && (
+      {hasRSI && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
-            <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
+            <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
             <Tooltip content={<RSITooltip />} position={{ y: 50 }} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-r-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
@@ -1006,15 +1169,19 @@ export default function SubplotChart({
             <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} name="RSI" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>RSI</span>
+          {isCandlestickHover && externalHoverPoint?.rsi != null && <span className="font-mono" style={{ color: RSI_COLOR }}>{externalHoverPoint.rsi.toFixed(2)}</span>}
+        </div>
+      </>)}
 
       {/* MACD panel */}
-      {hasMACD && (
+      {hasMACD && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
-            <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => v?.toFixed(2)} />
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => v?.toFixed(2)} />
             <Tooltip content={<MACDTooltip />} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-m-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
@@ -1033,15 +1200,20 @@ export default function SubplotChart({
             <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="Signal" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>MACD</span>
+          {isCandlestickHover && externalHoverPoint?.macd != null && <span className="font-mono" style={{ color: MACD_COLOR }}>{externalHoverPoint.macd.toFixed(4)}</span>}
+          {isCandlestickHover && externalHoverPoint?.macd_signal != null && <span className="font-mono" style={{ color: SIGNAL_COLOR }}>{externalHoverPoint.macd_signal.toFixed(4)}</span>}
+        </div>
+      </>)}
 
       {/* Stochastic panel */}
-      {hasStoch && (
+      {hasStoch && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
-            <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
+            <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
             <Tooltip content={<StochTooltip />} position={{ y: 50 }} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-st-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
@@ -1056,15 +1228,99 @@ export default function SubplotChart({
             <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="Stoch %D" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>Stoch</span>
+          {isCandlestickHover && externalHoverPoint?.stoch_k != null && <span className="font-mono" style={{ color: STOCH_K }}>%K {externalHoverPoint.stoch_k.toFixed(2)}</span>}
+        </div>
+      </>)}
 
-      {/* ATR panel */}
-      {hasATR && (
+      {/* StochRSI panel */}
+      {hasStochRSI && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
-            <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => `$${v?.toFixed(2)}`} />
+            <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
+            <Tooltip content={<StochRSITooltip />} position={{ y: 50 }} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-sr-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-sr-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="stochrsi_k" stroke={STOCHRSI_K} strokeWidth={1}   dot={false} name="StochRSI %K" isAnimationActive={false} />
+            <Line type="monotone" dataKey="stochrsi_d" stroke={STOCHRSI_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="StochRSI %D" isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>StochRSI</span>
+          {isCandlestickHover && externalHoverPoint?.stochrsi_k != null && <span className="font-mono" style={{ color: STOCHRSI_K }}>%K {externalHoverPoint.stochrsi_k.toFixed(2)}</span>}
+        </div>
+      </>)}
+
+      {/* CCI panel */}
+      {hasCCI && (<>
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {sharedXAxis}
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => v?.toFixed(0)} />
+            <Tooltip content={<CCITooltip />} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-cc-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-cc-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            <ReferenceLine y={100}  stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={-100} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={0}    stroke="#475569" strokeOpacity={0.5} />
+            <Line type="monotone" dataKey="cci" stroke={CCI_COLOR} strokeWidth={1} dot={false} name="CCI(14)" isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>CCI</span>
+          {isCandlestickHover && externalHoverPoint?.cci != null && <span className="font-mono" style={{ color: CCI_COLOR }}>{externalHoverPoint.cci.toFixed(2)}</span>}
+        </div>
+      </>)}
+
+      {/* Williams %R panel */}
+      {hasWilliamsR && (<>
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {sharedXAxis}
+            <YAxis orientation="right" domain={[-100, 0]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
+            <Tooltip content={<WilliamsRTooltip />} position={{ y: 50 }} />
+            {sessionAreas.map((a, i) => (
+              <ReferenceArea key={`off-wr-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
+            ))}
+            {dayLines.map((d, i) => (
+              <ReferenceLine key={`day-wr-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
+            ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            <ReferenceLine y={-20} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
+            <ReferenceLine y={-80} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="williams_r" stroke={WILLIAMS_R_COLOR} strokeWidth={1} dot={false} name="%R(14)" isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>Williams %R</span>
+          {isCandlestickHover && externalHoverPoint?.williams_r != null && <span className="font-mono" style={{ color: WILLIAMS_R_COLOR }}>{externalHoverPoint.williams_r.toFixed(2)}</span>}
+        </div>
+      </>)}
+
+      {/* ATR panel */}
+      {hasATR && (<>
+        <ResponsiveContainer width="100%" height={oscHeight}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+            {sharedXAxis}
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => `$${v?.toFixed(2)}`} />
             <Tooltip content={<ATRTooltip />} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-at-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
@@ -1076,15 +1332,19 @@ export default function SubplotChart({
             <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} name="ATR(14)" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>ATR</span>
+          {isCandlestickHover && externalHoverPoint?.atr != null && <span className="font-mono" style={{ color: ATR_COLOR }}>${externalHoverPoint.atr.toFixed(2)}</span>}
+        </div>
+      </>)}
 
       {/* OBV panel */}
-      {hasOBV && (
+      {hasOBV && (<>
         <ResponsiveContainer width="100%" height={oscHeight}>
           <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
-            <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => fmtOBV(v)} />
+            <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => fmtOBV(v)} />
             <Tooltip content={<OBVTooltip />} />
             {sessionAreas.map((a, i) => (
               <ReferenceArea key={`off-ov-${i}`} x1={a.x1} x2={a.x2} fill="#0f172a" fillOpacity={0.55} ifOverflow="visible" />
@@ -1097,7 +1357,11 @@ export default function SubplotChart({
             <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} name="OBV" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
-      )}
+        <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
+          <span>OBV</span>
+          {isCandlestickHover && externalHoverPoint?.obv != null && <span className="font-mono" style={{ color: OBV_COLOR }}>{fmtOBV(externalHoverPoint.obv)}</span>}
+        </div>
+      </>)}
     </div>
   )
 }

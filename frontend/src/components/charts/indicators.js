@@ -254,6 +254,85 @@ export function computeOBV(closes, volumes) {
 }
 
 /**
+ * Compute Stochastic RSI (%K and %D).
+ * Applies the stochastic formula to RSI values for extra sensitivity.
+ *
+ * @param {(number|null)[]} closes
+ * @param {number} [rsiPeriod=14]
+ * @param {number} [stochPeriod=14]
+ * @param {number} [dPeriod=3]
+ * @returns {{ stochrsi_k: (number|null)[], stochrsi_d: (number|null)[] }}
+ */
+export function computeStochRSI(closes, rsiPeriod = 14, stochPeriod = 14, dPeriod = 3) {
+  const rsi = computeRSI(closes, rsiPeriod)
+  const n = rsi.length
+  const stochrsi_k = new Array(n).fill(null)
+
+  for (let i = stochPeriod - 1; i < n; i++) {
+    const slice = rsi.slice(i - stochPeriod + 1, i + 1)
+    if (slice.some(v => v == null)) continue
+    const lowest  = Math.min(...slice)
+    const highest = Math.max(...slice)
+    const range = highest - lowest
+    stochrsi_k[i] = range === 0 ? 50 : ((rsi[i] - lowest) / range) * 100
+  }
+
+  const stochrsi_d = computeSMA(stochrsi_k, dPeriod)
+  return { stochrsi_k, stochrsi_d }
+}
+
+/**
+ * Compute Commodity Channel Index (CCI).
+ *
+ * @param {(number|null)[]} highs
+ * @param {(number|null)[]} lows
+ * @param {(number|null)[]} closes
+ * @param {number} [period=14]
+ * @returns {(number|null)[]}
+ */
+export function computeCCI(highs, lows, closes, period = 14) {
+  const n = closes.length
+  const result = new Array(n).fill(null)
+
+  for (let i = period - 1; i < n; i++) {
+    const sliceH = highs.slice(i - period + 1, i + 1)
+    const sliceL = lows.slice(i - period + 1, i + 1)
+    const sliceC = closes.slice(i - period + 1, i + 1)
+    if (sliceH.some(v => v == null) || sliceL.some(v => v == null) || sliceC.some(v => v == null)) continue
+    const tp = sliceH.map((h, j) => (h + sliceL[j] + sliceC[j]) / 3)
+    const mean = tp.reduce((s, v) => s + v, 0) / period
+    const mad = tp.reduce((s, v) => s + Math.abs(v - mean), 0) / period
+    result[i] = mad === 0 ? 0 : (tp[period - 1] - mean) / (0.015 * mad)
+  }
+  return result
+}
+
+/**
+ * Compute Williams %R.
+ *
+ * @param {(number|null)[]} highs
+ * @param {(number|null)[]} lows
+ * @param {(number|null)[]} closes
+ * @param {number} [period=14]
+ * @returns {(number|null)[]}
+ */
+export function computeWilliamsR(highs, lows, closes, period = 14) {
+  const n = closes.length
+  const result = new Array(n).fill(null)
+
+  for (let i = period - 1; i < n; i++) {
+    const sliceH = highs.slice(i - period + 1, i + 1)
+    const sliceL = lows.slice(i - period + 1, i + 1)
+    if (closes[i] == null || sliceH.some(v => v == null) || sliceL.some(v => v == null)) continue
+    const highest = Math.max(...sliceH)
+    const lowest  = Math.min(...sliceL)
+    const range = highest - lowest
+    result[i] = range === 0 ? -50 : -100 * (highest - closes[i]) / range
+  }
+  return result
+}
+
+/**
  * Enrich an OHLCV data array with RSI, MACD, Bollinger Bands, and MAs.
  *
  * Backend-computed values take precedence — if the data already contains
@@ -275,7 +354,10 @@ export function enrichData(data) {
   const hasBB     = data.some(d => d.upper   != null)
   const hasFastMA = data.some(d => d.fast_ma != null)
   const hasSlowMA = data.some(d => d.slow_ma != null)
-  const hasStoch  = data.some(d => d.stoch_k != null)
+  const hasStoch     = data.some(d => d.stoch_k    != null)
+  const hasStochRSI  = data.some(d => d.stochrsi_k != null)
+  const hasCCI       = data.some(d => d.cci        != null)
+  const hasWilliamsR = data.some(d => d.williams_r != null)
   const hasATR    = data.some(d => d.atr     != null)
   const hasOBV    = data.some(d => d.obv     != null)
 
@@ -292,9 +374,12 @@ export function enrichData(data) {
   const ma50Values  = computeSMA(closes, 50, true)
   const ma100Values = computeSMA(closes, 100, true)
   const ma200Values = computeSMA(closes, 200, true)
-  const stochValues = hasStoch || !hasHighLow ? null : computeStochastic(highs, lows, closes)
-  const atrValues   = hasATR   || !hasHighLow ? null : computeATR(highs, lows, closes)
-  const obvValues   = hasOBV   || !hasVol     ? null : computeOBV(closes, volumes)
+  const stochValues     = hasStoch     || !hasHighLow ? null : computeStochastic(highs, lows, closes)
+  const stochRsiValues  = hasStochRSI  ? null : computeStochRSI(closes)
+  const cciValues       = hasCCI       || !hasHighLow ? null : computeCCI(highs, lows, closes)
+  const williamsRValues = hasWilliamsR || !hasHighLow ? null : computeWilliamsR(highs, lows, closes)
+  const atrValues       = hasATR       || !hasHighLow ? null : computeATR(highs, lows, closes)
+  const obvValues       = hasOBV       || !hasVol     ? null : computeOBV(closes, volumes)
 
   const roundTo = (v, decimalPlaces = 2) => (v != null ? parseFloat(v.toFixed(decimalPlaces)) : null)
 
@@ -328,6 +413,14 @@ export function enrichData(data) {
           stoch_d: roundTo(stochValues.stoch_d[i]),
         }
       : {}),
+    ...(stochRsiValues
+      ? {
+          stochrsi_k: roundTo(stochRsiValues.stochrsi_k[i]),
+          stochrsi_d: roundTo(stochRsiValues.stochrsi_d[i]),
+        }
+      : {}),
+    ...(cciValues       ? { cci:       roundTo(cciValues[i]) }       : {}),
+    ...(williamsRValues ? { williams_r: roundTo(williamsRValues[i]) } : {}),
     ...(atrValues ? { atr: roundTo(atrValues[i], 4) } : {}),
     ...(obvValues ? { obv: obvValues[i] != null ? Math.round(obvValues[i]) : null } : {}),
   }))

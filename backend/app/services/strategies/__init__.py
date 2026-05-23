@@ -3,12 +3,21 @@ from app.services.strategies.moving_avg import MovingAverageCrossover
 from app.services.strategies.rsi import RSIStrategy
 from app.services.strategies.bollinger import BollingerBandsStrategy
 from app.services.strategies.macd import MACDStrategy
+from app.services.strategies.stochastic import StochasticStrategy
+from app.services.strategies.stoch_rsi import StochRSIStrategy
+from app.services.strategies.cci import CCIStrategy
+from app.services.strategies.williams_r import WilliamsRStrategy
 
 STRATEGY_MAP: dict[str, type[BaseStrategy]] = {
     "sma_crossover": MovingAverageCrossover,
     "rsi": RSIStrategy,
     "bollinger_bands": BollingerBandsStrategy,
     "macd": MACDStrategy,
+    # High-frequency oscillators — suited for SHORT / STRONG SHORT positions
+    "stochastic": StochasticStrategy,
+    "stoch_rsi": StochRSIStrategy,
+    "cci": CCIStrategy,
+    "williams_r": WilliamsRStrategy,
 }
 
 _STRATEGY_ALIASES: dict[str, str] = {
@@ -42,6 +51,10 @@ __all__ = [
     "RSIStrategy",
     "BollingerBandsStrategy",
     "MACDStrategy",
+    "StochasticStrategy",
+    "StochRSIStrategy",
+    "CCIStrategy",
+    "WilliamsRStrategy",
     "STRATEGY_MAP",
     "get_strategy",
     "list_strategies",
