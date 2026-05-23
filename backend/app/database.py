@@ -119,6 +119,18 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN cached_scores TEXT NOT NULL DEFAULT '{}'",
         # portfolio_manager_settings AI external sentiment blend weight (0..1)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_external_sentiment_weight REAL NOT NULL DEFAULT 0.0",
+        # 5×5 strategy + action matrices for PM-sentiment × AI-tag routing
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_matrix_strategies TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_matrix_actions TEXT NOT NULL DEFAULT '{}'",
+        # Buy & Hold duration cap (days) for matrix `hold` action (day-trade default = 1)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN pm_hold_duration_days INTEGER NOT NULL DEFAULT 1",
+        # Advanced Hold tuning: extended-duration multiplier and trailing-stop %
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN pm_hold_extended_multiplier REAL NOT NULL DEFAULT 2.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN pm_hold_trailing_pct REAL NOT NULL DEFAULT 3.0",
+        # Track when PM buy-and-hold position entered
+        "ALTER TABLE sandbox_positions ADD COLUMN pm_hold_started_at TIMESTAMP",
+        # Track peak price since PM hold entry (for trailing-stop advanced hold)
+        "ALTER TABLE sandbox_positions ADD COLUMN pm_hold_peak_price REAL",
     ]
     for stmt in migrations:
         try:

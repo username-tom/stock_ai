@@ -29,6 +29,8 @@ class SandboxPosition(Base):
     # Automated engine columns
     strategy_enabled = Column(Boolean, default=False, nullable=False)  # engine active
     pm_managed = Column(Boolean, default=False, nullable=False)        # PM holds this position; engine must stay off
+    pm_hold_started_at = Column(DateTime(timezone=True), nullable=True)  # when PM buy-and-hold entered
+    pm_hold_peak_price = Column(Float, nullable=True)                    # highest price seen since PM hold entry (trailing stop)
     last_signal = Column(Integer, nullable=True)      # +1 buy / -1 sell / 0 hold
     last_run_at = Column(DateTime(timezone=True), nullable=True)
     engine_error = Column(Text, nullable=True)
@@ -135,5 +137,14 @@ class PortfolioManagerSettings(Base):
     pending_price_drift_cancel_pct = Column(Float, default=0.75, nullable=False)
     auto_trade_buy_price_offset_pct = Column(Float, default=0.1, nullable=False)
     auto_trade_sell_price_offset_pct = Column(Float, default=0.1, nullable=False)
+    # 5×5 sentiment × AI-tag matrix (JSON)
+    sentiment_matrix_strategies = Column(Text, nullable=False, server_default=text("'{}'"  ))
+    sentiment_matrix_actions = Column(Text, nullable=False, server_default=text("'{}'"))
+    # Buy & Hold (matrix `hold` action) max duration in days; 0 = no limit. Day-trade default.
+    pm_hold_duration_days = Column(Integer, default=1, nullable=False)
+    # Advanced Hold multiplier applied to duration when cell action is `advanced_hold:extended`
+    pm_hold_extended_multiplier = Column(Float, default=2.0, nullable=False)
+    # Trailing stop % used for `advanced_hold:trailing` (exit when price drops this % from peak)
+    pm_hold_trailing_pct = Column(Float, default=3.0, nullable=False)
     cached_scores = Column(Text, nullable=False, server_default=text("'{}'"))
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
