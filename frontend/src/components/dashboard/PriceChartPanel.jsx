@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { BriefcaseIcon } from '@heroicons/react/24/outline'
 import SubplotChart from '../charts/SubplotChart'
@@ -99,6 +100,14 @@ export default function PriceChartPanel({
   isInWatchlist = false,
 }) {
   const navigate = useNavigate()
+  const [syncedViewWindow, setSyncedViewWindow] = useState({ startRatio: 0, endRatio: 1 })
+  const [syncedHoverState, setSyncedHoverState] = useState(null)
+
+  useEffect(() => {
+    setSyncedViewWindow({ startRatio: 0, endRatio: 1 })
+    setSyncedHoverState(null)
+  }, [chartSymbol, chartPeriod, chartType, histData?.data?.length])
+
   const isCandlestick = chartType === 'candles'
   const ibTelemetry = histData?.ib_telemetry ?? quoteTelemetry
   const effectiveGap = ibTelemetry?.effective_request_gap_seconds
@@ -209,6 +218,10 @@ export default function PriceChartPanel({
             prevClose={chartPrevClose}
             hidePremarketAfterOpen={false}
             height={220}
+            viewWindow={syncedViewWindow}
+            onViewWindowChange={setSyncedViewWindow}
+            hoverState={syncedHoverState}
+            onHoverStateChange={setSyncedHoverState}
           />
           <SubplotChart
             data={histData?.data ?? []}
@@ -217,6 +230,10 @@ export default function PriceChartPanel({
             period={chartPeriod}
             prevClose={chartPrevClose}
             hidePricePanel
+            viewWindow={syncedViewWindow}
+            onViewWindowChange={setSyncedViewWindow}
+            hoverState={syncedHoverState}
+            onHoverStateChange={setSyncedHoverState}
           />
         </div>
       ) : (
@@ -227,6 +244,8 @@ export default function PriceChartPanel({
           indicators={indicators}
           period={chartPeriod}
           prevClose={chartPrevClose}
+          hoverState={syncedHoverState}
+          onHoverStateChange={setSyncedHoverState}
         />
       )}
     </div>

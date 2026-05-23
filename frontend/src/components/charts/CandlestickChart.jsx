@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useCallback, Component } from 'react'
+import { useRef, useState, useEffect, useCallback, useMemo, Component } from 'react'
 import { enrichData, enrichDataWithWarmup } from './indicators'
 
 const BB_UPPER = '#60a5fa'
@@ -45,6 +45,31 @@ const shortDateLabel = (s) => {
 }
 const fmt2   = (n) => (n != null ? n.toFixed(2) : '�')
 const fmtVol = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : `${(n / 1e3).toFixed(0)}K`
+
+const clamp01 = (v) => Math.max(0, Math.min(1, v))
+
+function windowToIndices(window, total) {
+  if (!total) return { start: 0, end: 0 }
+  const startRatio = clamp01(window?.startRatio ?? 0)
+  const endRatio = clamp01(window?.endRatio ?? 1)
+  const orderedStart = Math.min(startRatio, endRatio)
+  const orderedEnd = Math.max(startRatio, endRatio)
+  const maxIndex = total - 1
+  const start = Math.max(0, Math.min(maxIndex, Math.floor(orderedStart * maxIndex)))
+  const end = Math.max(start, Math.min(maxIndex, Math.ceil(orderedEnd * maxIndex)))
+  return { start, end }
+}
+
+function indicesToWindow(start, end, total) {
+  if (!total || total <= 1) return { startRatio: 0, endRatio: 1 }
+  const maxIndex = total - 1
+  const safeStart = Math.max(0, Math.min(start, maxIndex))
+  const safeEnd = Math.max(safeStart, Math.min(end, maxIndex))
+  return {
+    startRatio: safeStart / maxIndex,
+    endRatio: safeEnd / maxIndex,
+  }
+}
 
 function shouldHidePremarket() {
   const now = new Date()
@@ -124,7 +149,19 @@ function IconButton({ title, onClick, disabled = false, children }) {
 }
 
 /* ?? Pure-SVG chart � zero recharts, zero invariant risk ????????? */
-function CandlestickInner({ data = [], prevClose, height = 260, className = '', indicators = null, warmupData = null, hidePremarketAfterOpen = true }) {
+function CandlestickInner({
+  data = [],
+  prevClose,
+  height = 260,
+  className = '',
+  indicators = null,
+  warmupData = null,
+  hidePremarketAfterOpen = true,
+  viewWindow,
+  onViewWindowChange,
+  hoverState,
+  onHoverStateChange,
+}) {
   const containerRef = useRef(null)
   const [width, setWidth] = useState(0)
   const [hovered, setHovered] = useState(null)
@@ -173,8 +210,10 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
   const bars = isIntraday
     ? enrichedBars.filter(d => timeOf(d.date) >= minTime)
     : enrichedBars
+  const isControlled = viewWindow != null && typeof onViewWindowChange === 'function'
 
   useEffect(() => {
+    if (isControlled) return
     if (!bars.length) {
       setViewStart(0)
       setViewEnd(0)
@@ -182,7 +221,7 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
     }
     setViewStart(0)
     setViewEnd(bars.length - 1)
-  }, [bars.length])
+  }, [bars.length, isControlled])
 
   if (!bars.length) {
     return (
@@ -196,8 +235,13 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
     )
   }
 
-  const safeStart = Math.max(0, Math.min(viewStart, Math.max(0, bars.length - 1)))
-  const safeEnd = Math.max(safeStart, Math.min(viewEnd || (bars.length - 1), bars.length - 1))
+  const controlledIndices = windowToIndices(viewWindow, bars.length)
+  const safeStart = isControlled
+    ? controlledIndices.start
+    : Math.max(0, Math.min(viewStart, Math.max(0, bars.length - 1)))
+  const safeEnd = isControlled
+    ? controlledIndices.end
+    : Math.max(safeStart, Math.min(viewEnd || (bars.length - 1), bars.length - 1))
   const visibleBars = bars.slice(safeStart, safeEnd + 1)
   const n = visibleBars.length
 
@@ -221,9 +265,42 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
   const bw  = Math.max(1, Math.min(14, bandwidth - 2))
 
   /* reference positions */
-  const mktOpenIdx  = isIntraday ? visibleBars.findIndex(d => timeOf(d.date) >= '09:30') : -1
-  const mktCloseIdx = isIntraday ? visibleBars.findIndex(d => timeOf(d.date) >= '16:00') : -1
   const prevCloseY  = prevClose != null ? pToY(prevClose) : null
+
+  // Session boundary lines for intraday charts
+  const intradayDays = isIntraday
+    ? [...new Set(visibleBars.map(d => d.date?.slice(0, 5)).filter(Boolean))]
+    : []
+  const isMultiDay   = intradayDays.length > 1
+  const hasPreMkt    = isIntraday && visibleBars.some(d => timeOf(d.date) < '09:30')
+  const hasPostMkt   = isIntraday && visibleBars.some(d => timeOf(d.date) > '16:00')
+
+  // Single-day (1D): first occurrence only
+  const mktOpenIdx  = !isMultiDay && isIntraday ? visibleBars.findIndex(d => timeOf(d.date) >= '09:30') : -1
+  const mktCloseIdx = !isMultiDay && isIntraday ? visibleBars.findIndex(d => timeOf(d.date) >= '16:00') : -1
+
+  // Multi-day: per-day separator indices
+  const daySessionLines = isMultiDay
+    ? intradayDays.flatMap((day, di) => {
+        const out = []
+        // Day separator: first bar of each day after the first
+        if (di > 0) {
+          const idx = visibleBars.findIndex(d => d.date?.startsWith(day))
+          if (idx >= 0) out.push({ idx, label: null })
+        }
+        // If pre-market data present, mark regular open per day
+        if (hasPreMkt) {
+          const idx = visibleBars.findIndex(d => d.date?.startsWith(day) && timeOf(d.date) >= '09:30')
+          if (idx >= 0) out.push({ idx, label: 'Open' })
+        }
+        // If post-market data present, mark regular close per day
+        if (hasPostMkt) {
+          const idx = visibleBars.findIndex(d => d.date?.startsWith(day) && timeOf(d.date) >= '16:00')
+          if (idx >= 0) out.push({ idx, label: 'Close' })
+        }
+        return out
+      })
+    : []
 
   const hasBB    = indicators?.bb === true && visibleBars.some(d => d.upper != null)
   const hasMA9   = indicators?.ma9 === true && visibleBars.some(d => d.ma_9 != null)
@@ -266,8 +343,37 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
     return acc
   }, [])
 
+  const sharedHoverBar = useMemo(() => {
+    const hoverDate = hoverState?.source === 'subplot' ? hoverState.date : null
+    if (!hoverDate) return null
+    const idx = visibleBars.findIndex((bar) => bar.date === hoverDate)
+    if (idx < 0) return null
+    return {
+      bar: visibleBars[idx],
+      x: xOf(idx),
+      y: Math.max(0, PAD_TOP + 10),
+    }
+  }, [PAD_TOP, hoverState?.date, hoverState?.source, visibleBars, xOf])
+
+  const activeHover = hovered ?? sharedHoverBar
+
   const maxZoomInBars = Math.min(24, bars.length)
   const isZoomed = safeStart > 0 || safeEnd < (bars.length - 1)
+
+  const setViewByIndices = useCallback((nextStart, nextEnd) => {
+    const total = bars.length
+    if (!total) return
+    const size = Math.max(1, nextEnd - nextStart + 1)
+    const clampedStart = Math.max(0, Math.min(nextStart, total - size))
+    const clampedEnd = clampedStart + size - 1
+
+    if (isControlled) {
+      onViewWindowChange(indicesToWindow(clampedStart, clampedEnd, total))
+      return
+    }
+    setViewStart(clampedStart)
+    setViewEnd(clampedEnd)
+  }, [bars.length, isControlled, onViewWindowChange])
 
   const applyViewWindow = useCallback((nextStart, nextEnd) => {
     const total = bars.length
@@ -275,9 +381,8 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
     const size = Math.max(1, nextEnd - nextStart + 1)
     const clampedStart = Math.max(0, Math.min(nextStart, total - size))
     const clampedEnd = clampedStart + size - 1
-    setViewStart(clampedStart)
-    setViewEnd(clampedEnd)
-  }, [bars.length])
+    setViewByIndices(clampedStart, clampedEnd)
+  }, [bars.length, setViewByIndices])
 
   const zoomTo = useCallback((zoomIn, anchorRatio = 0.5) => {
     const total = bars.length
@@ -297,9 +402,8 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
 
   const resetView = useCallback(() => {
     if (!bars.length) return
-    setViewStart(0)
-    setViewEnd(bars.length - 1)
-  }, [bars.length])
+    setViewByIndices(0, bars.length - 1)
+  }, [bars.length, setViewByIndices])
 
   const handleMouseMove = useCallback((e) => {
     const rect = containerRef.current?.getBoundingClientRect()
@@ -312,24 +416,27 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
       const maxStart = Math.max(0, bars.length - size)
       const nextStart = Math.max(0, Math.min(dragState.baseStart - shiftBars, maxStart))
       const nextEnd = nextStart + size - 1
-      setViewStart(nextStart)
-      setViewEnd(nextEnd)
+      setViewByIndices(nextStart, nextEnd)
       setHovered(null)
+      onHoverStateChange?.(null)
       return
     }
 
     const mx  = e.clientX - rect.left - PAD_LEFT
     const idx = Math.floor(mx / bandwidth)
     if (idx >= 0 && idx < n) {
-      setHovered({
+      const nextHovered = {
         bar: visibleBars[idx],
         x: e.clientX - rect.left,
         y: Math.max(0, e.clientY - rect.top - 20),
-      })
+      }
+      setHovered(nextHovered)
+      onHoverStateChange?.({ date: visibleBars[idx].date, source: 'candlestick' })
     } else {
       setHovered(null)
+      onHoverStateChange?.(null)
     }
-  }, [dragState, bandwidth, n, bars.length, visibleBars])
+  }, [dragState, bandwidth, n, bars.length, onHoverStateChange, setViewByIndices, visibleBars])
 
   const handleMouseDown = useCallback((e) => {
     if (bars.length <= n) return
@@ -396,7 +503,7 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
         ref={containerRef}
         style={{ position: 'relative', width: '100%', height: chartHeight }}
         onMouseMove={handleMouseMove}
-        onMouseLeave={() => { setHovered(null); setDragState(null) }}
+        onMouseLeave={() => { setHovered(null); setDragState(null); onHoverStateChange?.(null) }}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
       >
@@ -428,27 +535,40 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
           </g>
         )}
 
-        {/* Market-close vertical line */}
-        {isIntraday && mktCloseIdx >= 0 && (
+        {/* Single-day market close line */}
+        {!isMultiDay && mktCloseIdx >= 0 && (
           <g>
             <line
               x1={xOf(mktCloseIdx)} y1={PAD_TOP} x2={xOf(mktCloseIdx)} y2={PAD_TOP + plotH}
               stroke="#f59e0b" strokeWidth={1} strokeDasharray="3 3"
             />
-            <text x={xOf(mktCloseIdx) + 3} y={PAD_TOP + 10} fill="#f59e0b" fontSize={9}>Close</text>
+            {hasPostMkt && <text x={xOf(mktCloseIdx) + 3} y={PAD_TOP + 10} fill="#f59e0b" fontSize={9}>Close</text>}
           </g>
         )}
 
-        {/* Market-open vertical line (hidden after 10:30 ET) */}
-        {isIntraday && !hidePremarket && mktOpenIdx >= 0 && (
+        {/* Single-day market open line (hidden after 10:30 ET) */}
+        {!isMultiDay && !hidePremarket && mktOpenIdx >= 0 && (
           <g>
             <line
               x1={xOf(mktOpenIdx)} y1={PAD_TOP} x2={xOf(mktOpenIdx)} y2={PAD_TOP + plotH}
               stroke="#f59e0b" strokeWidth={1} strokeDasharray="3 3"
             />
-            <text x={xOf(mktOpenIdx) + 3} y={PAD_TOP + 10} fill="#f59e0b" fontSize={9}>Open</text>
+            {hasPreMkt && <text x={xOf(mktOpenIdx) + 3} y={PAD_TOP + 10} fill="#f59e0b" fontSize={9}>Open</text>}
           </g>
         )}
+
+        {/* Multi-day session separator lines */}
+        {daySessionLines.map((line, i) => (
+          <g key={`sess-${i}`}>
+            <line
+              x1={xOf(line.idx)} y1={PAD_TOP} x2={xOf(line.idx)} y2={PAD_TOP + plotH}
+              stroke={line.label ? '#f59e0b' : '#334155'} strokeWidth={1} strokeDasharray="3 3"
+            />
+            {line.label && (
+              <text x={xOf(line.idx) + 3} y={PAD_TOP + 10} fill="#f59e0b" fontSize={9}>{line.label}</text>
+            )}
+          </g>
+        ))}
 
         {/* Volume bars */}
         {visibleBars.map((d, i) => {
@@ -490,9 +610,9 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
         {hasMA200 && renderSeries('ma_200', MA_200, 1.1)}
 
         {/* Hover crosshair */}
-        {hovered && (
+        {activeHover && (
           <line
-            x1={hovered.x} y1={PAD_TOP} x2={hovered.x} y2={PAD_TOP + plotH}
+            x1={activeHover.x} y1={PAD_TOP} x2={activeHover.x} y2={PAD_TOP + plotH}
             stroke="#475569" strokeWidth={1} strokeDasharray="2 2"
           />
         )}
@@ -506,11 +626,11 @@ function CandlestickInner({ data = [], prevClose, height = 260, className = '', 
         </svg>
 
       {/* Floating tooltip */}
-        {hovered && (
+        {activeHover && (
           <TooltipBox
-            bar={{ ...hovered.bar, prev_close: prevClose }}
-            x={hovered.x}
-            y={hovered.y}
+            bar={{ ...activeHover.bar, prev_close: prevClose }}
+            x={activeHover.x}
+            y={activeHover.y}
             chartWidth={width}
           />
         )}

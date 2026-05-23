@@ -345,16 +345,14 @@ export function enrichData(data) {
 export function enrichDataWithWarmup(warmupData, visibleData) {
   if (!warmupData?.length || !visibleData?.length) return enrichData(visibleData)
   const firstDate = visibleData[0]?.date
-  // Intraday bars use "MM/DD HH:MM" format; daily warmup bars use "YYYY-MM-DD".
-  // String comparison between the two formats is unreliable ("2025-..." > "05/..."),
-  // so for intraday visible data we include ALL daily warmup bars — they are always
-  // from prior calendar days and simply seed the rolling indicator windows.
-  const isIntraday = firstDate && firstDate.includes('/') && firstDate.includes(':')
-  const warmup = isIntraday
-    ? warmupData
-    : (firstDate ? warmupData.filter(d => d.date < firstDate) : warmupData)
+  // The warmup request can overlap the visible window, so keep only bars that
+  // are strictly earlier than the first visible bar before seeding indicators.
+  const warmup = firstDate ? warmupData.filter(d => d.date < firstDate) : warmupData
   if (!warmup.length) return enrichData(visibleData)
   const combined = [...warmup, ...visibleData]
-  const enriched = enrichData(combined)
+  // Recompute Bollinger Bands from the seeded series so the visible slice does
+  // not inherit short-range backend bands from an insufficient source window.
+  const combinedForBb = combined.map(({ upper, mid, lower, ...rest }) => rest)
+  const enriched = enrichData(combinedForBb)
   return enriched.slice(warmup.length)
 }

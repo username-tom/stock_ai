@@ -54,7 +54,7 @@ _PERIOD_RANGE_MAP: dict[str, str] = {
 # period string → Yahoo "interval" param
 _PERIOD_INTERVAL_MAP: dict[str, str] = {
     "1d":  "1m",  "2d":  "1m",  "5d":  "15m", "2w":  "15m",
-    "1mo": "1d",  "3mo": "1d",  "6mo": "1d",
+    "1mo": "1h",  "3mo": "1d",  "6mo": "1d",
     "1y":  "1d",  "2y":  "1d",  "5y":  "1d", "max": "1d",
 }
 

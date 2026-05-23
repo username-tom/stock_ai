@@ -1,4 +1,4 @@
-import { useId } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   ComposedChart, Line, Bar, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine, ReferenceArea,
@@ -125,7 +125,7 @@ function OneDayTooltip({ active, payload, label, prevClose, indicators = {} }) {
   )
 }
 
-function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, height = 240 }) {
+function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, height = 240, hoverState = null, onHoverStateChange }) {
   if (!data.length) return null
 
   // Keep only the latest day(s) based on selected short period.
@@ -190,6 +190,20 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
   // Day separator vertical lines
   const dayLines = days.slice(1).map(day => segmented.find(d => dayOf(d) === day)?.date).filter(Boolean)
 
+  const externalHover = hoverState?.source === 'candlestick' ? hoverState.date : null
+  const externalHoverPoint = externalHover ? segmented.find((d) => d.date === externalHover) : null
+
+  const handleHoverMove = useCallback((event) => {
+    const payload = event?.activePayload?.[0]?.payload
+    const date = payload?.date ?? event?.activeLabel ?? null
+    if (!date) return
+    onHoverStateChange?.({ date, source: 'subplot' })
+  }, [onHoverStateChange])
+
+  const handleHoverLeave = useCallback(() => {
+    onHoverStateChange?.(null)
+  }, [onHoverStateChange])
+
   // Subtle background tint for off-hours zones only
   const sessionAreas = []
   days.forEach(day => {
@@ -237,10 +251,10 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
   }
 
   return (
-    <div className="space-y-0.5">
+    <div className="relative space-y-0.5">
       {/* Price + Volume panel */}
       <ResponsiveContainer width="100%" height={height}>
-        <ComposedChart syncId={syncId} data={segmented} margin={{ top: 8, right: 64, left: 0, bottom: 0 }}>
+        <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 8, right: 64, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
           <defs>
             <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%"  stopColor={fillColor} stopOpacity={0.25} />
@@ -271,6 +285,8 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
           {dayLines.map((x, i) => (
             <ReferenceLine key={`day-${i}`} yAxisId="price" x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
           ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
 
           {/* Previous close reference */}
           {prevClose != null && prevCloseInRange && (
@@ -345,7 +361,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
       {/* RSI panel */}
       {hasRSI && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
@@ -356,6 +372,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
             {dayLines.map((x, i) => (
               <ReferenceLine key={`day-r-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={70} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={30} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
             <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} />
@@ -366,7 +383,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
       {/* MACD panel */}
       {hasMACD && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => v?.toFixed(2)} />
@@ -377,6 +394,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
             {dayLines.map((x, i) => (
               <ReferenceLine key={`day-m-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.7} />
             <Bar dataKey="macd_hist" isAnimationActive={false} label={false}>
               {segmented.map((entry, i) => (
@@ -392,7 +410,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
       {/* Stochastic panel */}
       {hasStoch && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} />
@@ -403,6 +421,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
             {dayLines.map((x, i) => (
               <ReferenceLine key={`day-st-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
             <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} isAnimationActive={false} name="Stoch %K" />
@@ -414,7 +433,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
       {/* ATR panel */}
       {hasATR && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => `$${v?.toFixed(2)}`} />
@@ -425,6 +444,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
             {dayLines.map((x, i) => (
               <ReferenceLine key={`day-at-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="ATR(14)" />
           </ComposedChart>
         </ResponsiveContainer>
@@ -433,7 +453,7 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
       {/* OBV panel */}
       {hasOBV && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={segmented} margin={{ top: 4, right: 64, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             <XAxis {...xAxisProps} />
             <YAxis orientation="right" domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={58} tickFormatter={v => fmtOBV(v)} />
@@ -458,7 +478,9 @@ function OneDayChart({ data, period = '1d', prevClose, syncId, indicators = {}, 
  * For 5d (MM/DD HH:MM) data, compute off-market areas and day separator lines.
  */
 function buildSessionAreas(sampled, period) {
-  if (period !== '5d') return { areas: [], dayLines: [] }
+  const isIntraday = sampled.length > 0 && typeof sampled[0].date === 'string'
+    && sampled[0].date.includes('/') && sampled[0].date.includes(':')
+  if (!isIntraday) return { areas: [], dayLines: [] }
 
   const areas = []
   const dayLines = []
@@ -527,6 +549,11 @@ function PriceTooltip({ active, payload, label, prevClose, indicators = {} }) {
       {indicators.ma200 !== false && d.ma_200 != null && <TTRow label="MA(200)" value={`$${d.ma_200.toFixed(2)}`} className="text-purple-400" />}
     </div>
   )
+}
+
+function SharedPriceTooltip({ dataPoint, label, prevClose, indicators = {} }) {
+  if (!dataPoint) return null
+  return <PriceTooltip active payload={[{ payload: dataPoint }]} label={label ?? dataPoint.date} prevClose={prevClose} indicators={indicators} />
 }
 
 function RSITooltip({ active, payload }) {
@@ -603,8 +630,67 @@ function OBVTooltip({ active, payload }) {
   )
 }
 
-export default function SubplotChart({ data = [], warmupData, height = 240, indicators = {}, period = '', prevClose, hidePricePanel = false }) {
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v))
+}
+
+function SubplotIconButton({ title, onClick, disabled = false, children }) {
+  return (
+    <button
+      type="button"
+      className="inline-flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:text-slate-100 hover:bg-dark-700/60 disabled:opacity-40 disabled:hover:bg-transparent"
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  )
+}
+
+function windowToIndices(window, total) {
+  if (!total) return { start: 0, end: 0 }
+  const startRatio = clamp01(window?.startRatio ?? 0)
+  const endRatio = clamp01(window?.endRatio ?? 1)
+  const orderedStart = Math.min(startRatio, endRatio)
+  const orderedEnd = Math.max(startRatio, endRatio)
+  const maxIndex = total - 1
+  const start = Math.max(0, Math.min(maxIndex, Math.floor(orderedStart * maxIndex)))
+  const end = Math.max(start, Math.min(maxIndex, Math.ceil(orderedEnd * maxIndex)))
+  return { start, end }
+}
+
+function indicesToWindow(start, end, total) {
+  if (!total || total <= 1) return { startRatio: 0, endRatio: 1 }
+  const maxIndex = total - 1
+  const safeStart = Math.max(0, Math.min(start, maxIndex))
+  const safeEnd = Math.max(safeStart, Math.min(end, maxIndex))
+  return {
+    startRatio: safeStart / maxIndex,
+    endRatio: safeEnd / maxIndex,
+  }
+}
+
+export default function SubplotChart({
+  data = [],
+  warmupData,
+  height = 240,
+  indicators = {},
+  period = '',
+  prevClose,
+  hidePricePanel = false,
+  viewWindow,
+  onViewWindowChange,
+  hoverState,
+  onHoverStateChange,
+}) {
   const syncId = useId()
+  const containerRef = useRef(null)
+  const [dragState, setDragState] = useState(null)
+  const [internalWindow, setInternalWindow] = useState({ startRatio: 0, endRatio: 1 })
+  const isControlled = viewWindow != null && typeof onViewWindowChange === 'function'
+  const effectiveWindow = isControlled ? viewWindow : internalWindow
 
   if (!data.length) return (
     <div className="flex items-center justify-center h-40 text-slate-500 text-sm">
@@ -612,18 +698,156 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
     </div>
   )
 
-  // 1D and 2D get the Yahoo-style pre/regular/post chart unless caller only
-  // wants indicator panes.
-  if (!hidePricePanel && (period === '1d' || period === '2d')) {
-    return <OneDayChart data={data} period={period} height={height} indicators={indicators} prevClose={prevClose} syncId={syncId} />
+  const isOneDayMode = !hidePricePanel && (period === '1d' || period === '2d')
+
+  const oneDayBase = (() => {
+    if (!isOneDayMode) return []
+    const dayOf = (d) => d.date?.slice(0, 5) ?? ''
+    const allDays = [...new Set(data.map(dayOf).filter(Boolean))].sort()
+    const daysToKeep = period === '2d' ? 2 : 1
+    const keepDays = new Set(allDays.slice(-daysToKeep))
+    return data.filter(d =>
+      keepDays.has(dayOf(d)) &&
+      d.open != null && d.high != null && d.low != null && d.close != null
+    )
+  })()
+
+  const enriched = isOneDayMode
+    ? []
+    : (warmupData?.length ? enrichDataWithWarmup(warmupData, data) : enrichData(data))
+  const step = isOneDayMode ? 1 : Math.max(1, Math.floor(enriched.length / 300))
+  // Always keep signal bars so buy/sell markers are never dropped
+  const sampled = isOneDayMode
+    ? oneDayBase
+    : enriched.filter((_, i) => i % step === 0 || enriched[i].signal !== 0)
+
+  useEffect(() => {
+    if (!isControlled) setInternalWindow({ startRatio: 0, endRatio: 1 })
+  }, [isControlled, sampled.length])
+
+  const { start: safeStart, end: safeEnd } = useMemo(
+    () => windowToIndices(effectiveWindow, sampled.length),
+    [effectiveWindow, sampled.length]
+  )
+  const visibleSampled = sampled.slice(safeStart, safeEnd + 1)
+  const visibleCount = visibleSampled.length
+  const canPan = sampled.length > visibleCount
+
+  const updateWindowByIndices = useCallback((nextStart, nextEnd) => {
+    const total = sampled.length
+    if (!total) return
+    const size = Math.max(1, nextEnd - nextStart + 1)
+    const clampedStart = Math.max(0, Math.min(nextStart, total - size))
+    const clampedEnd = clampedStart + size - 1
+    const nextWindow = indicesToWindow(clampedStart, clampedEnd, total)
+    if (isControlled) onViewWindowChange(nextWindow)
+    else setInternalWindow(nextWindow)
+  }, [isControlled, onViewWindowChange, sampled.length])
+
+  const zoomBy = useCallback((zoomIn, anchorRatio = 0.5) => {
+    const total = sampled.length
+    if (!total) return
+    const size = safeEnd - safeStart + 1
+    const minWindowBars = Math.min(24, total)
+    const nextSize = zoomIn
+      ? Math.max(minWindowBars, Math.floor(size * 0.8))
+      : Math.min(total, Math.ceil(size * 1.25))
+    if (nextSize === size) return
+
+    const anchor = clamp01(anchorRatio)
+    const anchorGlobal = safeStart + Math.round((size - 1) * anchor)
+    let nextStart = anchorGlobal - Math.round((nextSize - 1) * anchor)
+    nextStart = Math.max(0, Math.min(nextStart, total - nextSize))
+    updateWindowByIndices(nextStart, nextStart + nextSize - 1)
+  }, [safeEnd, safeStart, sampled.length, updateWindowByIndices])
+
+  const handleMouseDown = useCallback((e) => {
+    if (!canPan) return
+    setDragState({
+      startClientX: e.clientX,
+      baseStart: safeStart,
+      baseEnd: safeEnd,
+    })
+  }, [canPan, safeEnd, safeStart])
+
+  const handleMouseMove = useCallback((e) => {
+    if (!dragState) return
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect?.width) return
+    const barsPerPx = visibleCount / rect.width
+    const shiftBars = Math.round((e.clientX - dragState.startClientX) * barsPerPx)
+    updateWindowByIndices(dragState.baseStart - shiftBars, dragState.baseEnd - shiftBars)
+  }, [dragState, updateWindowByIndices, visibleCount])
+
+  const handleMouseUpOrLeave = useCallback(() => {
+    setDragState(null)
+  }, [])
+
+  const externalHover = hoverState?.source === 'candlestick' ? hoverState.date : null
+  const externalHoverPoint = externalHover ? visibleSampled.find((d) => d.date === externalHover) : null
+
+  const handleHoverMove = useCallback((event) => {
+    const payload = event?.activePayload?.[0]?.payload
+    const date = payload?.date ?? event?.activeLabel ?? null
+    if (!date) return
+    onHoverStateChange?.({ date, source: 'subplot' })
+  }, [onHoverStateChange])
+
+  const handleHoverLeave = useCallback(() => {
+    onHoverStateChange?.(null)
+  }, [onHoverStateChange])
+
+  const handleWheel = useCallback((e) => {
+    e.preventDefault()
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect?.width) return
+    const anchorRatio = clamp01((e.clientX - rect.left) / rect.width)
+    zoomBy(e.deltaY < 0, anchorRatio)
+  }, [zoomBy])
+
+  const resetView = useCallback(() => {
+    const nextWindow = { startRatio: 0, endRatio: 1 }
+    if (isControlled) onViewWindowChange(nextWindow)
+    else setInternalWindow(nextWindow)
+  }, [isControlled, onViewWindowChange])
+
+  const isZoomed = effectiveWindow.startRatio > 0 || effectiveWindow.endRatio < 1
+
+  if (isOneDayMode) {
+    return (
+      <div
+        ref={containerRef}
+        className="space-y-0.5"
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUpOrLeave}
+        onMouseLeave={handleMouseUpOrLeave}
+        onWheel={handleWheel}
+      >
+        <div className="flex items-center justify-end gap-0.5 pr-1 h-[22px]">
+          <SubplotIconButton title="Zoom in" onClick={() => zoomBy(true, 0.5)}>
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M11 8v6M8 11h6M20 20l-3.5-3.5" /></svg>
+          </SubplotIconButton>
+          <SubplotIconButton title="Zoom out" onClick={() => zoomBy(false, 0.5)}>
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M8 11h6M20 20l-3.5-3.5" /></svg>
+          </SubplotIconButton>
+          <SubplotIconButton title="Reset view" onClick={resetView} disabled={!isZoomed}>
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v4h4" /></svg>
+          </SubplotIconButton>
+        </div>
+        <OneDayChart
+          data={visibleSampled}
+          period={period}
+          height={height}
+          indicators={indicators}
+          prevClose={prevClose}
+          syncId={syncId}
+        />
+      </div>
+    )
   }
 
-  const enriched = warmupData?.length ? enrichDataWithWarmup(warmupData, data) : enrichData(data)
-  const step = Math.max(1, Math.floor(enriched.length / 300))
-  // Always keep signal bars so buy/sell markers are never dropped
-  const sampled = enriched.filter((_, i) => i % step === 0 || enriched[i].signal !== 0)
-
-  const { areas: sessionAreas, dayLines } = buildSessionAreas(sampled, period)
+  const { areas: sessionAreas, dayLines } = buildSessionAreas(visibleSampled, period)
 
   const hasRSI  = (indicators.rsi    !== false) && sampled.some(d => d.rsi     != null)
   const hasMACD = (indicators.macd   !== false) && sampled.some(d => d.macd    != null)
@@ -647,11 +871,35 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
   }
 
   return (
-    <div className="space-y-1">
+    <div
+      ref={containerRef}
+      className="relative space-y-1"
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUpOrLeave}
+      onMouseLeave={handleMouseUpOrLeave}
+      onWheel={handleWheel}
+    >
+      <div className="flex items-center justify-end gap-0.5 pr-1 h-[22px]">
+        <SubplotIconButton title="Zoom in" onClick={() => zoomBy(true, 0.5)}>
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M11 8v6M8 11h6M20 20l-3.5-3.5" /></svg>
+        </SubplotIconButton>
+        <SubplotIconButton title="Zoom out" onClick={() => zoomBy(false, 0.5)}>
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M8 11h6M20 20l-3.5-3.5" /></svg>
+        </SubplotIconButton>
+        <SubplotIconButton title="Reset view" onClick={resetView} disabled={!isZoomed}>
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v4h4" /></svg>
+        </SubplotIconButton>
+      </div>
+      {externalHoverPoint && !hidePricePanel && (
+        <div className="pointer-events-none absolute left-3 top-8 z-20">
+          <SharedPriceTooltip dataPoint={externalHoverPoint} label={externalHoverPoint.date} prevClose={prevClose} indicators={indicators} />
+        </div>
+      )}
       {/* Price panel */}
       {!hidePricePanel && (
         <ResponsiveContainer width="100%" height={priceHeight}>
-          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 8, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 8, right: 10, left: 0, bottom: 0 }} onMouseMove={handleHoverMove} onMouseLeave={handleHoverLeave}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis
@@ -669,6 +917,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
             {dayLines.map((d, i) => (
               <ReferenceLine key={`day-p-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={<SignalDot />} activeDot={{ r: 3 }} name="Close" isAnimationActive={false} />
             {hasBB && <Line type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Upper" isAnimationActive={false} />}
             {hasBB && <Line type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Lower" isAnimationActive={false} />}
@@ -683,11 +932,16 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
           </ComposedChart>
         </ResponsiveContainer>
       )}
+      {externalHoverPoint && (
+        <div className="pointer-events-none absolute left-3 top-8 z-20">
+          <SharedPriceTooltip dataPoint={externalHoverPoint} label={externalHoverPoint.date} prevClose={prevClose} indicators={indicators} />
+        </div>
+      )}
 
       {/* RSI panel */}
       {hasRSI && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
@@ -698,6 +952,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
             {dayLines.map((d, i) => (
               <ReferenceLine key={`day-r-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={70} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={30} stroke={BUY_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} name="RSI" isAnimationActive={false} />
@@ -708,7 +963,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
       {/* MACD panel */}
       {hasMACD && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => v?.toFixed(2)} />
@@ -719,9 +974,10 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
             {dayLines.map((d, i) => (
               <ReferenceLine key={`day-m-${i}`} x={d} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.7} />
             <Bar dataKey="macd_hist" name="Histogram" isAnimationActive={false} label={false}>
-              {sampled.map((entry, i) => (
+              {visibleSampled.map((entry, i) => (
                 <Cell key={`macd-cell-${i}`} fill={entry.macd_hist >= 0 ? '#4ade80' : '#f87171'} opacity={0.6} />
               ))}
             </Bar>
@@ -734,7 +990,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
       {/* Stochastic panel */}
       {hasStoch && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={[0, 100]} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} />
@@ -745,6 +1001,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
             {dayLines.map((d, i) => (
               <ReferenceLine key={`day-st-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
             <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} name="Stoch %K" isAnimationActive={false} />
@@ -756,7 +1013,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
       {/* ATR panel */}
       {hasATR && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => `$${v?.toFixed(2)}`} />
@@ -767,6 +1024,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
             {dayLines.map((d, i) => (
               <ReferenceLine key={`day-at-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} name="ATR(14)" isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
@@ -775,7 +1033,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
       {/* OBV panel */}
       {hasOBV && (
         <ResponsiveContainer width="100%" height={oscHeight}>
-          <ComposedChart syncId={syncId} data={sampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+          <ComposedChart syncId={syncId} syncMethod="value" data={visibleSampled} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
             {sharedXAxis}
             <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} width={60} tickFormatter={v => fmtOBV(v)} />
@@ -786,6 +1044,7 @@ export default function SubplotChart({ data = [], warmupData, height = 240, indi
             {dayLines.map((d, i) => (
               <ReferenceLine key={`day-ov-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.5} />
             <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} name="OBV" isAnimationActive={false} />
           </ComposedChart>

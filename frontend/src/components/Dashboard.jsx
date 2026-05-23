@@ -54,7 +54,7 @@ const PERIOD_INTERVAL_HINTS = {
   '2d': '1m',
   '5d': '15m',
   '2w': '15m',
-  '1mo': '1d',
+  '1mo': '1h',
   '3mo': '1d',
   '6mo': '1d',
   '1y': '1d',
@@ -327,16 +327,26 @@ export default function Dashboard() {
   })
 
   // Fetch 1Y daily data as warmup for indicator seeding on short-period charts.
-  // MA(200) needs ~200 trading days; 1Y gives ~252.  Only needed for periods
-  // where the visible data alone is too short to seed the indicators.
-  const needsWarmup = ['5d', '2w', '1mo', '3mo', '6mo'].includes(chartPeriod)
-  // Warmup shares the '1y' localStorage slot; serves as initialData so the
-  // chart renders immediately on load without a network round-trip.
-  const cachedWarmup = useMemo(() => getCachedHistory(chartSymbol, '1y', '1d'), [chartSymbol])
+  // Indicator warmup needs to match the visible chart interval. Mixing daily
+  // warmup bars into intraday series distorts Bollinger Bands at the left edge.
+  const warmupPeriodByChartPeriod = {
+    '5d': '1mo',
+    '2w': '1mo',
+    '1mo': '3mo',
+    '3mo': '6mo',
+    '6mo': '1y',
+  }
+  const warmupPeriod = warmupPeriodByChartPeriod[chartPeriod] ?? null
+  const needsWarmup = !!warmupPeriod
+  const warmupInterval = chartInterval || '1d'
+  const cachedWarmup = useMemo(
+    () => (warmupPeriod ? getCachedHistory(chartSymbol, warmupPeriod, warmupInterval) : null),
+    [chartSymbol, warmupPeriod, warmupInterval]
+  )
   const { data: warmupHistData } = useQuery({
-    // Reuse the same key as the 1Y chart view so they share React Query's cache.
-    queryKey: ['history', chartSymbol, '1y', '1d'],
-    queryFn: () => getHistory(chartSymbol, '1y', '1d'),
+    // Use the same interval as the visible chart so seeded indicators stay aligned.
+    queryKey: ['history', chartSymbol, warmupPeriod, warmupInterval],
+    queryFn: () => getHistory(chartSymbol, warmupPeriod, warmupInterval),
     initialData: cachedWarmup,
     staleTime: 24 * 60 * 60_000,  // 24h — daily bars don’t change retroactively
     refetchIntervalInBackground: false,
@@ -350,12 +360,12 @@ export default function Dashboard() {
     }
   }, [histData, chartSymbol, chartPeriod, chartInterval])
 
-  // Persist warmup data so the next page load skips the 1Y fetch entirely
+  // Persist warmup data so the next page load skips the same-interval fetch entirely
   useEffect(() => {
     if (warmupHistData && chartSymbol) {
-      writeHistoryCache(chartSymbol, '1y', '1d', warmupHistData)
+      writeHistoryCache(chartSymbol, warmupPeriod, warmupInterval, warmupHistData)
     }
-  }, [warmupHistData, chartSymbol])
+  }, [warmupHistData, chartSymbol, warmupPeriod, warmupInterval])
 
   const chartPrevClose =
     quotesMap?.[chartSymbol]?.previous_close ??
