@@ -142,7 +142,7 @@ export default function SandboxPanel() {
   const importInputRef = useRef(null)
 
   const [searchParams, setSearchParams] = useSearchParams()
-  const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get('symbol') || null)
+  const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get('symbol') || readDashboardWatchlist()[0] || null)
   const [editingStrategy, setEditingStrategy] = useState(false)
   const [editStratType, setEditStratType] = useState('sma_crossover')
   const [editScriptId, setEditScriptId] = useState(null)

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getBulkQuotes, getHistory } from '../api/client'
 import { useMarketOpen } from '../hooks/useMarketOpen'
@@ -237,20 +237,24 @@ export default function Dashboard() {
   const watchlistState = useWatchlist()
   const { watchlist, updateWatchlist } = watchlistState
 
+  const { pathname } = useLocation()
   const [searchParams, setSearchParams] = useSearchParams()
   const [chartSymbol, setChartSymbol] = useState(() => searchParams.get('symbol') || watchlist[0] || 'AAPL')
   const [chartPeriod, setChartPeriod] = useState('1d')
   const [chartType, setChartType] = useState(readStoredChartType)
 
-  // Consume ?symbol= param on navigation from sandbox
+  // Consume ?symbol= param on navigation from sandbox.
+  // Guard with pathname === '/' so this panel doesn't strip params
+  // intended for other persistent panels (e.g. /sandbox?symbol=X).
   useEffect(() => {
+    if (pathname !== '/') return
     const sym = searchParams.get('symbol')
     if (sym) {
       setChartSymbol(sym)
       setActiveTab('charts')
       setSearchParams({}, { replace: true })
     }
-  }, [searchParams])
+  }, [searchParams, pathname])
   const [indicators, setIndicators] = useState({ bb: true, ma9: false, ma20: true, ma50: true, ma100: false, ma200: true, rsi: true, macd: true })
   const [activeTab, setActiveTab] = useState('charts')
 
