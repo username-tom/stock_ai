@@ -334,11 +334,113 @@ async def get_learner_history(symbol: str) -> list[dict[str, Any]]:
     return _history_cache.get(sym, [])
 
 
-async def classify_symbols(symbols: list[str], period: str = _LEARNER_PERIOD) -> dict[str, dict[str, Any]]:
+def _clamp_weight(weight: float | int | None) -> float:
+    try:
+        w = float(weight or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(w):
+        return 0.0
+    return max(0.0, min(1.0, w))
+
+
+def _blend_external(
+    learner: dict[str, Any],
+    external: dict[str, Any] | None,
+    weight: float,
+) -> dict[str, Any]:
+    """Blend an external sentiment payload into a learner result dict.
+
+    Mutates and returns a new dict. The blended score replaces
+    ``learner_score`` so downstream tag routing benefits automatically,
+    while the original learner output is preserved under ``learner_score_raw``
+    / ``learner_tag_raw``.
+    """
+    result = dict(learner)
+    if weight <= 0.0 or not isinstance(external, dict):
+        return result
+
+    try:
+        ext_score = float(external.get("score", 0.0) or 0.0)
+        ext_conf = float(external.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return result
+
+    if not math.isfinite(ext_score) or not math.isfinite(ext_conf) or ext_conf <= 0.0:
+        return result
+
+    raw_score = float(result.get("learner_score", 0.0) or 0.0)
+    raw_conf = float(result.get("learner_confidence", 0.0) or 0.0)
+    raw_tag = result.get("learner_tag", "WATCH")
+
+    # Effective weight is scaled by external confidence so weak signals
+    # have less influence even at high configured weight.
+    eff_w = weight * ext_conf
+    blended_score = (1.0 - eff_w) * raw_score + eff_w * ext_score
+    blended_score = max(-1.0, min(1.0, blended_score))
+
+    # Confidence: boost when learner and external agree on direction, dampen
+    # on disagreement. Bounded to [0, 1].
+    agree = 1.0 if (raw_score == 0.0 or ext_score == 0.0 or (raw_score > 0) == (ext_score > 0)) else -1.0
+    blended_conf = raw_conf + agree * weight * ext_conf * 0.25
+    blended_conf = max(0.0, min(1.0, blended_conf))
+
+    blended_tag = _tag_from_score(blended_score, blended_conf)
+    direction = "long" if "LONG" in blended_tag else "short" if "SHORT" in blended_tag else "neutral"
+
+    result["learner_score_raw"] = round(raw_score, 3)
+    result["learner_tag_raw"] = raw_tag
+    result["learner_score"] = round(blended_score, 3)
+    result["learner_confidence"] = round(blended_conf, 3)
+    result["learner_tag"] = blended_tag
+    result["learner_direction"] = direction
+    result["learner_blend_weight"] = round(weight, 3)
+    result["external_score"] = round(ext_score, 3)
+    result["external_bucket"] = external.get("bucket", "neutral")
+    result["external_confidence"] = round(ext_conf, 3)
+    result["external_event_flag"] = bool(external.get("event_flag", False))
+    result["external_as_of"] = external.get("as_of")
+    reason = result.get("learner_reason") or ""
+    result["learner_reason"] = (
+        f"{reason}; blended ext={ext_score:+.3f} (w={weight:.2f}, conf={ext_conf:.2f})"
+    ).lstrip("; ")
+    return result
+
+
+async def classify_symbols(
+    symbols: list[str],
+    period: str = _LEARNER_PERIOD,
+    *,
+    external_sentiment_weight: float = 0.0,
+) -> dict[str, dict[str, Any]]:
     requested = [s.upper().strip() for s in symbols if s and s.strip()]
     if not requested:
         return {}
 
     unique_symbols = list(dict.fromkeys(requested))
+    weight = _clamp_weight(external_sentiment_weight)
+
+    if weight > 0.0:
+        # Fetch learner + external sentiment concurrently for the whole batch.
+        from app.services import sentiment_aggregator
+        learner_task = asyncio.gather(
+            *(classify_symbol(sym, period=period) for sym in unique_symbols)
+        )
+        sentiment_task = sentiment_aggregator.get_bulk_sentiment(unique_symbols)
+        try:
+            learner_results, sentiment_map = await asyncio.gather(
+                learner_task, sentiment_task
+            )
+        except Exception:
+            # Fall back to pure learner output if sentiment fetch blows up.
+            learner_results = await learner_task
+            sentiment_map = {}
+        if not isinstance(sentiment_map, dict):
+            sentiment_map = {}
+        return {
+            item["symbol"]: _blend_external(item, sentiment_map.get(item["symbol"]), weight)
+            for item in learner_results
+        }
+
     results = await asyncio.gather(*(classify_symbol(sym, period=period) for sym in unique_symbols))
     return {item["symbol"]: item for item in results}

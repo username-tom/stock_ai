@@ -98,7 +98,9 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
     positions = result.scalars().all()
     all_symbols = list({p.symbol for p in positions})
     try:
-        insights = await classify_symbols(all_symbols)
+        from app.services.portfolio_manager import get_manager_settings
+        ext_w = float(get_manager_settings().get("ai_external_sentiment_weight", 0.0) or 0.0)
+        insights = await classify_symbols(all_symbols, external_sentiment_weight=ext_w)
     except Exception:
         insights = {}
     return {
@@ -118,7 +120,9 @@ async def get_learner_insights(symbols: str = ""):
     if not requested:
         return {"insights": {}}
     try:
-        return {"insights": await classify_symbols(requested)}
+        from app.services.portfolio_manager import get_manager_settings
+        ext_w = float(get_manager_settings().get("ai_external_sentiment_weight", 0.0) or 0.0)
+        return {"insights": await classify_symbols(requested, external_sentiment_weight=ext_w)}
     except Exception:
         return {"insights": {}}
 

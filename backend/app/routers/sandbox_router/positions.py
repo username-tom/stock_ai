@@ -167,7 +167,12 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
 
         try:
             from app.services.stock_learner import classify_symbols
-            insights = await classify_symbols(list({p["symbol"] for p in enriched}))
+            from app.services.portfolio_manager import get_manager_settings
+            ext_w = float(get_manager_settings().get("ai_external_sentiment_weight", 0.0) or 0.0)
+            insights = await classify_symbols(
+                list({p["symbol"] for p in enriched}),
+                external_sentiment_weight=ext_w,
+            )
         except Exception:
             insights = {}
         enriched = [{**p, **insights.get(p["symbol"], {})} for p in enriched]
@@ -185,7 +190,9 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
     pos_dicts = [position_dict(p) for p in positions]
     try:
         from app.services.stock_learner import classify_symbols
-        insights = await classify_symbols([p["symbol"] for p in pos_dicts])
+        from app.services.portfolio_manager import get_manager_settings
+        ext_w = float(get_manager_settings().get("ai_external_sentiment_weight", 0.0) or 0.0)
+        insights = await classify_symbols([p["symbol"] for p in pos_dicts], external_sentiment_weight=ext_w)
     except Exception:
         insights = {}
     return {"positions": [{**p, **insights.get(p["symbol"], {})} for p in pos_dicts]}

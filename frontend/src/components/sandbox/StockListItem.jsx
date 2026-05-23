@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { PlayIcon, StopCircleIcon, ArrowDownIcon, ArrowUpIcon } from '@heroicons/react/24/outline'
 import { getScripts, getBuiltinTemplates } from '../../api/client'
 import { quotesentiment, SENTIMENT_COLORS, SENTIMENT_LABELS, quotesignal, SIGNAL_COLORS, SIGNAL_LABELS } from '../../utils/sentiment'
+import ExternalSentimentBadge from './ExternalSentimentBadge'
 import { fmt, fmtMoney } from './sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY } from './sandboxConstants'
 
@@ -134,13 +135,23 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
           <div className="text-[11px] text-sky-300/80 truncate mb-0.5">{sector}</div>
         )}
         {learnerTag && (
-          <div className="mb-0.5 flex items-center gap-1">
+          <div className="mb-0.5 flex items-center gap-1 flex-wrap">
             <span
               className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${learnerTagClass}`}
-              title={pos.learner_reason ? `${pos.learner_reason}${pos.learner_confidence != null ? ` · confidence ${Number(pos.learner_confidence).toFixed(2)}` : ''}` : `Learner bias: ${learnerTag}`}
+              title={(() => {
+                const base = pos.learner_reason
+                  ? `${pos.learner_reason}${pos.learner_confidence != null ? ` · confidence ${Number(pos.learner_confidence).toFixed(2)}` : ''}`
+                  : `Learner bias: ${learnerTag}`
+                if (pos.learner_blend_weight && pos.learner_tag_raw && pos.learner_tag_raw !== learnerTag) {
+                  return `${base}\nRaw learner: ${pos.learner_tag_raw} (${pos.learner_score_raw ?? 0})`
+                }
+                return base
+              })()}
             >
               AI {learnerTag}{pos.learner_confidence != null ? ` ${Math.round(pos.learner_confidence * 100)}%` : ''}
+              {pos.learner_blend_weight ? <span className="ml-1 text-[9px] opacity-75">+ext</span> : null}
             </span>
+            <ExternalSentimentBadge symbol={pos.symbol} compact />
           </div>
         )}
         <div className="flex items-center justify-between text-xs text-slate-500">

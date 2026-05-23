@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.services import market_service, symbol_registry
+from app.services import market_service, sentiment_aggregator, symbol_registry
 
 logger = logging.getLogger(__name__)
 
@@ -115,4 +115,41 @@ async def get_earnings(
         return await market_service.get_earnings(watchlist, force_refresh=force)
     except Exception as exc:
         logger.error("earnings failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/sentiment/{symbol}")
+async def get_external_sentiment(
+    symbol: str,
+    force: bool = Query(default=False, description="Bypass cache and force a fresh fetch"),
+):
+    """Return aggregated external (internet) sentiment for *symbol*.
+
+    Combines Yahoo Finance news, StockTwits retail posts, and SEC EDGAR
+    recent material filings into a single 5-bucket sentiment label.
+    Cached for ~5 minutes per symbol.
+    """
+    sym = symbol.strip()
+    if not sym:
+        raise HTTPException(status_code=422, detail="Symbol required.")
+    try:
+        return await sentiment_aggregator.get_sentiment(sym, force_refresh=force)
+    except Exception as exc:
+        logger.error("external sentiment failed for %s: %s", sym.upper(), exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/sentiment")
+async def get_external_sentiment_bulk(
+    symbols: str = Query(..., description="Comma-separated symbols, e.g. AAPL,MSFT"),
+    force: bool = Query(default=False, description="Bypass cache and force a fresh fetch"),
+):
+    """Return aggregated external sentiment for multiple symbols (concurrent, cached)."""
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not sym_list:
+        raise HTTPException(status_code=422, detail="No symbols provided.")
+    try:
+        return await sentiment_aggregator.get_bulk_sentiment(sym_list, force_refresh=force)
+    except Exception as exc:
+        logger.error("bulk external sentiment failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))

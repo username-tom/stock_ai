@@ -121,6 +121,9 @@ class PortfolioManagerSettings(Base):
     # AI tag (learner) strategy routing
     ai_tag_strategy_enabled = Column(Boolean, default=False, nullable=False)
     ai_sentiment_change_enabled = Column(Boolean, default=True, nullable=False)
+    # Weight (0..1) blending external news/social sentiment into AI learner score.
+    # 0 = pure learner output (default), 1 = ignore learner and follow external feed.
+    ai_external_sentiment_weight = Column(Float, default=0.0, nullable=False)
     ai_tag_strategies = Column(Text, nullable=False, server_default=text("'{}'"))
     ai_tag_allow_overnight = Column(Boolean, default=True, nullable=False)
     ai_tag_action_mode = Column(String(20), default="strategy_override", nullable=False)

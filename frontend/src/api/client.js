@@ -18,6 +18,10 @@ export const getEarnings = (watchlist = [], force = false) =>
   api.get('/market-data/earnings', { params: { ...(watchlist.length ? { symbols: watchlist.join(',') } : {}), ...(force ? { force: true } : {}) } }).then(r => r.data)
 export const searchSymbols = (q, limit = 8) =>
   api.get('/market-data/search', { params: { q, limit } }).then(r => r.data)
+export const getExternalSentiment = (symbol, force = false) =>
+  api.get(`/market-data/sentiment/${symbol}`, { params: force ? { force: true } : {} }).then(r => r.data)
+export const getBulkExternalSentiment = (symbols, force = false) =>
+  api.get('/market-data/sentiment', { params: { symbols: symbols.join(','), ...(force ? { force: true } : {}) } }).then(r => r.data)
 
 // Backtest
 export const getStrategies = () => api.get('/backtest/strategies').then(r => r.data)

@@ -117,6 +117,8 @@ async def _migrate(conn):
         "UPDATE portfolio_manager_settings SET sentiment_data_points = 35 WHERE sentiment_data_points IS NULL OR sentiment_data_points < 35",
         # portfolio_manager_settings cached scores (persist between restarts for instant UI display)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN cached_scores TEXT NOT NULL DEFAULT '{}'",
+        # portfolio_manager_settings AI external sentiment blend weight (0..1)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_external_sentiment_weight REAL NOT NULL DEFAULT 0.0",
     ]
     for stmt in migrations:
         try:

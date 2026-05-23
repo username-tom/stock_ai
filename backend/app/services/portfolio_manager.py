@@ -75,6 +75,7 @@ _settings: dict[str, Any] = {
     },
     "ai_tag_allow_overnight": True,        # LONG/STRONG LONG positions skip EOD liquidation
     "ai_tag_action_mode": "strategy_override",  # strategy_override | direct
+    "ai_external_sentiment_weight": 0.0,   # 0..1 weight blending external news/social sentiment into AI learner score
     "ai_tag_long_engine_off": True,        # disable engine after buy for LONG/STRONG LONG (hold mode)
     "ai_tag_long_tp_pct": 0.0,            # take profit % for long-hold positions (0 = disabled)
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
@@ -206,6 +207,8 @@ async def _load_settings_from_db() -> None:
             )
             _settings["ai_tag_allow_overnight"] = bool(getattr(row, "ai_tag_allow_overnight", True))
             _settings["ai_tag_action_mode"] = getattr(row, "ai_tag_action_mode", "strategy_override") or "strategy_override"
+            _ext_w = getattr(row, "ai_external_sentiment_weight", 0.0)
+            _settings["ai_external_sentiment_weight"] = max(0.0, min(1.0, float(_ext_w or 0.0)))
             _settings["ai_tag_long_engine_off"] = bool(getattr(row, "ai_tag_long_engine_off", True))
             _settings["ai_tag_long_tp_pct"] = float(getattr(row, "ai_tag_long_tp_pct", 0.0) or 0.0)
             _settings["ai_tag_long_sl_pct"] = float(getattr(row, "ai_tag_long_sl_pct", 0.0) or 0.0)
@@ -286,6 +289,7 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_strategies = json.dumps(_settings.get("ai_tag_strategies", {}), sort_keys=True)
         row.ai_tag_allow_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
         row.ai_tag_action_mode = _settings.get("ai_tag_action_mode", "strategy_override") or "strategy_override"
+        row.ai_external_sentiment_weight = max(0.0, min(1.0, float(_settings.get("ai_external_sentiment_weight", 0.0) or 0.0)))
         row.ai_tag_long_engine_off = bool(_settings.get("ai_tag_long_engine_off", True))
         row.ai_tag_long_tp_pct = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
         row.ai_tag_long_sl_pct = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
@@ -306,7 +310,7 @@ def update_manager_settings(new: dict) -> dict:
               "stop_loss_pct", "take_profit_pct",
               "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
-              "ai_tag_action_mode",
+              "ai_tag_action_mode", "ai_external_sentiment_weight",
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
               "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct"}
@@ -645,7 +649,11 @@ async def _apply_ai_tag_strategies() -> None:
     # ── 2. Classify symbols ───────────────────────────────────────────── #
     try:
         from app.services.stock_learner import classify_symbols
-        insights = await classify_symbols(symbols, period=_ai_period_for_current_phase(snap))
+        insights = await classify_symbols(
+            symbols,
+            period=_ai_period_for_current_phase(snap),
+            external_sentiment_weight=float(_settings.get("ai_external_sentiment_weight", 0.0) or 0.0),
+        )
     except Exception as exc:
         logger.warning("AI tag classification failed: %s", exc)
         return

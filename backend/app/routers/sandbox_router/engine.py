@@ -122,6 +122,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_strategies: Optional[dict[str, str]] = None
     ai_tag_allow_overnight: Optional[bool] = None
     ai_tag_action_mode: Optional[str] = Field(default=None, pattern="^(strategy_override|direct)$")
+    ai_external_sentiment_weight: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     ai_tag_long_engine_off: Optional[bool] = None
     ai_tag_long_tp_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
     ai_tag_long_sl_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)

@@ -202,6 +202,7 @@ function buildDraftFromSettings(settings) {
     },
     ai_tag_allow_overnight: settings.ai_tag_allow_overnight ?? true,
     ai_tag_action_mode: settings.ai_tag_action_mode ?? 'strategy_override',
+    ai_external_sentiment_weight: Math.max(0, Math.min(1, Number(settings.ai_external_sentiment_weight ?? 0))),
     ai_tag_long_engine_off: settings.ai_tag_long_engine_off ?? true,
     ai_tag_long_tp_pct: settings.ai_tag_long_tp_pct ?? 0,
     ai_tag_long_sl_pct: settings.ai_tag_long_sl_pct ?? 0,
@@ -758,6 +759,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       ai_tag_strategies: draft.ai_tag_strategies,
       ai_tag_allow_overnight: draft.ai_tag_allow_overnight,
       ai_tag_action_mode: draft.ai_tag_action_mode,
+      ai_external_sentiment_weight: Math.max(0, Math.min(1, Number(draft.ai_external_sentiment_weight ?? 0))),
       ai_tag_long_engine_off: draft.ai_tag_long_engine_off,
       ai_tag_long_tp_pct: Number(draft.ai_tag_long_tp_pct),
       ai_tag_long_sl_pct: Number(draft.ai_tag_long_sl_pct),
@@ -1634,6 +1636,34 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   </div>
                   <span className="text-xs text-slate-300">{draft.ai_sentiment_change_enabled ? 'Enabled' : 'Disabled'}</span>
                 </label>
+              </SettingRow>
+
+              <SettingRow
+                label="External Sentiment Weight"
+                hint="Blend external news/social sentiment (Yahoo, StockTwits, SEC) into the AI learner score. 0 = pure learner (price/technical only); 1 = ignore learner and follow external feed. Effective weight is scaled by the external signal's own confidence."
+              >
+                <div className="flex items-center gap-2 w-full">
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    disabled={!editSettings}
+                    value={Number(draft.ai_external_sentiment_weight ?? 0)}
+                    onChange={e => updateDraft(d => ({ ...d, ai_external_sentiment_weight: Number(e.target.value) }))}
+                    className="flex-1 accent-violet-500"
+                  />
+                  <input
+                    type="number" min={0} max={1} step={0.05}
+                    disabled={!editSettings}
+                    value={Number(draft.ai_external_sentiment_weight ?? 0)}
+                    onChange={e => updateDraft(d => ({ ...d, ai_external_sentiment_weight: Math.max(0, Math.min(1, Number(e.target.value) || 0)) }))}
+                    className="input w-20 text-sm py-1.5"
+                  />
+                  <span className="text-xs text-slate-400 whitespace-nowrap">
+                    {Number(draft.ai_external_sentiment_weight ?? 0) === 0 ? 'learner only' : `${Math.round(Number(draft.ai_external_sentiment_weight) * 100)}% ext`}
+                  </span>
+                </div>
               </SettingRow>
 
               <SettingRow
