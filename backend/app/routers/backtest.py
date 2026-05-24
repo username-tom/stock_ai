@@ -576,8 +576,8 @@ async def run_sandbox_backtest_endpoint(
     hold_overnight = bool(pm.get("hold_positions_overnight", True))
     eod_window = int(pm.get("eod_sell_window_minutes") or 30)
     sentiment_warmup = int(pm.get("sentiment_data_points") or 35)
-    sim_buy_fill_rate = float(pm.get("sim_buy_fill_rate_pct", 100.0) or 0.0)
-    sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 100.0) or 0.0)
+    sim_buy_fill_rate = float(pm.get("sim_buy_fill_rate_pct", 60.0) or 0.0)
+    sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 70.0) or 0.0)
     pending_drift_cancel = float(pm.get("pending_price_drift_cancel_pct", 0.75) or 0.0)
     if req.sim_buy_fill_rate_pct is not None:
         sim_buy_fill_rate = float(req.sim_buy_fill_rate_pct)

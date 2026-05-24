@@ -1,5 +1,5 @@
 #define MyAppName "Stock AI"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "0.1.0"
 #define MyAppPublisher "tomwu"
 #define MyAppURL "https://github.com/tomwu/stock_ai"
 #define MyAppExeName "StockAiLauncher.exe"

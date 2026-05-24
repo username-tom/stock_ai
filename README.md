@@ -2,6 +2,8 @@
 
 A full-stack algorithmic trading and market analytics platform with real-time market data, backtesting, sandbox portfolio simulation, custom strategy scripts, and Interactive Brokers paper/live trading.
 
+Current app version: `0.1.0` (frontend, backend API, launcher, and Windows installer).
+
 ---
 
 ## Features
@@ -165,7 +167,9 @@ npm run dev
 
 The repo now includes a Windows wizard installer scaffold under [installer/StockAI.iss](installer/StockAI.iss) and a self-contained launcher under [launcher/StockAiLauncher/Program.cs](launcher/StockAiLauncher/Program.cs).
 
-The launcher starts Docker Desktop if it is available, runs `docker compose up -d --build`, and checks GitHub releases so you can switch between auto-update and manual update behavior.
+The launcher starts Docker Desktop if it is available, checks for port conflicts on app startup ports before launching, runs `docker compose up -d --build`, and checks GitHub releases so you can switch between auto-update and manual update behavior.
+
+If Docker compose fails, the launcher surfaces compact error lines instead of the full build log.
 
 To build the installer, first publish the launcher and then compile the Inno Setup script as described in [installer/README.md](installer/README.md).
 

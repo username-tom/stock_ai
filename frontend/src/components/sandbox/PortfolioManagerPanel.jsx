@@ -73,8 +73,8 @@ const DEFAULT_PM_PRESET_DEFS = [
       take_profit_pct: 2.5,
       hold_positions_overnight: false,
       sentiment_bucket_persistence: 5,
-      sim_buy_fill_rate_pct: 90,
-      sim_sell_fill_rate_pct: 90,
+      sim_buy_fill_rate_pct: 60,
+      sim_sell_fill_rate_pct: 70,
     },
   },
   {
@@ -86,8 +86,8 @@ const DEFAULT_PM_PRESET_DEFS = [
       take_profit_pct: 3.0,
       hold_positions_overnight: false,
       sentiment_bucket_persistence: 3,
-      sim_buy_fill_rate_pct: 90,
-      sim_sell_fill_rate_pct: 90,
+      sim_buy_fill_rate_pct: 60,
+      sim_sell_fill_rate_pct: 70,
     },
   },
   {
@@ -99,8 +99,8 @@ const DEFAULT_PM_PRESET_DEFS = [
       take_profit_pct: 4.0,
       hold_positions_overnight: true,
       sentiment_bucket_persistence: 5,
-      sim_buy_fill_rate_pct: 90,
-      sim_sell_fill_rate_pct: 90,
+      sim_buy_fill_rate_pct: 60,
+      sim_sell_fill_rate_pct: 70,
     },
   },
 ]
@@ -278,8 +278,8 @@ function buildDraftFromSettings(settings) {
     pm_hold_extended_multiplier: settings.pm_hold_extended_multiplier ?? 2.0,
     pm_hold_trailing_pct: settings.pm_hold_trailing_pct ?? 3.0,
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.75,
-    sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 100,
-    sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 100,
+    sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 60,
+    sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 70,
     auto_trade_buy_price_offset_pct: settings.auto_trade_buy_price_offset_pct ?? 0.1,
     auto_trade_sell_price_offset_pct: settings.auto_trade_sell_price_offset_pct ?? 0.1,
     sentiment_matrix_strategies: (() => {

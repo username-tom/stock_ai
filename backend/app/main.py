@@ -60,7 +60,7 @@ app = FastAPI(
         "Backtesting, report generation, simulated and live trading "
         "with Interactive Brokers integration."
     ),
-    version="1.0.0",
+    version="0.1.0",
     lifespan=lifespan,
 )
 
@@ -92,4 +92,4 @@ app.mount(
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "0.1.0"}

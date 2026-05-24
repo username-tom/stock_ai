@@ -1,0 +1,37 @@
+[
+  {
+    "buy_fill_pct": 80.0,
+    "total_return_pct": 12.2686,
+    "sharpe_ratio": 0.25,
+    "max_drawdown_pct": -8.16,
+    "score": 56.2736
+  },
+  {
+    "buy_fill_pct": 70.0,
+    "total_return_pct": 11.4068,
+    "sharpe_ratio": 0.28,
+    "max_drawdown_pct": -5.18,
+    "score": 50.8803
+  },
+  {
+    "buy_fill_pct": 60.0,
+    "total_return_pct": 14.5509,
+    "sharpe_ratio": 0.35,
+    "max_drawdown_pct": -4.83,
+    "score": 78.5444
+  },
+  {
+    "buy_fill_pct": 50.0,
+    "total_return_pct": 10.5792,
+    "sharpe_ratio": 0.26,
+    "max_drawdown_pct": -6.0,
+    "score": 44.6587
+  },
+  {
+    "buy_fill_pct": 40.0,
+    "total_return_pct": 12.8331,
+    "sharpe_ratio": 0.31,
+    "max_drawdown_pct": -5.11,
+    "score": 62.2686
+  }
+]

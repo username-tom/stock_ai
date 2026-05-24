@@ -18,7 +18,7 @@ internal static class Program
 
 internal static class AppInfo
 {
-    internal const string LocalVersion = "1.0.0";
+    internal const string LocalVersion = "0.1.0";
     internal const string DefaultRepository = "tomwu/stock_ai";
 }
 

@@ -988,8 +988,8 @@ def run_sandbox_portfolio_backtest(
     take_profit_pct: float = 0.0,
     hold_positions_overnight: bool = True,
     eod_sell_window_minutes: int = 30,
-    sim_buy_fill_rate_pct: float = 100.0,
-    sim_sell_fill_rate_pct: float = 100.0,
+    sim_buy_fill_rate_pct: float = 60.0,
+    sim_sell_fill_rate_pct: float = 70.0,
     pending_price_drift_cancel_pct: float = 0.75,
     sim_pending_duration_bars: int = 1,
 ) -> dict[str, Any]:

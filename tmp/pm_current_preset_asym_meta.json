@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-05-24T11:41:19",
+  "baseline_report_id": 341,
+  "baseline_name": "SANDBOX_pool_sentiment_2026-04-27_to_2026-05-22",
+  "start_date": "2026-04-27",
+  "end_date": "2026-05-22",
+  "symbols": [
+    "AAPL",
+    "AMD",
+    "GOOGL",
+    "INTC",
+    "LLY",
+    "MSFT",
+    "NVDA",
+    "QCOM",
+    "QQQ",
+    "SPY",
+    "TSLA",
+    "TXN"
+  ],
+  "initial_capital": 10000.0,
+  "run_count": 36,
+  "pm_settings_used": {
+    "stop_loss_pct": 1.0,
+    "take_profit_pct": 3.0,
+    "hold_positions_overnight": false,
+    "sentiment_bucket_persistence": 3,
+    "market_sentiment_strategies": {
+      "crash": "rsi",
+      "bearish": "macd",
+      "neutral": "bollinger_bands",
+      "bullish": "sma_crossover",
+      "euphoric": "rsi"
+    }
+  }
+}

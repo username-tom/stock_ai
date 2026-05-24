@@ -1,0 +1,48 @@
+{
+  "generated_at": "2026-05-24T11:49:38",
+  "baseline_report_id": 341,
+  "pm_settings_used": {
+    "stop_loss_pct": 1.0,
+    "take_profit_pct": 3.0,
+    "hold_positions_overnight": false,
+    "sentiment_bucket_persistence": 3,
+    "market_sentiment_strategies": {
+      "crash": "rsi",
+      "bearish": "macd",
+      "neutral": "bollinger_bands",
+      "bullish": "sma_crossover",
+      "euphoric": "rsi"
+    }
+  },
+  "summary_by_condition": [
+    {
+      "condition": "B50-S50",
+      "runs": 5,
+      "avg_total_return_pct": 13.0718,
+      "std_total_return_pct": 3.2828,
+      "median_total_return_pct": 13.4201,
+      "min_total_return_pct": 9.6782,
+      "max_total_return_pct": 17.3713,
+      "avg_score": 67.8588,
+      "std_score": 30.2177
+    },
+    {
+      "condition": "B50-S60",
+      "runs": 5,
+      "avg_total_return_pct": 12.3504,
+      "std_total_return_pct": 2.7475,
+      "median_total_return_pct": 12.7761,
+      "min_total_return_pct": 9.2126,
+      "max_total_return_pct": 15.1242,
+      "avg_score": 60.3272,
+      "std_score": 22.1599
+    }
+  ],
+  "comparison": {
+    "compared": "B50-S60_vs_B50-S50",
+    "runs_per_condition": 5,
+    "mean_return_diff_pct": -0.7214,
+    "cohens_d_return": -0.2383,
+    "superiority_prob": 0.4
+  }
+}

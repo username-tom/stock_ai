@@ -119,7 +119,7 @@ export default function Layout({ children }) {
 
           {/* Footer */}
           <div className="px-4 py-3 border-t border-dark-500 mb-8">
-            <div className="text-xs text-slate-600 text-center">Stock AI v1.0.0</div>
+            <div className="text-xs text-slate-600 text-center">Stock AI v0.1.0</div>
           </div>
         </div>
       </aside>

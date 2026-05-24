@@ -927,8 +927,8 @@ async def _settle_pending_shares() -> None:
         from app.services.portfolio_manager import get_manager_settings
 
         manager_settings = get_manager_settings()
-        buy_fill_rate = max(0.0, min(100.0, float(manager_settings.get("sim_buy_fill_rate_pct", 100.0) or 0.0)))
-        sell_fill_rate = max(0.0, min(100.0, float(manager_settings.get("sim_sell_fill_rate_pct", 100.0) or 0.0)))
+        buy_fill_rate = max(0.0, min(100.0, float(manager_settings.get("sim_buy_fill_rate_pct", 60.0) or 0.0)))
+        sell_fill_rate = max(0.0, min(100.0, float(manager_settings.get("sim_sell_fill_rate_pct", 70.0) or 0.0)))
         drift_threshold_pct = max(0.0, float(manager_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
 
         def _is_within_range(current_price: float, pending_price: float) -> bool:
