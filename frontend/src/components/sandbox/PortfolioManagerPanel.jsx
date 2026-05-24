@@ -10,6 +10,7 @@ import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandboxConstants'
 import { fmtMoney } from './sandboxHelpers'
 
 const STORAGE_KEY = 'portfolio_manager_savestates_v1'
+const PRESETS_KEY = 'portfolio_manager_presets_v1'
 const PROFILE_ORDER = ['simulated', 'paper', 'live']
 
 const BULL_COLOR = '#10b981'
@@ -55,6 +56,54 @@ const DEFAULT_SENTIMENT_STRATEGIES = {
   bullish: 'sma_crossover',
   euphoric: 'rsi',
 }
+const DEFAULT_TREND_SENTIMENT_STRATEGIES = {
+  crash: 'rsi',
+  bearish: 'rsi',
+  neutral: 'macd',
+  bullish: 'sma_crossover',
+  euphoric: 'sma_crossover',
+}
+const DEFAULT_PM_PRESET_DEFS = [
+  {
+    key: 'default-baseline-tight',
+    name: 'Baseline Tight - High Return (SL 0.8 / TP 2.5 / No Overnight / Debounce 5)',
+    strategyMap: DEFAULT_SENTIMENT_STRATEGIES,
+    overrides: {
+      stop_loss_pct: 0.8,
+      take_profit_pct: 2.5,
+      hold_positions_overnight: false,
+      sentiment_bucket_persistence: 5,
+      sim_buy_fill_rate_pct: 90,
+      sim_sell_fill_rate_pct: 90,
+    },
+  },
+  {
+    key: 'default-trend-base',
+    name: 'Trend Base - Robust (SL 1.0 / TP 3.0 / No Overnight / Debounce 3)',
+    strategyMap: DEFAULT_TREND_SENTIMENT_STRATEGIES,
+    overrides: {
+      stop_loss_pct: 1.0,
+      take_profit_pct: 3.0,
+      hold_positions_overnight: false,
+      sentiment_bucket_persistence: 3,
+      sim_buy_fill_rate_pct: 90,
+      sim_sell_fill_rate_pct: 90,
+    },
+  },
+  {
+    key: 'default-trend-swing',
+    name: 'Trend Swing - Low Drawdown (SL 1.5 / TP 4.0 / Overnight / Debounce 5)',
+    strategyMap: DEFAULT_TREND_SENTIMENT_STRATEGIES,
+    overrides: {
+      stop_loss_pct: 1.5,
+      take_profit_pct: 4.0,
+      hold_positions_overnight: true,
+      sentiment_bucket_persistence: 5,
+      sim_buy_fill_rate_pct: 90,
+      sim_sell_fill_rate_pct: 90,
+    },
+  },
+]
 
 // 5×5 default matrix: rows = PM market sentiment, columns = AI learner tag
 // Rationale:
@@ -279,6 +328,56 @@ function saveSavedStates(states) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(states))
   } catch {}
+}
+
+function loadPresetStore() {
+  try {
+    const raw = localStorage.getItem(PRESETS_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') return parsed
+    }
+  } catch {}
+  return {}
+}
+
+function savePresetStore(store) {
+  try {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(store))
+  } catch {}
+}
+
+function createPresetId() {
+  return `preset_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+function cloneJson(value) {
+  try {
+    return JSON.parse(JSON.stringify(value))
+  } catch {
+    return value
+  }
+}
+
+function buildPresetDraft(baseSettings, strategyMap, overrides = {}) {
+  const base = buildDraftFromSettings(baseSettings)
+  return {
+    ...base,
+    ...overrides,
+    sentiment_matrix_strategies: buildDefaultSentimentMatrix(strategyMap),
+  }
+}
+
+function buildDefaultPresetEntries(baseSettings) {
+  const now = new Date().toISOString()
+  return DEFAULT_PM_PRESET_DEFS.map(def => ({
+    id: def.key,
+    name: def.name,
+    isDefault: true,
+    createdAt: now,
+    updatedAt: now,
+    draft: buildPresetDraft(baseSettings, def.strategyMap, def.overrides),
+  }))
 }
 
 function classColor(cls) {
@@ -577,17 +676,22 @@ function SettingRow({ label, hint, children }) {
 export default function PortfolioManagerPanel({ profile = 'simulated', onShowOverview, onSelectSymbol }) {
   const qc = useQueryClient()
   const appSettings = useAppSettings()
-  const importInputRef = useRef(null)
+  const importPresetInputRef = useRef(null)
   const activeProfile = normalizeProfile(profile)
   const [editSettings, setEditSettings] = useState(false)
   const [draft, setDraft] = useState(null)
   const [savedStates, setSavedStates] = useState(() => loadSavedStates())
+  const [presetStore, setPresetStore] = useState(() => loadPresetStore())
+  const [selectedPresetId, setSelectedPresetId] = useState('')
   const [routingGroups, setRoutingGroups] = useState({ manual: [], market: [], symbol: [] })
   const [dragPayload, setDragPayload] = useState(null)
   const [dragOverMode, setDragOverMode] = useState(null)
   const [sentimentError, setSentimentError] = useState(null)
   const [importNotice, setImportNotice] = useState(null)
+  const [presetNotice, setPresetNotice] = useState(null)
   const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false })
+  const activePresets = presetStore[activeProfile] ?? []
+  const selectedPreset = activePresets.find(p => p.id === selectedPresetId) ?? null
 
   function toggleSection(key) {
     setOpenSections(prev => ({ ...prev, [key]: !prev[key] }))
@@ -695,6 +799,36 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   }, [activeProfile, managerData, isLoading])
 
   useEffect(() => {
+    if (isLoading || !managerData) return
+    setPresetStore(prev => {
+      const current = Array.isArray(prev[activeProfile]) ? prev[activeProfile] : []
+      const merged = [...current]
+      const defaults = buildDefaultPresetEntries(managerData.settings)
+      let changed = false
+      for (const d of defaults) {
+        if (!merged.some(p => p.id === d.id)) {
+          merged.push(d)
+          changed = true
+        }
+      }
+      if (!changed) return prev
+      const next = { ...prev, [activeProfile]: merged }
+      savePresetStore(next)
+      return next
+    })
+  }, [activeProfile, managerData, isLoading])
+
+  useEffect(() => {
+    if (!activePresets.length) {
+      if (selectedPresetId) setSelectedPresetId('')
+      return
+    }
+    if (!activePresets.some(p => p.id === selectedPresetId)) {
+      setSelectedPresetId(activePresets[0].id)
+    }
+  }, [activePresets, selectedPresetId])
+
+  useEffect(() => {
     if (!managerData) return
     const symbols = Object.keys(managerData.scores ?? {}).sort()
     const marketRaw = managerData.sentiment_groups?.market ?? []
@@ -722,6 +856,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const activity = managerData.last_activity ?? []
 
   function openEdit() {
+    setPresetNotice(null)
     setEditSettings(true)
     const next = {
       ...savedStates,
@@ -740,6 +875,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     const nextDraft = buildDraftFromSettings(settings)
     setEditSettings(false)
     setImportNotice(null)
+    setPresetNotice(null)
     setDraft(nextDraft)
     const next = {
       ...savedStates,
@@ -787,6 +923,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     }
     setSentimentError(null)
     setImportNotice(null)
+    setPresetNotice(null)
     updateMut.mutate({
       transfer_pct: draft.transfer_pct / 100,
       transfer_interval_s: Number(draft.transfer_interval_s),
@@ -832,44 +969,137 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     })
   }
 
-  function handleExportSettings() {
-    const exportSettings = draft ?? buildDraftFromSettings(settings)
+  function upsertPreset(entry, { select = true } = {}) {
+    setPresetStore(prev => {
+      const list = Array.isArray(prev[activeProfile]) ? [...prev[activeProfile]] : []
+      const idx = list.findIndex(p => p.id === entry.id)
+      if (idx >= 0) list[idx] = entry
+      else list.push(entry)
+      const next = { ...prev, [activeProfile]: list }
+      savePresetStore(next)
+      return next
+    })
+    if (select) setSelectedPresetId(entry.id)
+  }
+
+  function handleApplyPreset() {
+    if (!selectedPreset?.draft) return
+    setSentimentError(null)
+    setImportNotice(null)
+    setPresetNotice(`Applied preset: ${selectedPreset.name}`)
+    setEditSettings(true)
+    updateDraft(cloneJson(selectedPreset.draft))
+  }
+
+  function handleSavePreset() {
+    if (!draft || !selectedPreset) return
+    const now = new Date().toISOString()
+    upsertPreset({
+      ...selectedPreset,
+      draft: cloneJson(draft),
+      updatedAt: now,
+    })
+    setPresetNotice(`Updated preset: ${selectedPreset.name}`)
+  }
+
+  function handleSaveAsPreset() {
+    if (!draft) return
+    const suggested = selectedPreset ? `${selectedPreset.name} Copy` : 'New PM Preset'
+    const name = window.prompt('Preset name', suggested)?.trim()
+    if (!name) return
+    const now = new Date().toISOString()
+    const entry = {
+      id: createPresetId(),
+      name,
+      isDefault: false,
+      createdAt: now,
+      updatedAt: now,
+      draft: cloneJson(draft),
+    }
+    upsertPreset(entry)
+    setPresetNotice(`Saved new preset: ${name}`)
+  }
+
+  function handleRenamePreset() {
+    if (!selectedPreset) return
+    const nextName = window.prompt('Rename preset', selectedPreset.name)?.trim()
+    if (!nextName || nextName === selectedPreset.name) return
+    upsertPreset({ ...selectedPreset, name: nextName, updatedAt: new Date().toISOString() })
+    setPresetNotice(`Renamed preset to: ${nextName}`)
+  }
+
+  function handleExportPreset() {
+    const exportPreset = selectedPreset ?? {
+      id: 'unsaved-draft',
+      name: `Draft ${activeProfile}`,
+      isDefault: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      draft: draft ?? buildDraftFromSettings(settings),
+    }
     const payload = {
-      type: 'portfolio_manager_settings',
+      type: 'portfolio_manager_preset',
       version: 1,
       profile: activeProfile,
       exported_at: new Date().toISOString(),
-      settings: exportSettings,
+      preset: exportPreset,
     }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `pm-settings-${activeProfile}-${new Date().toISOString().slice(0, 10)}.json`
+    const safeName = exportPreset.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'preset'
+    anchor.download = `pm-preset-${safeName}-${new Date().toISOString().slice(0, 10)}.json`
     document.body.appendChild(anchor)
     anchor.click()
     document.body.removeChild(anchor)
     URL.revokeObjectURL(url)
   }
 
-  function handleImportClick() {
-    importInputRef.current?.click()
+  function handleImportPresetClick() {
+    importPresetInputRef.current?.click()
   }
 
-  async function handleImportSettings(event) {
+  async function handleImportPreset(event) {
     const file = event.target.files?.[0]
     if (!file) return
     try {
       const text = await file.text()
       const parsed = JSON.parse(text)
-      const importedDraft = buildImportDraft(settings, parsed)
+      let importedName = `Imported ${activeProfile} preset`
+      let importedDraft = null
+
+      if (parsed?.type === 'portfolio_manager_preset' && parsed?.preset?.draft) {
+        importedName = parsed.preset.name || importedName
+        importedDraft = buildImportDraft(settings, { settings: parsed.preset.draft })
+      } else if (parsed?.type === 'portfolio_manager_settings') {
+        importedDraft = buildImportDraft(settings, parsed)
+      } else if (parsed?.draft && typeof parsed.draft === 'object') {
+        importedName = parsed.name || importedName
+        importedDraft = buildImportDraft(settings, { settings: parsed.draft })
+      } else {
+        importedDraft = buildImportDraft(settings, parsed)
+      }
+
+      const now = new Date().toISOString()
+      const entry = {
+        id: createPresetId(),
+        name: importedName,
+        isDefault: false,
+        createdAt: now,
+        updatedAt: now,
+        draft: importedDraft,
+      }
+      upsertPreset(entry)
       setSentimentError(null)
-      setImportNotice(`Imported settings from ${file.name}. Review and click Save to apply.`)
-      setEditSettings(true)
-      updateDraft(importedDraft)
-    } catch {
-      setSentimentError('Unable to import settings file. Please select a valid JSON export.')
       setImportNotice(null)
+      setPresetNotice(`Imported preset from ${file.name}. Review and click Save to apply.`)
+      setEditSettings(true)
+      updateDraft(cloneJson(importedDraft))
+    } catch {
+      setSentimentError('Unable to import preset file. Please select a valid JSON export.')
+      setImportNotice(null)
+      setPresetNotice(null)
     } finally {
       event.target.value = ''
     }
@@ -928,68 +1158,120 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   return (
     <div className="card space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <CpuChipIcon className="h-4 w-4 text-violet-400" />
-          <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Portfolio Manager</h2>
-          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-dark-700 text-slate-400 border border-dark-600 uppercase tracking-wide">
-            {activeProfile}
-          </span>
-          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold border ${
-            settings.enabled
-              ? 'bg-violet-900/30 text-violet-300 border-violet-700/40'
-              : 'bg-dark-700 text-slate-500 border-dark-600'
-          }`}>
-            {settings.enabled
-              ? <><CheckCircleIcon className="h-3 w-3" />Active</>
-              : <><XCircleIcon className="h-3 w-3" />Inactive</>}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {onShowOverview && (
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <CpuChipIcon className="h-4 w-4 text-violet-400" />
+            <h2 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">Portfolio Manager</h2>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-dark-700 text-slate-400 border border-dark-600 uppercase tracking-wide">
+              {activeProfile}
+            </span>
+            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold border ${
+              settings.enabled
+                ? 'bg-violet-900/30 text-violet-300 border-violet-700/40'
+                : 'bg-dark-700 text-slate-500 border-dark-600'
+            }`}>
+              {settings.enabled
+                ? <><CheckCircleIcon className="h-3 w-3" />Active</>
+                : <><XCircleIcon className="h-3 w-3" />Inactive</>}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {onShowOverview && (
+              <button
+                onClick={onShowOverview}
+                className="text-xs text-slate-400 hover:text-emerald-300 border border-dark-500 hover:border-emerald-700/50 rounded-lg px-3 py-1.5 transition-colors whitespace-nowrap"
+                title="Back to Portfolio Summary"
+              >
+                ← Summary
+              </button>
+            )}
             <button
-              onClick={onShowOverview}
-              className="text-xs text-slate-400 hover:text-emerald-300 border border-dark-500 hover:border-emerald-700/50 rounded-lg px-3 py-1.5 transition-colors"
-              title="Back to Portfolio Summary"
+              onClick={editSettings ? doneEditing : openEdit}
+              className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors whitespace-nowrap"
             >
-              ← Summary
+              {editSettings ? 'Done' : 'Edit'}
             </button>
-          )}
+            <button
+              onClick={handleSave}
+              disabled={!editSettings || !draft || updateMut.isPending}
+              className="text-xs bg-violet-700 hover:bg-violet-600 text-white font-semibold rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            >
+              {updateMut.isPending ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider min-w-[56px]">Preset</span>
+          <select
+            value={selectedPresetId}
+            onChange={e => {
+              setSelectedPresetId(e.target.value)
+              setPresetNotice(null)
+            }}
+            className="input text-xs py-1.5 flex-1 min-w-[420px]"
+            title="Select a preset"
+          >
+            {activePresets.length === 0 && <option value="">No presets</option>}
+            {activePresets.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
           <button
-            onClick={handleExportSettings}
-            disabled={!settings}
-            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Export PM settings as JSON"
+            onClick={handleApplyPreset}
+            disabled={!selectedPreset}
+            className="text-xs text-slate-300 hover:text-white border border-dark-500 hover:border-dark-300 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            title="Apply selected preset to current draft"
+          >
+            Apply
+          </button>
+          <button
+            onClick={handleSavePreset}
+            disabled={!draft || !selectedPreset}
+            className="text-xs text-slate-300 hover:text-white border border-dark-500 hover:border-dark-300 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            title="Save current draft into selected preset"
+          >
+            Save
+          </button>
+          <button
+            onClick={handleSaveAsPreset}
+            disabled={!draft}
+            className="text-xs text-slate-300 hover:text-white border border-dark-500 hover:border-dark-300 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            title="Save current draft as a new preset"
+          >
+            Save As
+          </button>
+          <button
+            onClick={handleRenamePreset}
+            disabled={!selectedPreset}
+            className="text-xs text-slate-300 hover:text-white border border-dark-500 hover:border-dark-300 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            title="Rename selected preset"
+          >
+            Rename
+          </button>
+          <button
+            onClick={handleExportPreset}
+            disabled={!draft && !selectedPreset}
+            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            title="Export selected preset as JSON"
           >
             Export
           </button>
           <button
-            onClick={handleImportClick}
-            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
-            title="Import PM settings from JSON"
+            onClick={handleImportPresetClick}
+            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors whitespace-nowrap"
+            title="Import preset from JSON"
           >
             Import
           </button>
           <input
-            ref={importInputRef}
+            ref={importPresetInputRef}
             type="file"
             accept="application/json,.json"
             className="hidden"
-            onChange={handleImportSettings}
+            onChange={handleImportPreset}
           />
-          <button
-            onClick={editSettings ? doneEditing : openEdit}
-            className="text-xs text-slate-400 hover:text-slate-200 border border-dark-500 hover:border-dark-400 rounded-lg px-3 py-1.5 transition-colors"
-          >
-            {editSettings ? 'Done' : 'Edit'}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!editSettings || !draft || updateMut.isPending}
-            className="text-xs bg-violet-700 hover:bg-violet-600 text-white font-semibold rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {updateMut.isPending ? 'Saving…' : 'Save'}
-          </button>
         </div>
       </div>
       {sentimentError && (
@@ -997,6 +1279,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       )}
       {!sentimentError && importNotice && (
         <p className="text-xs text-emerald-400 -mt-2">{importNotice}</p>
+      )}
+      {!sentimentError && !importNotice && presetNotice && (
+        <p className="text-xs text-cyan-300 -mt-2">{presetNotice}</p>
       )}
 
       {/* Summary stats */}

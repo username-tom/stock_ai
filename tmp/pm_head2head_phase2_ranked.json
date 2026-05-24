@@ -1,0 +1,47 @@
+[
+  {
+    "scenario": "baseline-tight",
+    "runs": 18,
+    "avg_total_return_pct": 15.9943,
+    "avg_sharpe_ratio": 0.2983,
+    "avg_max_drawdown_pct": -7.9033,
+    "avg_win_rate_pct": 57.0033,
+    "avg_annualized_return_pct": 797.7083,
+    "avg_total_trades": 634.72,
+    "avg_score": 95.6777,
+    "std_score": 22.7001,
+    "worst_case_score": 53.8117,
+    "worst_case_return_pct": 11.9957,
+    "worst_case_drawdown_pct": -9.95
+  },
+  {
+    "scenario": "trend-base",
+    "runs": 18,
+    "avg_total_return_pct": 14.1005,
+    "avg_sharpe_ratio": 0.3467,
+    "avg_max_drawdown_pct": -3.9739,
+    "avg_win_rate_pct": 52.5444,
+    "avg_annualized_return_pct": 597.1939,
+    "avg_total_trades": 490.0,
+    "avg_score": 75.1176,
+    "std_score": 14.3303,
+    "worst_case_score": 54.165,
+    "worst_case_return_pct": 11.8415,
+    "worst_case_drawdown_pct": -4.69
+  },
+  {
+    "scenario": "trend-swing",
+    "runs": 18,
+    "avg_total_return_pct": 13.1912,
+    "avg_sharpe_ratio": 0.51,
+    "avg_max_drawdown_pct": -2.015,
+    "avg_win_rate_pct": 51.8956,
+    "avg_annualized_return_pct": 521.0328,
+    "avg_total_trades": 507.0,
+    "avg_score": 67.4658,
+    "std_score": 13.5854,
+    "worst_case_score": 46.6663,
+    "worst_case_return_pct": 10.6973,
+    "worst_case_drawdown_pct": -2.51
+  }
+]

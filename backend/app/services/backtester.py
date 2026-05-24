@@ -1097,6 +1097,23 @@ def run_sandbox_portfolio_backtest(
 
     portfolio_curve: list[tuple[Any, float]] = []
 
+    def _pending_buy_reserved(st: dict[str, Any]) -> float:
+        order = st.get("pending_order") or {}
+        if str(order.get("side") or "").upper() != "BUY":
+            return 0.0
+        return float(order.get("reserved_cost") or 0.0)
+
+    def _refund_pending_buy(sym: str) -> None:
+        nonlocal pool
+        st = state[sym]
+        order = st.get("pending_order") or {}
+        if str(order.get("side") or "").upper() != "BUY":
+            st["pending_order"] = None
+            return
+        st["allocated_funds"] += float(order.get("reserved_from_allocated") or 0.0)
+        pool += float(order.get("reserved_from_pool") or 0.0)
+        st["pending_order"] = None
+
     def _price_within_pending_range(current_price: float, pending_price: float) -> bool:
         if current_price <= 0 or pending_price <= 0:
             return False
@@ -1120,10 +1137,15 @@ def run_sandbox_portfolio_backtest(
             return
         cost = qty * price + qty * commission
         # Spend allocated_funds first, then draw the remainder from the pool.
+        reserved_from_allocated = 0.0
+        reserved_from_pool = 0.0
         if cost <= st["allocated_funds"]:
             st["allocated_funds"] -= cost
+            reserved_from_allocated = cost
         else:
             extra = cost - st["allocated_funds"]
+            reserved_from_allocated = st["allocated_funds"]
+            reserved_from_pool = extra
             st["allocated_funds"] = 0.0
             pool -= extra
         st["pending_order"] = {
@@ -1135,6 +1157,9 @@ def run_sandbox_portfolio_backtest(
             "entry_strategy": active_strat,
             "entry_bucket": bucket,
             "entry_date": _fmt_ts(date),
+            "reserved_cost": float(cost),
+            "reserved_from_allocated": float(reserved_from_allocated),
+            "reserved_from_pool": float(reserved_from_pool),
         }
 
     def _try_queue_sell(sym: str, price: float, ts_idx: int, reason: str):
@@ -1160,6 +1185,9 @@ def run_sandbox_portfolio_backtest(
 
         requested_price = float(order.get("requested_price") or 0.0)
         if not _price_within_pending_range(price, requested_price):
+            # Drifted too far from requested fill price: cancel and release reserved cash.
+            if str(order.get("side") or "").upper() == "BUY":
+                _refund_pending_buy(sym)
             return True
 
         side = str(order.get("side") or "").upper()
@@ -1168,7 +1196,7 @@ def run_sandbox_portfolio_backtest(
                 return True
             qty = float(order.get("quantity") or 0.0)
             if qty <= 0:
-                st["pending_order"] = None
+                _refund_pending_buy(sym)
                 return False
             st["shares"] = qty
             st["avg_cost"] = requested_price
@@ -1243,8 +1271,16 @@ def run_sandbox_portfolio_backtest(
             if ts not in p["df"].index:
                 continue
             row = p["df"].loc[ts]
-            price = float(row["Close"])
-            st["last_price"] = price
+            raw_price = float(row["Close"])
+            if math.isfinite(raw_price) and raw_price > 0:
+                price = raw_price
+                st["last_price"] = price
+            else:
+                # Ignore malformed ticks (e.g. 0/negative/NaN close) for
+                # valuation and execution; keep the last known-good price.
+                price = st["last_price"] if not math.isnan(st["last_price"]) else 0.0
+                if price <= 0:
+                    continue
 
             # Pending orders reroll once each bar when still in acceptance range.
             if _try_fill_pending(sym, price, ts, ts_idx):
@@ -1309,16 +1345,19 @@ def run_sandbox_portfolio_backtest(
         for sym, st in state.items():
             lp = st["last_price"] if not math.isnan(st["last_price"]) else 0.0
             mv = st["shares"] * lp
-            port_val += st["allocated_funds"] + mv
+            pending_reserved = _pending_buy_reserved(st)
+            port_val += st["allocated_funds"] + mv + pending_reserved
             # Per-symbol equity = display base + realized + unrealized P&L.
             unrealized = (st["shares"] * (lp - (st["entry_price"] or 0.0))) if st["shares"] > 0 and st["entry_price"] is not None else 0.0
             base = max(st["min_alloc"], st["cost_basis_total"])
-            st["curve"].append((ts, base + st["realized_pnl_total"] + unrealized))
+            st["curve"].append((ts, base + st["realized_pnl_total"] + unrealized + pending_reserved))
         portfolio_curve.append((ts, port_val))
 
     # Final liquidation valuation (mark-to-market at last seen price).
     final_value = pool + sum(
-        st["allocated_funds"] + st["shares"] * (st["last_price"] if not math.isnan(st["last_price"]) else 0.0)
+        st["allocated_funds"]
+        + st["shares"] * (st["last_price"] if not math.isnan(st["last_price"]) else 0.0)
+        + _pending_buy_reserved(st)
         for st in state.values()
     )
 
