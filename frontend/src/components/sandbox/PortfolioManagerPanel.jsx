@@ -212,6 +212,7 @@ function buildDraftFromSettings(settings) {
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
     sentiment_data_points: Math.max(MIN_SENTIMENT_DATA_POINTS, Number(settings.sentiment_data_points ?? MIN_SENTIMENT_DATA_POINTS)),
     sentiment_interval: settings.sentiment_interval ?? '1m',
+    sentiment_bucket_persistence: Math.max(1, Math.min(20, Number(settings.sentiment_bucket_persistence ?? 3))),
     ai_tag_strategy_enabled: settings.ai_tag_strategy_enabled ?? true,
     ai_sentiment_change_enabled: settings.ai_sentiment_change_enabled ?? true,
     ai_tag_strategies: {
@@ -401,17 +402,25 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-dark-600">
-      <table className="w-full border-collapse text-[11px]">
+    <div className="overflow-x-auto rounded-md border border-dark-600">
+      <table className="w-full table-fixed border-collapse text-[10px] leading-tight">
+        <colgroup>
+          <col className="w-[96px]" />
+          <col className="w-[calc((100%-96px)/5)]" />
+          <col className="w-[calc((100%-96px)/5)]" />
+          <col className="w-[calc((100%-96px)/5)]" />
+          <col className="w-[calc((100%-96px)/5)]" />
+          <col className="w-[calc((100%-96px)/5)]" />
+        </colgroup>
         <thead>
           <tr>
-            <th className="px-3 py-2 text-left font-semibold text-slate-500 uppercase tracking-wide border-b border-r border-dark-600 bg-dark-800 whitespace-nowrap">
+            <th className="px-2 py-1 text-left font-semibold text-slate-500 uppercase tracking-wide border-b border-r border-dark-600 bg-dark-800 whitespace-nowrap">
               PM ↓ / AI →
             </th>
             {AI_TAG_BUCKETS.map(ai => (
               <th
                 key={ai}
-                className="px-2 py-2 text-center font-semibold border-b border-r border-dark-600 bg-dark-800 last:border-r-0 whitespace-nowrap"
+                className="px-1.5 py-1 text-center font-semibold border-b border-r border-dark-600 bg-dark-800 last:border-r-0 whitespace-nowrap"
                 style={{ color: AI_TAG_COLORS[ai] }}
               >
                 {AI_TAG_LABELS[ai]}
@@ -423,7 +432,7 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
           {SENTIMENT_BUCKETS.map((pm, pmIdx) => (
             <tr key={pm} className={pmIdx % 2 === 0 ? 'bg-dark-900/70' : 'bg-dark-800/40'}>
               <td
-                className="px-3 py-2 font-semibold border-r border-b border-dark-600 whitespace-nowrap"
+                className="px-2 py-1 font-semibold border-r border-b border-dark-600 whitespace-nowrap"
                 style={{ color: classColor(pm) }}
               >
                 {SENTIMENT_LABELS[pm]}
@@ -437,10 +446,10 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
                 return (
                   <td
                     key={ai}
-                    className={`p-1.5 border-b border-r border-dark-600 align-top last:border-r-0 ${pmIdx === SENTIMENT_BUCKETS.length - 1 ? 'border-b-0' : ''}`}
+                    className={`p-1 border-b border-r border-dark-600 align-top last:border-r-0 ${pmIdx === SENTIMENT_BUCKETS.length - 1 ? 'border-b-0' : ''}`}
                   >
                     <select
-                      className="input text-[11px] py-0.5 w-full min-w-[100px]"
+                      className="input text-[10px] py-0 px-1.5 h-6 w-full"
                       disabled={!editSettings}
                       value={valType}
                       onChange={e => updateCell(pm, ai, e.target.value)}
@@ -453,7 +462,7 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
                     </select>
                     {valType === CUSTOM_SCRIPT_KEY && (
                       <select
-                        className="input text-[11px] py-0.5 w-full mt-0.5"
+                        className="input text-[10px] py-0 px-1.5 h-6 w-full mt-0.5"
                         disabled={!editSettings}
                         value={scriptId ?? ''}
                         onChange={e => {
@@ -467,7 +476,7 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
                     )}
                     {valType === TEMPLATE_SCRIPT_KEY && (
                       <select
-                        className="input text-[11px] py-0.5 w-full mt-0.5"
+                        className="input text-[10px] py-0 px-1.5 h-6 w-full mt-0.5"
                         disabled={!editSettings}
                         value={templateFilename ?? ''}
                         onChange={e => {
@@ -480,7 +489,7 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
                       </select>
                     )}
                     <select
-                      className="w-full mt-1 text-[10px] font-semibold rounded px-1.5 py-0.5 cursor-pointer border appearance-none"
+                      className="w-full mt-0.5 text-[10px] font-semibold rounded px-1.5 h-6 cursor-pointer border appearance-none"
                       style={{
                         backgroundColor: actionOpt.color + '22',
                         color: actionOpt.color,
@@ -502,7 +511,7 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
                     </select>
                     {actionBase === 'advanced_hold' && (
                       <select
-                        className="w-full mt-0.5 text-[10px] rounded px-1.5 py-0.5 cursor-pointer border appearance-none"
+                        className="w-full mt-0.5 text-[10px] rounded px-1.5 h-6 cursor-pointer border appearance-none"
                         style={{
                           backgroundColor: actionOpt.color + '11',
                           color: actionOpt.color,
@@ -798,6 +807,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       sentiment_lookback_days: Number(draft.sentiment_lookback_days),
       sentiment_data_points: Number(draft.sentiment_data_points),
       sentiment_interval: draft.sentiment_interval,
+      sentiment_bucket_persistence: Number(draft.sentiment_bucket_persistence),
       ai_tag_strategy_enabled: draft.ai_tag_strategy_enabled,
       ai_sentiment_change_enabled: draft.ai_sentiment_change_enabled,
       ai_tag_strategies: draft.ai_tag_strategies,
@@ -1052,6 +1062,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           <ChartBarIcon className="h-3.5 w-3.5" />
           Sentiment window: last {settings.sentiment_data_points ?? 10} bars ({settings.sentiment_interval}, {settings.sentiment_lookback_days}d range)
         </span>
+        <span className="flex items-center gap-1">
+          <ChartBarIcon className="h-3.5 w-3.5" />
+          Sentiment debounce: {settings.sentiment_bucket_persistence ?? 3} bar confirmation
+        </span>
         {settings.ai_sentiment_change_enabled === false ? (
           <span className="flex items-center gap-1 text-slate-600">
             <CpuChipIcon className="h-3.5 w-3.5" />
@@ -1093,8 +1107,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   onSelectSymbol ? 'cursor-pointer hover:border-violet-600/60 hover:bg-dark-700 transition-colors' : ''
                 }`}
                 title={onSelectSymbol
-                  ? `${sym} — Score: ${sc.score} · Click to view position detail`
-                  : `Score: ${sc.score} — Updated: ${sc.updated_at ? new Date(sc.updated_at).toLocaleTimeString() : '?'}`}
+                  ? `${sym} — Score: ${sc.score} · Raw: ${sc.raw_classification ?? sc.classification} · Debounced: ${sc.debounced_classification ?? sc.classification} · Click to view position detail`
+                  : `Score: ${sc.score} — Raw: ${sc.raw_classification ?? sc.classification} — Debounced: ${sc.debounced_classification ?? sc.classification} — Updated: ${sc.updated_at ? new Date(sc.updated_at).toLocaleTimeString() : '?'}`}
                 onClick={onSelectSymbol ? () => onSelectSymbol(sym) : undefined}
               >
                 <span className="font-bold text-xs text-slate-200 font-mono">{sym}</span>
@@ -1102,6 +1116,16 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   {classLabel(sc.classification)}
                 </span>
                 <span className="text-xs text-slate-500">({sc.score > 0 ? '+' : ''}{sc.score})</span>
+                {sc.raw_classification && sc.raw_classification !== sc.classification && (
+                  <span className="text-[10px] text-amber-300/90 uppercase tracking-wide">
+                    raw:{sc.raw_classification}
+                  </span>
+                )}
+                {Number(sc.debounce_countdown ?? 0) > 0 && (
+                  <span className="text-[10px] text-violet-300/90 uppercase tracking-wide">
+                    flip in {sc.debounce_countdown}
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -1512,6 +1536,21 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   <option value="1h">1 hour</option>
                   <option value="daily">Daily</option>
                 </select>
+              </SettingRow>
+
+              <SettingRow
+                label="Sentiment Debounce Persistence"
+                hint="Bars required before a proposed sentiment bucket flip is applied. Higher values reduce strategy-switch churn."
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number" min={1} max={20} step={1}
+                    value={draft.sentiment_bucket_persistence}
+                    onChange={e => updateDraft(d => ({ ...d, sentiment_bucket_persistence: e.target.value }))}
+                    className="input w-24 text-sm py-1.5"
+                  />
+                  <span className="text-xs text-slate-500">{draft.sentiment_bucket_persistence} bar(s)</span>
+                </div>
               </SettingRow>
             </CollapsibleSection>
 

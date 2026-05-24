@@ -265,6 +265,9 @@ export default function BacktestPanel() {
     day_trade: true,
     use_sentiment_routing: true,
     allocation_mode: 'proportional',
+    use_shared_pool: true,
+    per_position_min_pct: 0,
+    per_position_max_pct: 25,
     symbols_override: '', // optional comma-separated override
   })
   const [sandboxResult, setSandboxResult] = useState(null)
@@ -321,6 +324,9 @@ export default function BacktestPanel() {
       day_trade: sandboxForm.day_trade,
       use_sentiment_routing: sandboxForm.use_sentiment_routing,
       allocation_mode: sandboxForm.allocation_mode,
+      use_shared_pool: sandboxForm.use_shared_pool,
+      per_position_min_pct: sandboxForm.per_position_min_pct,
+      per_position_max_pct: sandboxForm.per_position_max_pct,
       ...(overrideSymbols.length > 0 ? { symbols: overrideSymbols } : {}),
     })
   }
@@ -1421,6 +1427,17 @@ export default function BacktestPanel() {
             } else {
               capShare = sandboxForm.initial_capital * (alloc / totalAllocated)
             }
+            // In shared-pool mode, "capital" column = per-symbol earmark (min).
+            if (sandboxForm.use_shared_pool) {
+              const n = effectiveSymbols.length || 1
+              const totalEarmarkPct = Math.min((Number(sandboxForm.per_position_min_pct) || 0) * n, 100)
+              const totalEarmark = (totalEarmarkPct / 100) * sandboxForm.initial_capital
+              if (sandboxForm.allocation_mode === 'proportional' && totalAllocated > 0) {
+                capShare = totalEarmark * (alloc / totalAllocated)
+              } else {
+                capShare = totalEarmark / n
+              }
+            }
             return {
               symbol: sym,
               strategy: pos?.strategy_name ?? null,
@@ -1428,6 +1445,16 @@ export default function BacktestPanel() {
               capital: capShare,
             }
           })
+          const sharedPoolInfo = sandboxForm.use_shared_pool
+            ? (() => {
+                const n = effectiveSymbols.length || 1
+                const totalEarmarkPct = Math.min((Number(sandboxForm.per_position_min_pct) || 0) * n, 100)
+                const totalEarmark = (totalEarmarkPct / 100) * sandboxForm.initial_capital
+                const pool = sandboxForm.initial_capital - totalEarmark
+                const cap = (Math.max(0, Number(sandboxForm.per_position_max_pct) || 0) / 100) * sandboxForm.initial_capital
+                return { totalEarmark, pool, cap }
+              })()
+            : null
           const r = sandboxResult?.result ?? {}
           const m = sandboxResult?.metrics ?? {}
           return (
@@ -1509,6 +1536,63 @@ export default function BacktestPanel() {
                   </select>
                 </div>
 
+                {/* Shared liquidity pool controls (sandbox-style) */}
+                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-3">
+                  <label className="flex items-center gap-3 cursor-pointer select-none">
+                    <div className="relative">
+                      <input
+                        type="checkbox"
+                        className="sr-only peer"
+                        checked={sandboxForm.use_shared_pool}
+                        onChange={e => setSandboxForm(f => ({ ...f, use_shared_pool: e.target.checked }))}
+                      />
+                      <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-emerald-500 transition-colors" />
+                      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-slate-200">
+                        Shared Liquidity Pool {sandboxForm.use_shared_pool ? '(sandbox-style)' : '(isolated)'}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {sandboxForm.use_shared_pool
+                          ? 'Coordinated simulation. Per-position floor + cap; idle cash flows into a central pool that positions can draw from to buy.'
+                          : 'Legacy: split capital up front per allocation mode and run each symbol in isolation.'}
+                      </div>
+                    </div>
+                  </label>
+
+                  {sandboxForm.use_shared_pool && (
+                    <div className="grid grid-cols-2 gap-3 pt-1 border-t border-dark-700/60">
+                      <div>
+                        <label className="label">Min per position (%)</label>
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="1"
+                          value={sandboxForm.per_position_min_pct}
+                          onChange={e => setSandboxForm(f => ({ ...f, per_position_min_pct: Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) }))}
+                        />
+                        <p className="text-xs text-slate-500 mt-1">Earmarked per symbol. 0 = all funds start in the pool.</p>
+                      </div>
+                      <div>
+                        <label className="label">Max per position (%)</label>
+                        <input
+                          className="input"
+                          type="number"
+                          min="0"
+                          max="200"
+                          step="1"
+                          value={sandboxForm.per_position_max_pct}
+                          onChange={e => setSandboxForm(f => ({ ...f, per_position_max_pct: Math.max(0, Math.min(200, parseFloat(e.target.value) || 0)) }))}
+                        />
+                        <p className="text-xs text-slate-500 mt-1">Cap on any single position. 0 = uncapped.</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-3">
                   <label className="flex items-center gap-3 cursor-pointer select-none">
                     <div className="relative">
@@ -1587,8 +1671,26 @@ export default function BacktestPanel() {
                 {previewRows.length > 0 && (
                   <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30">
                     <div className="text-xs text-slate-500 uppercase tracking-wider mb-2">
-                      Capital Split ({previewRows.length} symbols)
+                      {sandboxForm.use_shared_pool ? 'Per-Position Earmark' : 'Capital Split'} ({previewRows.length} symbols)
                     </div>
+                    {sharedPoolInfo && (
+                      <div className="grid grid-cols-3 gap-2 text-xs mb-2 pb-2 border-b border-dark-700/60">
+                        <div>
+                          <div className="text-slate-500">Shared Pool</div>
+                          <div className="font-mono text-emerald-300">${sharedPoolInfo.pool.toFixed(0)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">Total Earmark</div>
+                          <div className="font-mono text-amber-300">${sharedPoolInfo.totalEarmark.toFixed(0)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">Cap / symbol</div>
+                          <div className="font-mono text-slate-200">
+                            {sharedPoolInfo.cap > 0 ? `$${sharedPoolInfo.cap.toFixed(0)}` : 'uncapped'}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     <div className="max-h-40 overflow-y-auto space-y-0.5 text-xs">
                       {previewRows.map(row => (
                         <div key={row.symbol} className="grid grid-cols-3 gap-2 py-0.5 border-b border-dark-700/40">

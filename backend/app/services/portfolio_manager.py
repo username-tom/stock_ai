@@ -102,6 +102,7 @@ _settings: dict[str, Any] = {
     "sentiment_lookback_days": 5,         # days of historical data for sentiment calc
     "sentiment_data_points": _MIN_SENTIMENT_DATA_POINTS,  # number of recent bars used for sentiment calc
     "sentiment_interval": "1m",           # interval: 1m, 5m, 15m, 1h, daily, etc.
+    "sentiment_bucket_persistence": 3,     # bars required before bucket flip is applied
 }
 
 # ── runtime state ─────────────────────────────────────────────────────────── #
@@ -118,6 +119,8 @@ _state: dict[str, Any] = {
     "sentiment_groups": {"market": [], "symbol": []},  # symbols by sentiment mode
     "last_engine_reenable_day": None,
     "ai_tags": {},   # { symbol: { learner_tag, learner_direction, learner_confidence } }
+    # Per-key hysteresis state to avoid one-bar sentiment flapping.
+    "bucket_debounce": {},  # { key: {active, candidate, count} }
 }
 
 # Prevent repeated IB profit-take submissions every PM loop tick.
@@ -224,6 +227,10 @@ async def _load_settings_from_db() -> None:
                 int(getattr(row, "sentiment_data_points", _MIN_SENTIMENT_DATA_POINTS) or _MIN_SENTIMENT_DATA_POINTS),
             )
             _settings["sentiment_interval"] = getattr(row, "sentiment_interval", "1m") or "1m"
+            _settings["sentiment_bucket_persistence"] = max(
+                1,
+                min(20, int(getattr(row, "sentiment_bucket_persistence", 3) or 3)),
+            )
             _settings["ai_tag_strategy_enabled"] = bool(getattr(row, "ai_tag_strategy_enabled", False))
             _settings["ai_sentiment_change_enabled"] = bool(getattr(row, "ai_sentiment_change_enabled", True))
             _settings["ai_tag_strategies"] = _load_strategy_map(
@@ -319,6 +326,10 @@ async def _save_settings_to_db() -> None:
             )
         )
         row.sentiment_interval = _settings.get("sentiment_interval", "1m") or "1m"
+        row.sentiment_bucket_persistence = max(
+            1,
+            min(20, int(_settings.get("sentiment_bucket_persistence", 3) or 3)),
+        )
         row.ai_tag_strategy_enabled = bool(_settings.get("ai_tag_strategy_enabled", False))
         row.ai_sentiment_change_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
         row.ai_tag_strategies = json.dumps(_settings.get("ai_tag_strategies", {}), sort_keys=True)
@@ -346,7 +357,7 @@ def update_manager_settings(new: dict) -> dict:
                "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
                "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation",
                "market_sentiment_strategies", "symbol_sentiment_strategies",
-              "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval",
+              "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval", "sentiment_bucket_persistence",
               "stop_loss_pct", "take_profit_pct",
               "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
@@ -366,6 +377,11 @@ def update_manager_settings(new: dict) -> dict:
             _MIN_SENTIMENT_DATA_POINTS,
             int(_settings.get("sentiment_data_points", _MIN_SENTIMENT_DATA_POINTS) or _MIN_SENTIMENT_DATA_POINTS),
         )
+    if "sentiment_bucket_persistence" in new:
+        _settings["sentiment_bucket_persistence"] = max(
+            1,
+            min(20, int(_settings.get("sentiment_bucket_persistence", 3) or 3)),
+        )
 
     try:
         loop = asyncio.get_running_loop()
@@ -373,7 +389,7 @@ def update_manager_settings(new: dict) -> dict:
         loop = None
     if loop is not None:
         loop.create_task(_save_settings_to_db())
-        if any(key in new for key in ("market_sentiment_strategies", "symbol_sentiment_strategies", "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval")):
+        if any(key in new for key in ("market_sentiment_strategies", "symbol_sentiment_strategies", "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval", "sentiment_bucket_persistence")):
             async def _refresh_and_apply() -> None:
                 # Refresh scores for every position that is in sentiment-routing
                 # mode so that the strategy update uses current data, not stale
@@ -434,69 +450,62 @@ def _score_symbol(df: pd.DataFrame) -> tuple[float, str]:
       3. Close vs 20-bar SMA trend
     """
     closes = df["Close"]
-    score = 0.0
+    if closes.empty:
+        return 0.0, "neutral"
 
-    # RSI
-    if len(closes) >= 15:
-        delta = closes.diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        last_loss = loss.iloc[-1]
-        rs = gain.iloc[-1] / last_loss if last_loss and last_loss != 0 else float("inf")
-        rsi = 100 - 100 / (1 + rs)
-        if rsi < 30:
-            score -= 2 / 3
-        elif rsi < 40:
-            score -= 1 / 3
-        elif rsi > 70:
-            score += 2 / 3
-        elif rsi > 60:
-            score += 1 / 3
+    # Mirror backtest sentiment computation so PM/sandbox execution behavior
+    # aligns with the improved backtest regime-switch logic.
+    score_series = pd.Series(0.0, index=closes.index, dtype=float)
 
-    # MACD histogram
-    if len(closes) >= 35:
-        ema12 = closes.ewm(span=12, adjust=False).mean()
-        ema26 = closes.ewm(span=26, adjust=False).mean()
-        macd_line = ema12 - ema26
-        signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        hist = macd_line - signal_line
-        if hist.iloc[-1] > 0:
-            score += 1 / 3
-        elif hist.iloc[-1] < 0:
-            score -= 1 / 3
+    delta = closes.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss.where(loss != 0, pd.NA)
+    rsi = (100 - 100 / (1 + rs)).fillna(50)
+    score_series += (rsi < 30).astype(float) * (-2 / 3)
+    score_series += ((rsi >= 30) & (rsi < 40)).astype(float) * (-1 / 3)
+    score_series += (rsi > 70).astype(float) * (2 / 3)
+    score_series += ((rsi > 60) & (rsi <= 70)).astype(float) * (1 / 3)
 
-    # SMA trend (close vs 20-bar SMA)
-    if len(closes) >= 20:
-        sma20 = closes.rolling(20).mean()
-        if closes.iloc[-1] > sma20.iloc[-1]:
-            score += 1 / 3
-        elif closes.iloc[-1] < sma20.iloc[-1]:
-            score -= 1 / 3
+    ema12 = closes.ewm(span=12, adjust=False).mean()
+    ema26 = closes.ewm(span=26, adjust=False).mean()
+    hist = ((ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()).fillna(0.0)
+    score_series += (hist > 0).astype(float) * (1 / 3)
+    score_series += (hist < 0).astype(float) * (-1 / 3)
 
-    score = max(-1.0, min(1.0, score))
-    if score >= 0.5:
-        classification = "euphoric"
-    elif score >= 0.1:
-        classification = "bullish"
-    elif score > -0.1:
-        classification = "neutral"
-    elif score > -0.5:
-        classification = "bearish"
-    else:
-        classification = "crash"
+    sma20 = closes.rolling(20).mean().fillna(closes)
+    score_series += (closes > sma20).astype(float) * (1 / 3)
+    score_series += (closes < sma20).astype(float) * (-1 / 3)
+
+    score_series = score_series.clip(-1.0, 1.0)
+    score_series = score_series.ewm(span=5, adjust=False).mean()
+    score = float(score_series.iloc[-1]) if len(score_series) else 0.0
+    classification = _score_to_bucket(score)
 
     return round(score, 3), classification
 
 
 async def _refresh_scores(symbols: list[str]) -> None:
     """Fetch bars and score all symbols concurrently."""
+    persistence = max(1, min(20, int(_settings.get("sentiment_bucket_persistence", 3) or 3)))
+
     async def _score_one(sym: str):
         try:
             df = await _fetch_bars(sym)
-            score, cls = _score_symbol(df)
+            score, raw_cls = _score_symbol(df)
+            bucket_key = f"symbol:{sym.upper()}"
+            cls = _debounce_bucket(bucket_key, raw_cls, min_persistence=persistence)
+            slot = (_state.get("bucket_debounce") or {}).get(bucket_key, {})
+            candidate = slot.get("candidate")
+            countdown = max(0, persistence - int(slot.get("count") or 0)) if candidate else 0
             _state["scores"][sym] = {
                 "score": score,
                 "classification": cls,
+                "raw_classification": raw_cls,
+                "debounced_classification": cls,
+                "debounce_candidate": candidate,
+                "debounce_countdown": countdown,
+                "debounce_persistence": persistence,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         except Exception as exc:
@@ -530,15 +539,73 @@ def _score_to_bucket(score: float) -> str:
     return "crash"
 
 
+def _debounce_bucket(bucket_key: str, proposed_bucket: str, min_persistence: int = 5) -> str:
+    """Return a debounced bucket for the given key.
+
+    A new proposed bucket must persist for ``min_persistence`` consecutive
+    evaluations before it becomes active.
+    """
+    if min_persistence <= 1:
+        return proposed_bucket
+
+    state = _state.setdefault("bucket_debounce", {})
+    slot = state.get(bucket_key)
+    if slot is None:
+        state[bucket_key] = {
+            "active": proposed_bucket,
+            "candidate": None,
+            "count": 0,
+        }
+        return proposed_bucket
+
+    active = str(slot.get("active") or proposed_bucket)
+    candidate = slot.get("candidate")
+    count = int(slot.get("count") or 0)
+
+    if proposed_bucket == active:
+        slot["candidate"] = None
+        slot["count"] = 0
+        return active
+
+    if candidate == proposed_bucket:
+        count += 1
+    else:
+        candidate = proposed_bucket
+        count = 1
+
+    if count >= min_persistence:
+        slot["active"] = proposed_bucket
+        slot["candidate"] = None
+        slot["count"] = 0
+        return proposed_bucket
+
+    slot["candidate"] = candidate
+    slot["count"] = count
+    return active
+
+
 def _compute_market_classification() -> dict:
     """Derive overall market sentiment by averaging all tracked symbol scores."""
     scores = _state.get("scores", {})
     if not scores:
         return {"score": 0.0, "classification": "neutral", "bucket": "neutral"}
     avg_score = sum(v["score"] for v in scores.values()) / len(scores)
-    bucket = _score_to_bucket(avg_score)
+    persistence = max(1, min(20, int(_settings.get("sentiment_bucket_persistence", 3) or 3)))
+    raw_bucket = _score_to_bucket(avg_score)
+    bucket = _debounce_bucket("market", raw_bucket, min_persistence=persistence)
+    slot = (_state.get("bucket_debounce") or {}).get("market", {})
+    candidate = slot.get("candidate")
+    countdown = max(0, persistence - int(slot.get("count") or 0)) if candidate else 0
     classification = bucket
-    return {"score": round(avg_score, 3), "classification": classification, "bucket": bucket}
+    return {
+        "score": round(avg_score, 3),
+        "classification": classification,
+        "bucket": bucket,
+        "raw_bucket": raw_bucket,
+        "debounce_candidate": candidate,
+        "debounce_countdown": countdown,
+        "debounce_persistence": persistence,
+    }
 
 
 async def _apply_sentiment_strategies() -> None:
@@ -583,7 +650,7 @@ async def _apply_sentiment_strategies() -> None:
             elif mode == "symbol":
                 symbol_syms.append(pos.symbol)
                 sym_score = _state["scores"].get(pos.symbol, {})
-                sym_bucket = _score_to_bucket(float(sym_score.get("score", 0.0)))
+                sym_bucket = str(sym_score.get("classification") or _score_to_bucket(float(sym_score.get("score", 0.0))))
                 target_strategy = symbol_strats.get(sym_bucket)
             else:
                 continue

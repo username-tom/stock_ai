@@ -398,20 +398,58 @@ export default function SandboxResultsView({ result, metrics }) {
                   const t = Date.parse(iso)
                   return Number.isFinite(t) ? t : NaN
                 }
-                const bars = p.ohlcv.map(b => ({ t: toMs(b.date), close: Number(b.close) }))
-                const tStart = bars[0]?.t
-                const tEnd = bars[bars.length - 1]?.t
-                const tRange = (tEnd - tStart) || 1
-                const xAtT = (ts) => {
-                  if (!Number.isFinite(ts)) return padL + innerW / 2
-                  const clamped = Math.max(tStart, Math.min(tEnd, ts))
-                  return padL + ((clamped - tStart) / tRange) * innerW
+                const bars = p.ohlcv.map(b => ({
+                  t: toMs(b.date),
+                  close: Number(b.close),
+                  dayKey: String(b.date ?? '').split('_')[0],
+                }))
+                const validBars = []
+                for (let i = 0; i < bars.length; i++) {
+                  const b = bars[i]
+                  if (Number.isFinite(b.t) && Number.isFinite(b.close)) {
+                    validBars.push({ ...b, i })
+                  }
                 }
-                const xAt = i => xAtT(bars[i]?.t ?? tStart)
+                const m = validBars.length
+                const xAtRank = (rank) => {
+                  if (m <= 1) return padL + innerW / 2
+                  const clamped = Math.max(0, Math.min(m - 1, rank))
+                  return padL + (clamped * innerW) / (m - 1)
+                }
+                const xAtTCompressed = (ts) => {
+                  if (!Number.isFinite(ts) || m === 0) return padL + innerW / 2
+                  if (ts <= validBars[0].t) return xAtRank(0)
+                  if (ts >= validBars[m - 1].t) return xAtRank(m - 1)
+
+                  let lo = 0
+                  let hi = m - 1
+                  while (lo <= hi) {
+                    const mid = (lo + hi) >> 1
+                    const mt = validBars[mid].t
+                    if (mt === ts) return xAtRank(mid)
+                    if (mt < ts) lo = mid + 1
+                    else hi = mid - 1
+                  }
+
+                  const right = lo
+                  const left = Math.max(0, right - 1)
+                  const lt = validBars[left].t
+                  const rt = validBars[right].t
+                  if (!Number.isFinite(lt) || !Number.isFinite(rt) || rt <= lt) return xAtRank(left)
+                  const frac = (ts - lt) / (rt - lt)
+                  return xAtRank(left + frac)
+                }
                 const yAt = price => padT + innerH - ((Number(price) - minC) / rangeC) * innerH
-                const points = bars.map((b, i) =>
-                  `${xAt(i).toFixed(2)},${yAt(b.close).toFixed(2)}`
-                ).join(' ')
+                const points = validBars
+                  .map((b, rank) => `${xAtRank(rank).toFixed(2)},${yAt(b.close).toFixed(2)}`)
+                  .join(' ')
+
+                const daySeparators = []
+                for (let rank = 1; rank < m; rank++) {
+                  if (validBars[rank].dayKey !== validBars[rank - 1].dayKey) {
+                    daySeparators.push(xAtRank(rank - 0.5))
+                  }
+                }
 
                 const markers = []
                 for (const t of (p.trades ?? [])) {
@@ -420,7 +458,7 @@ export default function SandboxResultsView({ result, metrics }) {
                   if (Number.isFinite(eMs) && Number.isFinite(Number(t.entry_price))) {
                     markers.push({
                       side: 'buy',
-                      x: xAtT(eMs),
+                      x: xAtTCompressed(eMs),
                       y: yAt(t.entry_price),
                       price: t.entry_price,
                       date: t.entry_date,
@@ -430,7 +468,7 @@ export default function SandboxResultsView({ result, metrics }) {
                   if (Number.isFinite(xMs) && Number.isFinite(Number(t.exit_price))) {
                     markers.push({
                       side: 'sell',
-                      x: xAtT(xMs),
+                      x: xAtTCompressed(xMs),
                       y: yAt(t.exit_price),
                       price: t.exit_price,
                       date: t.exit_date,
@@ -461,14 +499,29 @@ export default function SandboxResultsView({ result, metrics }) {
                         stroke="#334155" strokeDasharray="2 3" strokeWidth="0.5" />
                       <line x1={padL} x2={W - padR} y1={yAt(minC)} y2={yAt(minC)}
                         stroke="#334155" strokeDasharray="2 3" strokeWidth="0.5" />
-                      <polyline
-                        points={points}
-                        fill="none"
-                        stroke="#64748b"
-                        strokeWidth="1.2"
-                        strokeLinejoin="round"
-                        strokeLinecap="round"
-                      />
+                      {daySeparators.map((x, i) => (
+                        <line
+                          key={`day-sep-${i}`}
+                          x1={x}
+                          x2={x}
+                          y1={padT}
+                          y2={padT + innerH}
+                          stroke="#334155"
+                          strokeDasharray="2 3"
+                          strokeWidth="0.8"
+                          opacity="0.8"
+                        />
+                      ))}
+                      {points && (
+                        <polyline
+                          points={points}
+                          fill="none"
+                          stroke="#64748b"
+                          strokeWidth="1.2"
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                        />
+                      )}
                       {markers.map((mk, i) => {
                         if (mk.side === 'buy') {
                           // Gray dashed vertical line through entry point

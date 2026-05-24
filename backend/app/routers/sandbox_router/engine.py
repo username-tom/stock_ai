@@ -117,6 +117,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=30)
     sentiment_data_points: Optional[int] = Field(default=None, ge=35, le=5000)
     sentiment_interval: Optional[str] = None
+    sentiment_bucket_persistence: Optional[int] = Field(default=None, ge=1, le=20)
     ai_tag_strategy_enabled: Optional[bool] = None
     ai_sentiment_change_enabled: Optional[bool] = None
     ai_tag_strategies: Optional[dict[str, str]] = None

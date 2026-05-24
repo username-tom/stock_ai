@@ -249,6 +249,7 @@ async def _notify_unrealized_loss(_position_id: int, symbol: str, unrealized_pnl
 _running = False
 _last_tick: datetime | None = None
 _symbol_status: dict[str, dict] = {}   # { symbol: { last_signal, last_run_at, error } }
+_signal_handoff_state: dict[str, dict[str, Any]] = {}  # {symbol: {strategy, switched_at_idx}}
 _buy_lock: asyncio.Lock | None = None  # serialises concurrent BUY fund allocation
 
 
@@ -419,6 +420,20 @@ async def _process_symbol(
         # The raw last-bar signal is used for display (last_signal in DB).
         current_signal = int(last_row.get("signal", 0))
 
+        # Strategy handoff state: when PM changes strategy while a position is
+        # open, ignore stale historical sell events from the new strategy until
+        # a fresh post-switch event arrives.
+        switch_state = _signal_handoff_state.get(symbol)
+        switched_at_idx = None
+        if switch_state is None or switch_state.get("strategy") != strategy_name:
+            switched_at_idx = df_sig.index[-1]
+            _signal_handoff_state[symbol] = {
+                "strategy": strategy_name,
+                "switched_at_idx": switched_at_idx,
+            }
+        else:
+            switched_at_idx = switch_state.get("switched_at_idx")
+
         # Custom scripts emit event-based signals (+1/-1 only on the crossover
         # bar, then 0).  Built-in strategies keep signal = +1/-1 while the
         # condition holds.  Using the last *non-zero* value handles both: for
@@ -437,14 +452,21 @@ async def _process_symbol(
             """Return True if index a comes strictly after index b (or b is None)."""
             return b is None or (a is not None and a > b)
 
+        def _idx_after_switch(a, switch_idx):
+            if switch_idx is None:
+                return a is not None
+            return a is not None and a > switch_idx
+
         if pos.shares > 0:
-            # TP / SL / exit: a SELL that fired AFTER the last BUY
-            trade_signal = -1 if _idx_after(last_sell_idx, last_buy_idx) else 0
-            ref_idx = last_sell_idx
+            # Exit only on a fresh post-switch sell event (or explicit current -1).
+            has_fresh_sell_event = _idx_after(last_sell_idx, last_buy_idx) and _idx_after_switch(last_sell_idx, switched_at_idx)
+            trade_signal = -1 if (current_signal < 0 or has_fresh_sell_event) else 0
+            ref_idx = last_sell_idx if has_fresh_sell_event else None
         else:
-            # Entry: a BUY that fired AFTER the last SELL
-            trade_signal = 1 if _idx_after(last_buy_idx, last_sell_idx) else 0
-            ref_idx = last_buy_idx
+            # Entry only on a fresh post-switch buy event (or explicit current +1).
+            has_fresh_buy_event = _idx_after(last_buy_idx, last_sell_idx) and _idx_after_switch(last_buy_idx, switched_at_idx)
+            trade_signal = 1 if (current_signal > 0 or has_fresh_buy_event) else 0
+            ref_idx = last_buy_idx if has_fresh_buy_event else None
 
         # Grab the signal_source from the relevant bar (if available)
         signal_source = ""

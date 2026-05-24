@@ -51,6 +51,7 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_lookback_days INTEGER NOT NULL DEFAULT 5",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_data_points INTEGER NOT NULL DEFAULT 35",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_interval VARCHAR(10) NOT NULL DEFAULT '1m'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_bucket_persistence INTEGER NOT NULL DEFAULT 3",
         # sandbox_account total_deposited column (added to track cumulative deposits for repair logic)
         "ALTER TABLE sandbox_account ADD COLUMN total_deposited REAL NOT NULL DEFAULT 0.0",
         # sandbox_fund_events table (deposit/withdrawal history)

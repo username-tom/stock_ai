@@ -425,6 +425,34 @@ class SandboxBacktestRequest(BaseModel):
         default="proportional",
         description="'proportional' splits capital by allocated_funds; 'equal' splits evenly.",
     )
+    use_shared_pool: bool = Field(
+        default=True,
+        description=(
+            "When True (default), runs a coordinated portfolio simulation with a "
+            "centralised cash pool that positions can draw from up to their per-position "
+            "max-allocation cap. Mirrors live sandbox behaviour. When False, falls back to "
+            "isolated per-symbol backtests with fixed up-front capital splits."
+        ),
+    )
+    per_position_min_pct: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Lower bound of equity earmarked per position, as a percentage of "
+            "initial_capital. Default 0 means everything starts in the shared pool. "
+            "Only used when use_shared_pool=True."
+        ),
+    )
+    per_position_max_pct: float = Field(
+        default=100.0,
+        ge=0.0,
+        le=200.0,
+        description=(
+            "Upper bound of equity per position, as a percentage of initial_capital. "
+            "0 disables the cap (uncapped). Only used when use_shared_pool=True."
+        ),
+    )
 
 
 def _build_sandbox_activity_log(per_symbol: list[dict]) -> list[dict]:
@@ -491,7 +519,10 @@ async def run_sandbox_backtest_endpoint(
     """
     from app.models.sandbox import SandboxPosition
     from app.services.portfolio_manager import get_manager_settings
-    from app.services.backtester import run_sentiment_backtest as _run_sent
+    from app.services.backtester import (
+        run_sentiment_backtest as _run_sent,
+        run_sandbox_portfolio_backtest,
+    )
 
     if req.allocation_mode not in ("proportional", "equal"):
         raise HTTPException(status_code=400, detail="allocation_mode must be 'proportional' or 'equal'.")
@@ -590,6 +621,216 @@ async def run_sandbox_backtest_endpoint(
             template_filenames[fn] = path.read_text(encoding="utf-8")
         else:
             template_filenames.pop(fn, None)
+
+    # ── Shared-pool coordinated backtest (sandbox-style fund allocation) ── #
+    if req.use_shared_pool:
+        # Derive per-symbol earmark (min_alloc) and cap (max_alloc).
+        n = len(symbols)
+        max_pct = max(0.0, float(req.per_position_max_pct or 0.0))
+        max_alloc_each = (max_pct / 100.0) * req.initial_capital if max_pct > 0 else 0.0
+        min_pct_each = max(0.0, float(req.per_position_min_pct or 0.0)) / 100.0
+        total_earmark = min(min_pct_each * n, 1.0) * req.initial_capital
+        if req.allocation_mode == "proportional":
+            weights = {
+                s: max(0.0, float(getattr(by_symbol.get(s), "allocated_funds", 0.0) or 0.0))
+                for s in symbols
+            }
+            total_w = sum(weights.values())
+            if total_w > 0:
+                min_alloc_by_symbol = {s: total_earmark * (weights[s] / total_w) for s in symbols}
+            else:
+                min_alloc_by_symbol = {s: total_earmark / n if n else 0.0 for s in symbols}
+        else:
+            min_alloc_by_symbol = {s: total_earmark / n if n else 0.0 for s in symbols}
+
+        # Build the symbol_specs list for the coordinator.
+        specs: list[dict] = []
+        for s in symbols:
+            if req.use_sentiment_routing:
+                routing = "sentiment"
+                fixed_strategy = None
+            else:
+                routing = "fixed"
+                kind, sid, tfn = _classify_strategy(
+                    getattr(by_symbol.get(s), "strategy_name", None)
+                )
+                if kind == "custom" and sid is not None and sid in custom_scripts:
+                    fixed_strategy = f"custom:{sid}"
+                elif kind == "template" and tfn and tfn in template_filenames:
+                    fixed_strategy = f"template:{tfn}"
+                else:
+                    fixed_strategy = getattr(by_symbol.get(s), "strategy_name", None) or "sma_crossover"
+            specs.append({
+                "symbol": s,
+                "routing": routing,
+                "fixed_strategy": fixed_strategy,
+                "min_alloc": min_alloc_by_symbol.get(s, 0.0),
+                "max_alloc": max_alloc_each,
+            })
+
+        try:
+            coord = await asyncio.to_thread(
+                run_sandbox_portfolio_backtest,
+                symbol_specs=specs,
+                start_date=req.start_date,
+                end_date=req.end_date,
+                initial_capital=req.initial_capital,
+                commission=req.commission,
+                data_source=req.data_source,
+                day_trade=req.day_trade,
+                sentiment_strategies=sentiment_strategies,
+                sentiment_warmup=sentiment_warmup,
+                custom_scripts=custom_scripts or None,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+                hold_positions_overnight=hold_overnight,
+                eod_sell_window_minutes=eod_window,
+            )
+        except Exception as exc:
+            logger.exception("Sandbox shared-pool backtest failed")
+            raise HTTPException(status_code=500, detail=f"Coordinator failed: {exc}") from exc
+
+        metrics_co = coord["metrics"]
+        per_symbol_summary = coord["per_symbol"]
+        equity_curve = coord["equity_curve"]
+        # Downsample per-symbol trade lists if huge to keep payload sane.
+        for entry in per_symbol_summary:
+            tr = entry.get("trades") or []
+            if len(tr) > 2000:
+                entry["trades"] = tr[-2000:]
+
+        # Aggregate trade fields used to compute CAGR / Sharpe / MDD on a
+        # portfolio-level equity curve (calendar-day annualisation).
+        annualized_return_pct = None
+        sharpe_ratio = None
+        max_drawdown_pct = None
+        if equity_curve:
+            import math as _math
+            values = [float(p["value"]) for p in equity_curve]
+            cal_days = 0.0
+            try:
+                _s = datetime.strptime(req.start_date, "%Y-%m-%d")
+                _e = datetime.strptime(req.end_date, "%Y-%m-%d")
+                cal_days = max((_e - _s).days, 0)
+            except (ValueError, TypeError):
+                cal_days = 0.0
+            if req.initial_capital > 0 and coord["final_value"] > 0 and cal_days > 0:
+                n_years = cal_days / 365.25
+                if n_years > 0:
+                    annualized_return_pct = round(
+                        ((coord["final_value"] / req.initial_capital) ** (1.0 / n_years) - 1.0) * 100.0,
+                        2,
+                    )
+            if len(values) > 1:
+                rets = [
+                    (values[i] - values[i - 1]) / values[i - 1]
+                    for i in range(1, len(values))
+                    if values[i - 1] > 0
+                ]
+                if len(rets) > 1:
+                    mean_r = sum(rets) / len(rets)
+                    var_r = sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1)
+                    std_r = _math.sqrt(var_r)
+                    sharpe_ratio = round((mean_r / std_r) * _math.sqrt(252.0), 2) if std_r > 0 else 0.0
+            peak = values[0]
+            worst = 0.0
+            for v in values:
+                if v > peak:
+                    peak = v
+                if peak > 0:
+                    dd = (v - peak) / peak
+                    if dd < worst:
+                        worst = dd
+            max_drawdown_pct = round(worst * 100.0, 2)
+
+        metrics_out = {
+            "final_value": metrics_co["final_value"],
+            "total_return_pct": metrics_co["total_return_pct"],
+            "annualized_return_pct": annualized_return_pct,
+            "sharpe_ratio": sharpe_ratio,
+            "max_drawdown_pct": max_drawdown_pct,
+            "win_rate_pct": metrics_co["win_rate_pct"],
+            "total_trades": metrics_co["total_trades"],
+            "symbols_run": metrics_co["symbols_run"],
+            "symbols_failed": metrics_co["symbols_failed"],
+        }
+
+        name = (
+            f"SANDBOX_pool_{'sentiment' if req.use_sentiment_routing else 'positions'}"
+            f"_{req.start_date}_to_{req.end_date}"
+        )
+        parameters_payload = {
+            "symbols": symbols,
+            "use_sentiment_routing": req.use_sentiment_routing,
+            "allocation_mode": req.allocation_mode,
+            "use_shared_pool": True,
+            "per_position_min_pct": req.per_position_min_pct,
+            "per_position_max_pct": req.per_position_max_pct,
+            "pm_settings": {
+                "stop_loss_pct": stop_loss_pct,
+                "take_profit_pct": take_profit_pct,
+                "hold_positions_overnight": hold_overnight,
+                "eod_sell_window_minutes": eod_window,
+                "sentiment_strategies": sentiment_strategies,
+                "sentiment_warmup": sentiment_warmup,
+            },
+            "per_symbol_min_alloc": min_alloc_by_symbol,
+            "per_symbol_max_alloc": max_alloc_each,
+        }
+        result_data_payload = {
+            "equity_curve": equity_curve,
+            "trades": [],
+            "ohlcv": [],
+            "per_symbol": per_symbol_summary,
+            "activity_log": _build_sandbox_activity_log(per_symbol_summary),
+            "initial_capital": req.initial_capital,
+            "per_symbol_min_alloc": min_alloc_by_symbol,
+            "per_symbol_max_alloc": max_alloc_each,
+            "use_sentiment_routing": req.use_sentiment_routing,
+            "use_shared_pool": True,
+            "pool_final": coord.get("pool_final"),
+            "pm_settings": parameters_payload["pm_settings"],
+            "errors": coord.get("errors") or {},
+        }
+        report = BacktestReport(
+            name=name,
+            symbol=",".join(symbols)[:20] or "SANDBOX",
+            strategy_type="sandbox_portfolio",
+            parameters=parameters_payload,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            final_value=metrics_out["final_value"],
+            total_return_pct=metrics_out["total_return_pct"],
+            annualized_return_pct=metrics_out["annualized_return_pct"],
+            sharpe_ratio=metrics_out["sharpe_ratio"],
+            max_drawdown_pct=metrics_out["max_drawdown_pct"],
+            win_rate_pct=metrics_out["win_rate_pct"],
+            total_trades=metrics_out["total_trades"],
+            result_data=result_data_payload,
+        )
+        db.add(report)
+        await db.commit()
+        await db.refresh(report)
+
+        return {
+            "id": report.id,
+            "name": name,
+            "metrics": metrics_out,
+            "result": {
+                "equity_curve": equity_curve,
+                "per_symbol": per_symbol_summary,
+                "initial_capital": req.initial_capital,
+                "per_symbol_min_alloc": min_alloc_by_symbol,
+                "per_symbol_max_alloc": max_alloc_each,
+                "pool_final": coord.get("pool_final"),
+                "pm_settings": parameters_payload["pm_settings"],
+                "use_sentiment_routing": req.use_sentiment_routing,
+                "use_shared_pool": True,
+                "activity_log": result_data_payload["activity_log"],
+                "errors": result_data_payload["errors"],
+            },
+        }
 
     # Run all per-symbol backtests in parallel.
     async def _run_one(sym: str) -> dict:

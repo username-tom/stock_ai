@@ -120,6 +120,7 @@ class PortfolioManagerSettings(Base):
     sentiment_lookback_days = Column(Integer, default=5, nullable=False)
     sentiment_data_points = Column(Integer, default=35, nullable=False)
     sentiment_interval = Column(String(10), default="1m", nullable=False)
+    sentiment_bucket_persistence = Column(Integer, default=3, nullable=False)
     # AI tag (learner) strategy routing
     ai_tag_strategy_enabled = Column(Boolean, default=False, nullable=False)
     ai_sentiment_change_enabled = Column(Boolean, default=True, nullable=False)
