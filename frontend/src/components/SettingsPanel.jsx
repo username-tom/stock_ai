@@ -156,6 +156,7 @@ export default function SettingsPanel() {
       IB_PORT:            data.ib_connection.IB_PORT,
       IB_CLIENT_ID:       data.ib_connection.IB_CLIENT_ID,
       TRADING_MODE:       data.trading.TRADING_MODE,
+        AUTO_UPDATE:        data.launcher.AUTO_UPDATE,
       DATABASE_URL:       data.storage.DATABASE_URL,
       REPORTS_DIR:        data.storage.REPORTS_DIR,
       LOCAL_STORAGE_DIR:  data.storage.LOCAL_STORAGE_DIR,
@@ -334,7 +335,28 @@ export default function SettingsPanel() {
         </Field>
       </SectionCard>
 
-      {/* ── Group 3: Storage & Paths ── */}
+      {/* ── Group 3: Launcher ── */}
+      <SectionCard
+        icon={ArrowPathIcon}
+        title="Launcher"
+        description="Controls the Windows launcher update behavior when a newer GitHub release is detected."
+      >
+        <Field
+          label="Auto Update"
+          hint="When enabled, the launcher will download and launch the latest release automatically."
+        >
+          <Select
+            value={form.AUTO_UPDATE ? 'on' : 'off'}
+            onChange={v => set('AUTO_UPDATE', v === 'on')}
+            options={[
+              { value: 'on', label: 'Enabled' },
+              { value: 'off', label: 'Disabled' },
+            ]}
+          />
+        </Field>
+      </SectionCard>
+
+      {/* ── Group 4: Storage & Paths ── */}
       <SectionCard
         icon={CircleStackIcon}
         title="Storage & Paths"
@@ -378,7 +400,7 @@ export default function SettingsPanel() {
         </div>
       </SectionCard>
 
-      {/* ── Group 4: Network ── */}
+      {/* ── Group 5: Network ── */}
       <SectionCard
         icon={GlobeAltIcon}
         title="Network & CORS"
@@ -398,7 +420,7 @@ export default function SettingsPanel() {
         </Field>
       </SectionCard>
 
-      {/* ── Group 5: Refresh Rates ── */}
+      {/* ── Group 6: Refresh Rates ── */}
       <SectionCard
         icon={ClockIcon}
         title="Refresh Rates"

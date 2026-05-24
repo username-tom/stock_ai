@@ -42,3 +42,13 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# .NET launcher
+launcher/**/bin/
+launcher/**/obj/
+*.user
+*.rsuser
+
+# Installer artifacts
+dist/installer/
+installer/Output/

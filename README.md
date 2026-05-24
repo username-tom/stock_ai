@@ -161,6 +161,14 @@ npm install
 npm run dev
 ```
 
+### Windows installer
+
+The repo now includes a Windows wizard installer scaffold under [installer/StockAI.iss](installer/StockAI.iss) and a self-contained launcher under [launcher/StockAiLauncher/Program.cs](launcher/StockAiLauncher/Program.cs).
+
+The launcher starts Docker Desktop if it is available, runs `docker compose up -d --build`, and checks GitHub releases so you can switch between auto-update and manual update behavior.
+
+To build the installer, first publish the launcher and then compile the Inno Setup script as described in [installer/README.md](installer/README.md).
+
 ---
 
 ## Portfolio (Simulated Trading)

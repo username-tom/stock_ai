@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     TRADING_MODE: str = "paper"
     REPORTS_DIR: str = "reports_output"
     LOCAL_STORAGE_DIR: str = "local_storage"
+    AUTO_UPDATE: bool = False
 
     @property
     def cors_origins_list(self) -> List[str]:

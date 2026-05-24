@@ -74,6 +74,7 @@ class SettingsPayload(BaseModel):
     CORS_ORIGINS: str | None = None
     REPORTS_DIR: str | None = None
     LOCAL_STORAGE_DIR: str | None = None
+    AUTO_UPDATE: bool | None = None
 
 
 # Keys that require a backend restart to take effect
@@ -111,6 +112,9 @@ async def get_settings():
             "DATABASE_URL":       v("DATABASE_URL",       settings.DATABASE_URL),
             "REPORTS_DIR":        v("REPORTS_DIR",        settings.REPORTS_DIR),
             "LOCAL_STORAGE_DIR":  v("LOCAL_STORAGE_DIR",  settings.LOCAL_STORAGE_DIR),
+        },
+        "launcher": {
+            "AUTO_UPDATE": env.get("AUTO_UPDATE", str(settings.AUTO_UPDATE)).lower() in ("true", "1", "yes", "on"),
         },
         "network": {
             "CORS_ORIGINS": v("CORS_ORIGINS", settings.CORS_ORIGINS),
