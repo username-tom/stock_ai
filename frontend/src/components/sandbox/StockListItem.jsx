@@ -86,6 +86,14 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
     : null
   const learnerTag = (pos.learner_tag || '').toUpperCase()
   const learnerTagClass = LEARNER_COLORS[learnerTag] || LEARNER_COLORS.NEUTRAL
+  const pendingRerollActive = Boolean(pos.pending_reroll_active)
+  const pendingRerollSide = String(pos.pending_reroll_side || '').toUpperCase()
+  const pendingRerollAttempts = Number(pos.pending_reroll_attempts ?? 0)
+  const pendingRerollInRange = pos.pending_reroll_in_range
+  const pendingRerollResult = String(pos.pending_reroll_last_result || '').toLowerCase()
+  const pendingRerollColorClass = pendingRerollInRange === false
+    ? 'border-red-700/40 bg-red-900/20 text-red-300'
+    : 'border-amber-700/40 bg-amber-900/20 text-amber-300'
 
   const handleMouseEnter = useCallback(() => {
     if (!wrapperRef.current) return
@@ -164,6 +172,18 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
           <div className="flex items-center gap-1 mt-0.5">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
             <span className="text-xs text-amber-400/80">{pos.pending_shares.toFixed(4)} sh pending</span>
+          </div>
+        )}
+        {pendingRerollActive && (
+          <div className="mt-0.5">
+            <span
+              className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold ${pendingRerollColorClass}`}
+              title={`Pending ${pendingRerollSide || 'ORDER'} reroll status`}
+            >
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
+              {pendingRerollSide || 'PENDING'} R{pendingRerollAttempts}
+              {pendingRerollResult === 'miss' ? ' MISS' : pendingRerollResult === 'out_of_range' ? ' OUT' : ''}
+            </span>
           </div>
         )}
         {pos.shares > 0 && (

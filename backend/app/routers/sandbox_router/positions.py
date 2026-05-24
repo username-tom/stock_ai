@@ -153,6 +153,12 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
                 "pending_shares": float(local.pending_shares or 0.0) if local else 0.0,
                 "pending_avg_cost": float(local.pending_avg_cost or 0.0) if local else 0.0,
                 "pending_since": local.pending_since.isoformat() if local and local.pending_since else None,
+                "pending_reroll_active": False,
+                "pending_reroll_side": None,
+                "pending_reroll_attempts": 0,
+                "pending_reroll_in_range": None,
+                "pending_reroll_last_result": None,
+                "pending_reroll_last_at": None,
             }
 
         watched_local_symbols = {

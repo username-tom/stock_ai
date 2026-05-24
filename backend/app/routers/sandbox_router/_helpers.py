@@ -52,6 +52,13 @@ async def compute_available_cash(
 
 
 def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict:
+    runtime_status: dict = {}
+    try:
+        from app.services.sandbox_engine import get_symbol_runtime_status
+        runtime_status = get_symbol_runtime_status(p.symbol)
+    except Exception:
+        runtime_status = {}
+
     market_val = (market_price or p.avg_cost) * p.shares if p.shares else 0.0
     unrealised_pnl = market_val - p.avg_cost * p.shares if p.shares else 0.0
     return {
@@ -75,6 +82,12 @@ def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict
         "pending_shares": p.pending_shares,
         "pending_avg_cost": p.pending_avg_cost,
         "pending_since": p.pending_since.isoformat() if p.pending_since else None,
+        "pending_reroll_active": bool(runtime_status.get("pending_reroll_active", False)),
+        "pending_reroll_side": runtime_status.get("pending_reroll_side"),
+        "pending_reroll_attempts": int(runtime_status.get("pending_reroll_attempts") or 0),
+        "pending_reroll_in_range": runtime_status.get("pending_reroll_in_range"),
+        "pending_reroll_last_result": runtime_status.get("pending_reroll_last_result"),
+        "pending_reroll_last_at": runtime_status.get("pending_reroll_last_at"),
         "max_allocation_mode": getattr(p, "max_allocation_mode", "dollar") or "dollar",
         "max_allocation_value": getattr(p, "max_allocation_value", None),
         "sentiment_mode": getattr(p, "sentiment_mode", None),

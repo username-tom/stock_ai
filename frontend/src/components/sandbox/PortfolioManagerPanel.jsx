@@ -229,6 +229,8 @@ function buildDraftFromSettings(settings) {
     pm_hold_extended_multiplier: settings.pm_hold_extended_multiplier ?? 2.0,
     pm_hold_trailing_pct: settings.pm_hold_trailing_pct ?? 3.0,
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.75,
+    sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 100,
+    sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 100,
     auto_trade_buy_price_offset_pct: settings.auto_trade_buy_price_offset_pct ?? 0.1,
     auto_trade_sell_price_offset_pct: settings.auto_trade_sell_price_offset_pct ?? 0.1,
     sentiment_matrix_strategies: (() => {
@@ -821,6 +823,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       pm_hold_extended_multiplier: Math.max(0, Number(draft.pm_hold_extended_multiplier ?? 2.0) || 0),
       pm_hold_trailing_pct: Math.max(0, Number(draft.pm_hold_trailing_pct ?? 3.0) || 0),
       pending_price_drift_cancel_pct: Number(draft.pending_price_drift_cancel_pct),
+      sim_buy_fill_rate_pct: Number(draft.sim_buy_fill_rate_pct),
+      sim_sell_fill_rate_pct: Number(draft.sim_sell_fill_rate_pct),
       auto_trade_buy_price_offset_pct: Number(draft.auto_trade_buy_price_offset_pct),
       auto_trade_sell_price_offset_pct: Number(draft.auto_trade_sell_price_offset_pct),
       sentiment_matrix_strategies: sanitizeSentimentMatrix(draft.sentiment_matrix_strategies),
@@ -1707,6 +1711,38 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                         disabled={!editSettings}
                         value={draft.pending_price_drift_cancel_pct}
                         onChange={e => updateDraft(d => ({ ...d, pending_price_drift_cancel_pct: e.target.value }))}
+                        className="input w-28 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">%</span>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Sim BUY Fill Rate %"
+                    hint="For simulated/backtest pending BUY orders: when price is still within drift range, this is the per-bar probability of filling. 100 = always fill, 0 = never fill."
+                  >
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={0} max={100} step={1}
+                        disabled={!editSettings}
+                        value={draft.sim_buy_fill_rate_pct}
+                        onChange={e => updateDraft(d => ({ ...d, sim_buy_fill_rate_pct: e.target.value }))}
+                        className="input w-28 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">%</span>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Sim SELL Fill Rate %"
+                    hint="For simulated/backtest pending SELL orders: when price is still within drift range, this is the per-bar probability of filling. 100 = always fill, 0 = never fill."
+                  >
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={0} max={100} step={1}
+                        disabled={!editSettings}
+                        value={draft.sim_sell_fill_rate_pct}
+                        onChange={e => updateDraft(d => ({ ...d, sim_sell_fill_rate_pct: e.target.value }))}
                         className="input w-28 text-sm py-1.5"
                       />
                       <span className="text-slate-400 text-sm">%</span>

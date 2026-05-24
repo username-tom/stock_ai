@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import random
 import numpy as np
 import pandas as pd
 from typing import Any
@@ -987,6 +988,10 @@ def run_sandbox_portfolio_backtest(
     take_profit_pct: float = 0.0,
     hold_positions_overnight: bool = True,
     eod_sell_window_minutes: int = 30,
+    sim_buy_fill_rate_pct: float = 100.0,
+    sim_sell_fill_rate_pct: float = 100.0,
+    pending_price_drift_cancel_pct: float = 0.75,
+    sim_pending_duration_bars: int = 1,
 ) -> dict[str, Any]:
     """Run a coordinated multi-symbol backtest with a shared cash pool.
 
@@ -1067,6 +1072,7 @@ def run_sandbox_portfolio_backtest(
             # Per-symbol equity curve: list of (timestamp, base + cum_realized + unrealized).
             "curve": [],
             "realized_pnl_total": 0.0,
+            "pending_order": None,
         }
 
     total_earmark = sum(s["min_alloc"] for s in state.values())
@@ -1084,13 +1090,23 @@ def run_sandbox_portfolio_backtest(
     by_sym = {p["symbol"]: p for p in prepared}
     sl_mult = (1.0 - stop_loss_pct / 100.0) if stop_loss_pct > 0 else None
     tp_mult = (1.0 + take_profit_pct / 100.0) if take_profit_pct > 0 else None
+    buy_fill_prob = max(0.0, min(1.0, float(sim_buy_fill_rate_pct) / 100.0))
+    sell_fill_prob = max(0.0, min(1.0, float(sim_sell_fill_rate_pct) / 100.0))
+    drift_threshold_pct = max(0.0, float(pending_price_drift_cancel_pct or 0.0))
+    pending_delay_bars = max(1, int(sim_pending_duration_bars or 1))
 
     portfolio_curve: list[tuple[Any, float]] = []
 
-    def _try_buy(sym: str, price: float, date, reason: str, bucket: str, active_strat: str):
+    def _price_within_pending_range(current_price: float, pending_price: float) -> bool:
+        if current_price <= 0 or pending_price <= 0:
+            return False
+        drift_pct = abs(current_price - pending_price) / pending_price * 100.0
+        return drift_pct <= drift_threshold_pct
+
+    def _try_buy(sym: str, price: float, date, reason: str, bucket: str, active_strat: str, ts_idx: int):
         nonlocal pool
         st = state[sym]
-        if st["shares"] > 0 or price <= 0:
+        if st["shares"] > 0 or st["pending_order"] is not None or price <= 0:
             return
         committed = float(st["shares"]) * float(st["avg_cost"]) + float(st["allocated_funds"])
         cap_room = max(0.0, st["max_alloc"] - committed) if st["max_alloc"] != float("inf") else float("inf")
@@ -1110,15 +1126,79 @@ def run_sandbox_portfolio_backtest(
             extra = cost - st["allocated_funds"]
             st["allocated_funds"] = 0.0
             pool -= extra
-        st["shares"] = float(qty)
-        st["avg_cost"] = price
-        st["entry_price"] = price
-        st["entry_date"] = _fmt_ts(date)
-        st["entry_strategy"] = active_strat
-        st["entry_bucket"] = bucket
-        st["cost_basis_total"] += qty * price
-        if qty > st["max_shares"]:
-            st["max_shares"] = float(qty)
+        st["pending_order"] = {
+            "side": "BUY",
+            "quantity": float(qty),
+            "requested_price": float(price),
+            "placed_index": int(ts_idx),
+            "reason": reason,
+            "entry_strategy": active_strat,
+            "entry_bucket": bucket,
+            "entry_date": _fmt_ts(date),
+        }
+
+    def _try_queue_sell(sym: str, price: float, ts_idx: int, reason: str):
+        st = state[sym]
+        if st["shares"] <= 0 or st["pending_order"] is not None or price <= 0:
+            return
+        st["pending_order"] = {
+            "side": "SELL",
+            "quantity": float(st["shares"]),
+            "requested_price": float(price),
+            "placed_index": int(ts_idx),
+            "reason": reason,
+        }
+
+    def _try_fill_pending(sym: str, price: float, ts, ts_idx: int) -> bool:
+        st = state[sym]
+        order = st.get("pending_order")
+        if not order:
+            return False
+
+        if (int(ts_idx) - int(order.get("placed_index", ts_idx))) < pending_delay_bars:
+            return True
+
+        requested_price = float(order.get("requested_price") or 0.0)
+        if not _price_within_pending_range(price, requested_price):
+            return True
+
+        side = str(order.get("side") or "").upper()
+        if side == "BUY":
+            if random.random() > buy_fill_prob:
+                return True
+            qty = float(order.get("quantity") or 0.0)
+            if qty <= 0:
+                st["pending_order"] = None
+                return False
+            st["shares"] = qty
+            st["avg_cost"] = requested_price
+            st["entry_price"] = requested_price
+            st["entry_date"] = str(order.get("entry_date") or _fmt_ts(ts))
+            st["entry_strategy"] = order.get("entry_strategy")
+            st["entry_bucket"] = order.get("entry_bucket")
+            st["cost_basis_total"] += qty * requested_price
+            if qty > st["max_shares"]:
+                st["max_shares"] = qty
+            st["pending_order"] = None
+            return True
+
+        if side == "SELL":
+            if random.random() > sell_fill_prob:
+                return True
+            exit_reason = str(order.get("reason") or "strategy_exit")
+            st["pending_order"] = None
+            _close_position(
+                sym,
+                price,
+                ts,
+                f"{exit_reason} | pending_fill",
+                st.get("entry_bucket") or "neutral",
+                st.get("entry_strategy") or "sma_crossover",
+            )
+            return True
+
+        st["pending_order"] = None
+        return False
 
     def _close_position(sym: str, price: float, date, exit_reason: str, bucket: str, active_strat: str):
         nonlocal pool
@@ -1157,7 +1237,7 @@ def run_sandbox_portfolio_backtest(
             st["allocated_funds"] = st["min_alloc"]
             pool += excess
 
-    for ts in union_index:
+    for ts_idx, ts in enumerate(union_index):
         for sym, st in state.items():
             p = by_sym[sym]
             if ts not in p["df"].index:
@@ -1165,6 +1245,11 @@ def run_sandbox_portfolio_backtest(
             row = p["df"].loc[ts]
             price = float(row["Close"])
             st["last_price"] = price
+
+            # Pending orders reroll once each bar when still in acceptance range.
+            if _try_fill_pending(sym, price, ts, ts_idx):
+                continue
+
             session = str(row.get("session", "regular")) if day_trade else "regular"
             is_regular = session == "regular"
             bucket = str(p["buckets"].loc[ts]) if ts in p["buckets"].index else "neutral"
@@ -1173,19 +1258,19 @@ def run_sandbox_portfolio_backtest(
             # 1. End-of-day liquidation / last-bar close.
             if day_trade:
                 if not hold_positions_overnight and ts in p["eod_sell_bars"] and st["shares"] > 0:
-                    _close_position(sym, price, ts, "eod_liquidation", bucket, active_strat)
+                    _try_queue_sell(sym, price, ts_idx, "eod_liquidation")
                     continue
                 if hold_positions_overnight and ts in p["last_regular_bar"] and st["shares"] > 0:
-                    _close_position(sym, price, ts, "eod_close", bucket, active_strat)
+                    _try_queue_sell(sym, price, ts_idx, "eod_close")
                     continue
 
             # 2. Stop-loss / take-profit (regular session only when day-trading).
             if st["shares"] > 0 and st["entry_price"] is not None and (is_regular or not day_trade):
                 if sl_mult is not None and price <= st["entry_price"] * sl_mult:
-                    _close_position(sym, price, ts, "stop_loss", bucket, active_strat)
+                    _try_queue_sell(sym, price, ts_idx, "stop_loss")
                     continue
                 if tp_mult is not None and price >= st["entry_price"] * tp_mult:
-                    _close_position(sym, price, ts, "take_profit", bucket, active_strat)
+                    _try_queue_sell(sym, price, ts_idx, "take_profit")
                     continue
 
             # 3. Strategy switch close (sentiment routing only).
@@ -1205,7 +1290,7 @@ def run_sandbox_portfolio_backtest(
                         else 0.0
                     )
                     if new_pos_change < 0:
-                        _close_position(sym, price, ts, "strategy_switch", bucket, active_strat)
+                        _try_queue_sell(sym, price, ts_idx, "strategy_switch")
                     else:
                         st["entry_strategy"] = active_strat
                         st["entry_bucket"] = bucket
@@ -1215,9 +1300,9 @@ def run_sandbox_portfolio_backtest(
             sig_series = p["signals_by_strat"].get(active_strat)
             position_change = float(sig_series.loc[ts]) if (sig_series is not None and ts in sig_series.index) else 0.0
             if position_change > 0 and st["shares"] == 0 and (is_regular or not day_trade):
-                _try_buy(sym, price, ts, str(row.get("signal_source", "")) or "signal", bucket, active_strat)
+                _try_buy(sym, price, ts, str(row.get("signal_source", "")) or "signal", bucket, active_strat, ts_idx)
             elif position_change < 0 and st["shares"] > 0 and (is_regular or not day_trade):
-                _close_position(sym, price, ts, str(row.get("signal_source", "")) or "strategy_exit", bucket, active_strat)
+                _try_queue_sell(sym, price, ts_idx, str(row.get("signal_source", "")) or "strategy_exit")
 
         # Snapshot portfolio + per-symbol values at this bar.
         port_val = pool

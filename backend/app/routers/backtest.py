@@ -464,6 +464,18 @@ class SandboxBacktestRequest(BaseModel):
             "0 disables the cap (uncapped). Only used when use_shared_pool=True."
         ),
     )
+    sim_buy_fill_rate_pct: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Optional override for simulated BUY pending fill probability (%).",
+    )
+    sim_sell_fill_rate_pct: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Optional override for simulated SELL pending fill probability (%).",
+    )
 
 
 def _build_sandbox_activity_log(per_symbol: list[dict]) -> list[dict]:
@@ -564,6 +576,25 @@ async def run_sandbox_backtest_endpoint(
     hold_overnight = bool(pm.get("hold_positions_overnight", True))
     eod_window = int(pm.get("eod_sell_window_minutes") or 30)
     sentiment_warmup = int(pm.get("sentiment_data_points") or 35)
+    sim_buy_fill_rate = float(pm.get("sim_buy_fill_rate_pct", 100.0) or 0.0)
+    sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 100.0) or 0.0)
+    pending_drift_cancel = float(pm.get("pending_price_drift_cancel_pct", 0.75) or 0.0)
+    if req.sim_buy_fill_rate_pct is not None:
+        sim_buy_fill_rate = float(req.sim_buy_fill_rate_pct)
+    if req.sim_sell_fill_rate_pct is not None:
+        sim_sell_fill_rate = float(req.sim_sell_fill_rate_pct)
+
+    pm_settings_snapshot = _build_pm_settings_snapshot({
+        "stop_loss_pct": stop_loss_pct,
+        "take_profit_pct": take_profit_pct,
+        "hold_positions_overnight": hold_overnight,
+        "eod_sell_window_minutes": eod_window,
+        "sentiment_strategies": sentiment_strategies,
+        "sentiment_warmup": sentiment_warmup,
+        "sim_buy_fill_rate_pct": sim_buy_fill_rate,
+        "sim_sell_fill_rate_pct": sim_sell_fill_rate,
+        "pending_price_drift_cancel_pct": pending_drift_cancel,
+    })
 
     # Capital split.
     if req.allocation_mode == "proportional":
@@ -696,6 +727,10 @@ async def run_sandbox_backtest_endpoint(
                 take_profit_pct=take_profit_pct,
                 hold_positions_overnight=hold_overnight,
                 eod_sell_window_minutes=eod_window,
+                sim_buy_fill_rate_pct=sim_buy_fill_rate,
+                sim_sell_fill_rate_pct=sim_sell_fill_rate,
+                pending_price_drift_cancel_pct=pending_drift_cancel,
+                sim_pending_duration_bars=1,
             )
         except Exception as exc:
             logger.exception("Sandbox shared-pool backtest failed")
@@ -1061,15 +1096,6 @@ async def run_sandbox_backtest_endpoint(
         "symbols_run": sum(1 for r in per_results if not r.get("error") and not r.get("skipped")),
         "symbols_failed": sum(1 for r in per_results if r.get("error")),
     }
-
-    pm_settings_snapshot = _build_pm_settings_snapshot({
-        "stop_loss_pct": stop_loss_pct,
-        "take_profit_pct": take_profit_pct,
-        "hold_positions_overnight": hold_overnight,
-        "eod_sell_window_minutes": eod_window,
-        "sentiment_strategies": sentiment_strategies,
-        "sentiment_warmup": sentiment_warmup,
-    })
 
     # Persist a summary report.
     name = (

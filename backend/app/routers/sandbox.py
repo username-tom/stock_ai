@@ -56,6 +56,12 @@ def _position_dict(p: SandboxPosition, market_price: float | None = None) -> dic
         "pending_shares": p.pending_shares,
         "pending_avg_cost": p.pending_avg_cost,
         "pending_since": p.pending_since.isoformat() if p.pending_since else None,
+        "pending_reroll_active": False,
+        "pending_reroll_side": None,
+        "pending_reroll_attempts": 0,
+        "pending_reroll_in_range": None,
+        "pending_reroll_last_result": None,
+        "pending_reroll_last_at": None,
         "max_allocation_mode": p.max_allocation_mode,
         "max_allocation_value": p.max_allocation_value,
     }
@@ -559,6 +565,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_long_sl_pct: Optional[float] = None
     ai_tag_no_loss_sell: Optional[bool] = None
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    sim_buy_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 
 
 @router.get("/manager/state")

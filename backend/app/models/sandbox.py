@@ -136,6 +136,8 @@ class PortfolioManagerSettings(Base):
     ai_tag_long_sl_pct = Column(Float, default=0.0, nullable=False)
     ai_tag_no_loss_sell = Column(Boolean, default=True, nullable=False)
     pending_price_drift_cancel_pct = Column(Float, default=0.75, nullable=False)
+    sim_buy_fill_rate_pct = Column(Float, default=100.0, nullable=False)
+    sim_sell_fill_rate_pct = Column(Float, default=100.0, nullable=False)
     auto_trade_buy_price_offset_pct = Column(Float, default=0.1, nullable=False)
     auto_trade_sell_price_offset_pct = Column(Float, default=0.1, nullable=False)
     # 5×5 sentiment × AI-tag matrix (JSON)

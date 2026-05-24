@@ -251,6 +251,54 @@ _last_tick: datetime | None = None
 _symbol_status: dict[str, dict] = {}   # { symbol: { last_signal, last_run_at, error } }
 _signal_handoff_state: dict[str, dict[str, Any]] = {}  # {symbol: {strategy, switched_at_idx}}
 _buy_lock: asyncio.Lock | None = None  # serialises concurrent BUY fund allocation
+_pending_sell_orders: dict[int, dict[str, Any]] = {}
+
+
+def _mark_pending_reroll_state(
+    symbol: str,
+    *,
+    side: str | None = None,
+    active: bool | None = None,
+    in_range: bool | None = None,
+    result: str | None = None,
+    increment_attempt: bool = False,
+    reset_attempts: bool = False,
+) -> None:
+    if not symbol:
+        return
+
+    status = dict(_symbol_status.get(symbol) or {})
+    attempts = int(status.get("pending_reroll_attempts") or 0)
+
+    if reset_attempts:
+        attempts = 0
+    if increment_attempt:
+        attempts += 1
+
+    status["pending_reroll_attempts"] = attempts
+    if side is not None:
+        status["pending_reroll_side"] = side
+    if active is not None:
+        status["pending_reroll_active"] = bool(active)
+    if in_range is not None:
+        status["pending_reroll_in_range"] = bool(in_range)
+    if result is not None:
+        status["pending_reroll_last_result"] = str(result)
+    status["pending_reroll_last_at"] = datetime.now(timezone.utc).isoformat()
+
+    _symbol_status[symbol] = status
+
+
+def get_symbol_runtime_status(symbol: str) -> dict[str, Any]:
+    status = dict(_symbol_status.get(symbol) or {})
+    return {
+        "pending_reroll_active": bool(status.get("pending_reroll_active", False)),
+        "pending_reroll_side": status.get("pending_reroll_side"),
+        "pending_reroll_attempts": int(status.get("pending_reroll_attempts") or 0),
+        "pending_reroll_in_range": status.get("pending_reroll_in_range"),
+        "pending_reroll_last_result": status.get("pending_reroll_last_result"),
+        "pending_reroll_last_at": status.get("pending_reroll_last_at"),
+    }
 
 
 def _get_buy_lock() -> asyncio.Lock:
@@ -259,6 +307,33 @@ def _get_buy_lock() -> asyncio.Lock:
     if _buy_lock is None:
         _buy_lock = asyncio.Lock()
     return _buy_lock
+
+
+def _queue_pending_sell(
+    position_id: int,
+    *,
+    symbol: str,
+    quantity: float,
+    requested_price: float,
+    reason: str,
+    disable_engine_after_sell: bool,
+) -> None:
+    _pending_sell_orders[position_id] = {
+        "symbol": symbol,
+        "quantity": float(quantity),
+        "requested_price": float(requested_price),
+        "reason": reason,
+        "disable_engine_after_sell": bool(disable_engine_after_sell),
+        "created_at": datetime.now(timezone.utc),
+    }
+
+
+def _pop_pending_sell(position_id: int) -> dict[str, Any] | None:
+    return _pending_sell_orders.pop(position_id, None)
+
+
+def _has_pending_sell(position_id: int) -> bool:
+    return position_id in _pending_sell_orders
 
 
 def _position_committed_funds(pos: SandboxPosition) -> float:
@@ -364,10 +439,17 @@ async def _process_symbol(
 
     symbol = pos.symbol
     strategy_name = pos.strategy_name or ""
+    prev_status = _symbol_status.get(symbol) or {}
     status: dict[str, Any] = {
         "last_run_at": datetime.now(timezone.utc).isoformat(),
         "last_signal": None,
         "error": None,
+        "pending_reroll_active": bool(prev_status.get("pending_reroll_active", False)),
+        "pending_reroll_side": prev_status.get("pending_reroll_side"),
+        "pending_reroll_attempts": int(prev_status.get("pending_reroll_attempts") or 0),
+        "pending_reroll_in_range": prev_status.get("pending_reroll_in_range"),
+        "pending_reroll_last_result": prev_status.get("pending_reroll_last_result"),
+        "pending_reroll_last_at": prev_status.get("pending_reroll_last_at"),
     }
 
     try:
@@ -485,6 +567,7 @@ async def _process_symbol(
         action = None
         reason = None
         disable_engine_after_sell = False
+        has_pending_sell = _has_pending_sell(pos.id)
 
         strat_label = strategy_name.split(':')[0]
 
@@ -534,7 +617,7 @@ async def _process_symbol(
             eod_sell_window_minutes=eod_window_mins,
             eod_engine_shutoff_minutes_before_sell=pre_sell_shutoff_mins,
         )
-        if action is None and trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0:
+        if action is None and trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0 and not has_pending_sell:
             # During pre-sell shutdown and final sell windows, suppress new entries.
             if in_pre_sell_shutoff_window or in_final_sell_window:
                 logger.debug(
@@ -545,7 +628,7 @@ async def _process_symbol(
                 action = "BUY"
                 reason = signal_source if signal_source else f"{strat_label} buy @ ${current_price:.2f}"
 
-        elif action is None and trade_signal < 0 and pos.shares > 0:
+        elif action is None and trade_signal < 0 and pos.shares > 0 and not has_pending_sell:
             action = "SELL"
             reason = signal_source if signal_source else f"{strat_label} sell @ ${current_price:.2f}"
 
@@ -577,6 +660,18 @@ async def _process_symbol(
         logger.warning("Engine error for %s: %s", symbol, exc)
         status["error"] = str(exc)
         await _update_position_status(pos.id, None, str(exc), datetime.now(timezone.utc))
+
+    latest_pending = _symbol_status.get(symbol) or {}
+    for key in (
+        "pending_reroll_active",
+        "pending_reroll_side",
+        "pending_reroll_attempts",
+        "pending_reroll_in_range",
+        "pending_reroll_last_result",
+        "pending_reroll_last_at",
+    ):
+        if key in latest_pending:
+            status[key] = latest_pending.get(key)
 
     _symbol_status[symbol] = status
 
@@ -691,8 +786,8 @@ async def _execute_trade(
                         note="Engine: draw from unallocated pool for BUY",
                     ))
                 # Place shares into the pending (open order) state.
-                # A background settler will convert them to real shares after
-                # a random 5–10 second delay, simulating order fill latency.
+                # A background settler will evaluate fills after an
+                # IB-aligned pending delay and reroll per bar.
                 new_pending = position.pending_shares + quantity
                 position.pending_avg_cost = (
                     (position.pending_avg_cost * position.pending_shares + total) / new_pending
@@ -700,6 +795,13 @@ async def _execute_trade(
                 position.pending_shares = new_pending
                 position.pending_since = datetime.now(timezone.utc)
                 position.allocated_funds -= total
+                _mark_pending_reroll_state(
+                    position.symbol,
+                    side="BUY",
+                    active=True,
+                    result="queued",
+                    reset_attempts=True,
+                )
                 trade = SandboxTrade(
                     symbol=position.symbol,
                     side="BUY",
@@ -739,21 +841,30 @@ async def _execute_trade(
             quantity = position.shares
             if quantity <= 0:
                 return
-            total = quantity * price
-            pnl = round((price - position.avg_cost) * quantity, 4)
-            position.shares = 0.0
-            position.allocated_funds += total
-            position.realized_pnl += pnl
-            position.avg_cost = 0.0
-            # Realized P/L adjusts total_funds: gains add to cash, losses reduce it.
-            acct_res2 = await db.execute(sa_select(SandboxAccount).limit(1))
-            acct2 = acct_res2.scalar_one_or_none()
-            if acct2:
-                acct2.total_funds += pnl
-            if disable_engine_after_sell:
-                position.strategy_enabled = False
-                position.engine_error = None
-                logger.info("Engine auto-disabled for %s after EOD liquidation SELL", position.symbol)
+            _queue_pending_sell(
+                position.id,
+                symbol=position.symbol,
+                quantity=quantity,
+                requested_price=price,
+                reason=reason,
+                disable_engine_after_sell=disable_engine_after_sell,
+            )
+            _mark_pending_reroll_state(
+                position.symbol,
+                side="SELL",
+                active=True,
+                result="queued",
+                reset_attempts=True,
+            )
+            await db.commit()
+            logger.info(
+                "Engine queued pending SELL %s x%.4f @ $%.2f (%s)",
+                position.symbol,
+                quantity,
+                price,
+                reason,
+            )
+            return
         else:
             return
 
@@ -796,24 +907,63 @@ async def _execute_trade(
 
 # ── pending-order settlement ─────────────────────────────────────────────── #
 
-PENDING_SETTLE_MIN_S = 5   # minimum seconds before a pending order settles
-PENDING_SETTLE_MAX_S = 10  # maximum seconds before a pending order settles
+PENDING_SETTLE_SECONDS = 3  # align simulated pending delay with IB order-status observation window
 
 
 async def _settle_pending_shares() -> None:
-    """Convert any pending (open-order) shares to settled shares when their
-    random settlement delay has elapsed (5–10 seconds after the BUY order)."""
+    """Settle pending simulated orders with per-bar rerolls.
+
+    BUY and SELL pending orders are only eligible to fill when market price is
+    still within the configured drift range from the pending reference price.
+    On each eligible bar, a random roll is applied against side-specific fill
+    rate multipliers (0-100%). Unfilled orders remain pending for the next bar.
+    """
     now = datetime.now(timezone.utc)
 
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
+        from app.models.sandbox import SandboxAccount
+        from app.services.market_service import get_bulk_quotes
+        from app.services.portfolio_manager import get_manager_settings
+
+        manager_settings = get_manager_settings()
+        buy_fill_rate = max(0.0, min(100.0, float(manager_settings.get("sim_buy_fill_rate_pct", 100.0) or 0.0)))
+        sell_fill_rate = max(0.0, min(100.0, float(manager_settings.get("sim_sell_fill_rate_pct", 100.0) or 0.0)))
+        drift_threshold_pct = max(0.0, float(manager_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
+
+        def _is_within_range(current_price: float, pending_price: float) -> bool:
+            if pending_price <= 0 or current_price <= 0:
+                return False
+            drift_pct = abs(current_price - pending_price) / pending_price * 100.0
+            return drift_pct <= drift_threshold_pct
 
         result = await db.execute(
             sa_select(SandboxPosition).where(SandboxPosition.pending_shares > 0)
         )
-        positions = result.scalars().all()
+        buy_positions: list[SandboxPosition] = result.scalars().all()
+        sell_orders = dict(_pending_sell_orders)
 
-        for position in positions:
+        symbols = {p.symbol for p in buy_positions}
+        symbols.update(str(v.get("symbol") or "") for v in sell_orders.values())
+        symbols = {s for s in symbols if s}
+
+        price_map: dict[str, float] = {}
+        if symbols:
+            try:
+                quotes = await get_bulk_quotes(sorted(symbols))
+                price_map = {
+                    sym: float(q.get("last_price") or 0.0)
+                    for sym, q in quotes.items()
+                    if q is not None
+                }
+            except Exception as exc:
+                logger.warning("Engine pending settlement quote fetch failed: %s", exc)
+
+        changed = False
+        acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+        account = acct_res.scalar_one_or_none()
+
+        for position in buy_positions:
             if position.pending_since is None:
                 continue
 
@@ -822,13 +972,42 @@ async def _settle_pending_shares() -> None:
             if ps.tzinfo is None:
                 ps = ps.replace(tzinfo=timezone.utc)
 
-            # Each position gets its own deterministic-but-random delay derived
-            # from its id so that different symbols settle at different times.
-            rng = random.Random(position.id ^ int(ps.timestamp()))
-            delay_s = rng.randint(PENDING_SETTLE_MIN_S, PENDING_SETTLE_MAX_S)
-
-            if (now - ps) < timedelta(seconds=delay_s):
+            if (now - ps) < timedelta(seconds=PENDING_SETTLE_SECONDS):
+                _mark_pending_reroll_state(
+                    position.symbol,
+                    side="BUY",
+                    active=True,
+                    result="waiting_delay",
+                )
                 continue  # not yet time to settle
+
+            current_price = float(price_map.get(position.symbol, 0.0) or 0.0)
+            pending_price = float(position.pending_avg_cost or 0.0)
+            if not _is_within_range(current_price, pending_price):
+                _mark_pending_reroll_state(
+                    position.symbol,
+                    side="BUY",
+                    active=True,
+                    in_range=False,
+                    result="out_of_range",
+                )
+                continue
+
+            if random.random() > (buy_fill_rate / 100.0):
+                _mark_pending_reroll_state(
+                    position.symbol,
+                    side="BUY",
+                    active=True,
+                    in_range=True,
+                    result="miss",
+                    increment_attempt=True,
+                )
+                logger.debug(
+                    "Engine pending BUY reroll miss %s (rate=%.2f%%)",
+                    position.symbol,
+                    buy_fill_rate,
+                )
+                continue
 
             # Settle: merge pending into real shares
             pending_qty = position.pending_shares
@@ -847,13 +1026,145 @@ async def _settle_pending_shares() -> None:
             position.pending_shares = 0.0
             position.pending_avg_cost = 0.0
             position.pending_since = None
+            _mark_pending_reroll_state(
+                position.symbol,
+                side="BUY",
+                active=False,
+                in_range=True,
+                result="filled",
+                increment_attempt=True,
+            )
+            changed = True
 
             logger.info(
                 "Engine settled pending BUY %s x%.4f @ avg $%.2f -> shares=%.4f",
                 position.symbol, pending_qty, pending_cost, position.shares,
             )
 
-        await db.commit()
+        for position_id, order in sell_orders.items():
+            created_at = order.get("created_at")
+            symbol = str(order.get("symbol") or "")
+            if not isinstance(created_at, datetime):
+                _pop_pending_sell(position_id)
+                continue
+            created_at_utc = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+            if (now - created_at_utc) < timedelta(seconds=PENDING_SETTLE_SECONDS):
+                _mark_pending_reroll_state(
+                    symbol,
+                    side="SELL",
+                    active=True,
+                    result="waiting_delay",
+                )
+                continue
+
+            current_price = float(price_map.get(symbol, 0.0) or 0.0)
+            pending_price = float(order.get("requested_price") or 0.0)
+            if not _is_within_range(current_price, pending_price):
+                _mark_pending_reroll_state(
+                    symbol,
+                    side="SELL",
+                    active=True,
+                    in_range=False,
+                    result="out_of_range",
+                )
+                continue
+
+            if random.random() > (sell_fill_rate / 100.0):
+                _mark_pending_reroll_state(
+                    symbol,
+                    side="SELL",
+                    active=True,
+                    in_range=True,
+                    result="miss",
+                    increment_attempt=True,
+                )
+                logger.debug(
+                    "Engine pending SELL reroll miss %s (rate=%.2f%%)",
+                    symbol,
+                    sell_fill_rate,
+                )
+                continue
+
+            pos_res = await db.execute(
+                sa_select(SandboxPosition).where(SandboxPosition.id == position_id)
+            )
+            position = pos_res.scalar_one_or_none()
+            if not position:
+                _pop_pending_sell(position_id)
+                continue
+
+            quantity = min(float(order.get("quantity") or 0.0), float(position.shares or 0.0))
+            if quantity <= 0:
+                _pop_pending_sell(position_id)
+                continue
+
+            total = quantity * current_price
+            pnl = round((current_price - float(position.avg_cost or 0.0)) * quantity, 4)
+            position.shares = max(0.0, float(position.shares or 0.0) - quantity)
+            if position.shares <= 0:
+                position.shares = 0.0
+                position.avg_cost = 0.0
+            position.allocated_funds += total
+            position.realized_pnl += pnl
+            if account:
+                account.total_funds += pnl
+
+            if bool(order.get("disable_engine_after_sell", False)) and position.shares <= 0:
+                position.strategy_enabled = False
+                position.engine_error = None
+
+            trade = SandboxTrade(
+                symbol=position.symbol,
+                side="SELL",
+                quantity=quantity,
+                price=current_price,
+                total=round(total, 4),
+                strategy_name=position.strategy_name,
+                reason=f"{order.get('reason') or 'pending_sell'} | pending_fill",
+                pnl=pnl,
+            )
+            db.add(trade)
+            _pop_pending_sell(position_id)
+            _mark_pending_reroll_state(
+                position.symbol,
+                side="SELL",
+                active=False,
+                in_range=True,
+                result="filled",
+                increment_attempt=True,
+            )
+            changed = True
+
+            _log_trade_activity(
+                position.symbol,
+                "SELL",
+                quantity,
+                current_price,
+                str(order.get("reason") or "pending_sell"),
+            )
+            logger.info(
+                "Engine settled pending SELL %s x%.4f @ $%.2f",
+                position.symbol,
+                quantity,
+                current_price,
+            )
+
+        active_pending_symbols = {
+            p.symbol
+            for p in buy_positions
+            if float(p.pending_shares or 0.0) > 0.0
+        }
+        active_pending_symbols.update(
+            str(v.get("symbol") or "")
+            for v in _pending_sell_orders.values()
+            if str(v.get("symbol") or "")
+        )
+        for symbol, state in list(_symbol_status.items()):
+            if bool(state.get("pending_reroll_active")) and symbol not in active_pending_symbols:
+                _mark_pending_reroll_state(symbol, active=False, result="cleared")
+
+        if changed:
+            await db.commit()
 
 
 # ── main loop ─────────────────────────────────────────────────────────────── #

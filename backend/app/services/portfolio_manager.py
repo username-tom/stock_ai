@@ -162,6 +162,8 @@ _settings: dict[str, Any] = {
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
     "pending_price_drift_cancel_pct": 0.75,  # cancel pending BUY when market drifts >= this % from pending fill/limit
+    "sim_buy_fill_rate_pct": 100.0,       # simulated BUY pending-fill probability (%), evaluated each bar when in price range
+    "sim_sell_fill_rate_pct": 100.0,      # simulated SELL pending-fill probability (%), evaluated each bar when in price range
     "auto_trade_buy_price_offset_pct": 0.1,   # BUY price = prev OHLC midpoint + this % (IB automated orders)
     "auto_trade_sell_price_offset_pct": 0.1,  # SELL price = prev OHLC midpoint - this % (IB automated orders)
     # 5×5 matrix: keys are PM sentiment bucket → AI tag → strategy name
@@ -327,6 +329,8 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_long_sl_pct"] = float(getattr(row, "ai_tag_long_sl_pct", 0.0) or 0.0)
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.75) or 0.75)
+            _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 100.0) or 0.0)))
+            _settings["sim_sell_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_sell_fill_rate_pct", 100.0) or 0.0)))
             _buy_offset = getattr(row, "auto_trade_buy_price_offset_pct", None)
             _sell_offset = getattr(row, "auto_trade_sell_price_offset_pct", None)
             _settings["auto_trade_buy_price_offset_pct"] = 0.1 if _buy_offset is None else float(_buy_offset)
@@ -426,6 +430,8 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_long_sl_pct = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.75)
+        row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 100.0) or 0.0)))
+        row.sim_sell_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_sell_fill_rate_pct", 100.0) or 0.0)))
         row.auto_trade_buy_price_offset_pct = float(_settings.get("auto_trade_buy_price_offset_pct", 0.1))
         row.auto_trade_sell_price_offset_pct = float(_settings.get("auto_trade_sell_price_offset_pct", 0.1))
         row.sentiment_matrix_strategies = json.dumps(_settings.get("sentiment_matrix_strategies", {}), sort_keys=True)
@@ -449,6 +455,7 @@ def update_manager_settings(new: dict) -> dict:
               "ai_tag_action_mode", "ai_external_sentiment_weight",
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
               "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
+              "sim_buy_fill_rate_pct", "sim_sell_fill_rate_pct",
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct",
               "sentiment_matrix_strategies", "sentiment_matrix_actions",
               "pm_hold_duration_days", "pm_hold_extended_multiplier", "pm_hold_trailing_pct"}
