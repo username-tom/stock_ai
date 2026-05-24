@@ -98,6 +98,10 @@ export default function PriceChartPanel({
   warmupData = null,
   quoteTelemetry = null,
   isInWatchlist = false,
+  ibConnected = false,
+  useFiveSec = false,
+  setUseFiveSec = () => {},
+  fiveSecAvailable = false,
 }) {
   const navigate = useNavigate()
   const chartAreaRef = useRef(null)
@@ -201,6 +205,26 @@ export default function PriceChartPanel({
             </button>
           ))}
         </div>
+        {ibConnected && chartType === 'candles' && chartPeriod === '1d' && (
+          <button
+            onClick={() => fiveSecAvailable && setUseFiveSec(!useFiveSec)}
+            disabled={!fiveSecAvailable}
+            title={
+              fiveSecAvailable
+                ? 'Stream 5-second IB bars (active only during the open warmup + first hour, 09:15–10:30 ET)'
+                : '5s bars are only available during the open warmup + first hour (09:15–10:30 ET)'
+            }
+            className={`px-2 py-1 text-xs rounded-md border transition-colors ${
+              !fiveSecAvailable
+                ? 'bg-dark-800 border-dark-700 text-slate-600 cursor-not-allowed'
+                : useFiveSec
+                  ? 'bg-sky-600 border-sky-500 text-white'
+                  : 'bg-dark-800 border-dark-500 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            5s bars
+          </button>
+        )}
       </div>
       <div className="flex flex-wrap gap-1 mb-3">
         {INDICATOR_OPTIONS.map(({ key, label }) => (

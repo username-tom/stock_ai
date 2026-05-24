@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from app.services import symbol_registry
+from app.services.data_manager import DataManager
 from app.services.ib_service import IB_AVAILABLE, ib_service
 from app.services.market_calendar import is_nyse_trading_day
 
@@ -71,62 +72,7 @@ _HISTORY_TTL_MAP: dict[str, float] = {
 
 _DISK_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "market_cache"
 _IB_HIST_DISK_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "ib_hist_cache"
-
-def _key_to_filename(key: str) -> Path:
-    """Convert a cache key like 'quote:AAPL' to a safe filename."""
-    safe = key.replace(":", "__").replace("/", "_")
-    return _DISK_CACHE_DIR / f"{safe}.json"
-
-
-class _TTLCache:
-    def __init__(self) -> None:
-        self._store: dict[str, tuple[Any, float]] = {}
-        self._lock = asyncio.Lock()
-
-    def load_from_disk(self) -> None:
-        """Load all persisted cache entries from disk into memory at startup."""
-        if not _DISK_CACHE_DIR.exists():
-            return
-        now_wall = time.time()
-        now_mono = time.monotonic()
-        for path in _DISK_CACHE_DIR.glob("*.json"):
-            try:
-                entry = json.loads(path.read_text(encoding="utf-8"))
-                key = entry["key"]
-                value = entry["value"]
-                saved_wall = entry["wall_ts"]
-                # Convert the wall-clock save time to an equivalent monotonic timestamp
-                age = now_wall - saved_wall          # seconds elapsed since save
-                mono_ts = now_mono - age             # equivalent monotonic point in the past
-                self._store[key] = (value, mono_ts)
-            except Exception:
-                pass  # corrupt file — ignore
-
-    async def get(self, key: str, ttl: float) -> Any | None:
-        async with self._lock:
-            entry = self._store.get(key)
-        if entry is None:
-            return None
-        value, ts = entry
-        return value if (time.monotonic() - ts) < ttl else None
-
-    async def set(self, key: str, value: Any) -> None:
-        async with self._lock:
-            self._store[key] = (value, time.monotonic())
-        # Persist to disk (non-blocking)
-        asyncio.get_event_loop().run_in_executor(None, self._write_disk, key, value)
-
-    def _write_disk(self, key: str, value: Any) -> None:
-        try:
-            _DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            path = _key_to_filename(key)
-            payload = {"key": key, "value": value, "wall_ts": time.time()}
-            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        except Exception as exc:
-            logger.debug("Disk cache write failed for %s: %s", key, exc)
-
-
-_cache = _TTLCache()
+_cache = DataManager(cache_dir=_DISK_CACHE_DIR)
 
 QUOTE_TTL = 60  # seconds
 IB_QUOTE_TTL = 5  # seconds
@@ -358,6 +304,23 @@ def _ib_data_pull_allowed_now() -> bool:
 
     t = now_et.time()
     return dt_time(4, 0) <= t < dt_time(20, 0)
+
+
+def _is_market_closed_day_now() -> bool:
+    now_et = datetime.now(tz=_ET)
+    return not is_nyse_trading_day(now_et.date())
+
+
+def _weekend_history_ttl(period: str) -> float:
+    base_ttl = _HISTORY_TTL_MAP.get(period, 900)
+    if not _is_market_closed_day_now():
+        return base_ttl
+
+    if period in {"1d", "2d"}:
+        return max(base_ttl, 7200.0)
+    if period in {"5d", "2w"}:
+        return max(base_ttl, 14400.0)
+    return max(base_ttl, 43200.0)
 
 
 def _parse_ib_bar_datetime(raw: Any) -> datetime | None:
@@ -756,6 +719,7 @@ def _ib_period_request(period: str, interval_override: str | None = None) -> tup
     duration, bar_size, use_rth = mapping.get(period, ("1 Y", "1 day", True))
     if interval_override:
         ib_bar_size_map = {
+            "5s": "5 secs",
             "1m": "1 min",
             "2m": "2 mins",
             "5m": "5 mins",
@@ -769,15 +733,24 @@ def _ib_period_request(period: str, interval_override: str | None = None) -> tup
         override = ib_bar_size_map.get(interval_override)
         if override:
             bar_size = override
-            intraday = interval_override in {"1m", "2m", "5m", "15m", "1h"}
+            intraday = interval_override in {"5s", "1m", "2m", "5m", "15m", "1h"}
             use_rth = not intraday if period not in ("1d", "2d") else False
+            # IB 5-sec bars are pacing-heavy and capped (max ~2000 bars per
+            # request). Cap duration to a single day to avoid pacing rejections
+            # regardless of the caller's nominal period.
+            if interval_override == "5s":
+                duration = "1 D"
     return duration, bar_size, use_rth
 
 
-def _format_dt_for_period(dt: datetime, intraday: bool, period: str) -> str:
+def _format_dt_for_period(dt: datetime, intraday: bool, period: str, bar_size: str | None = None) -> str:
     dt_et = dt.astimezone(_ET)
     if not intraday:
         return dt_et.strftime("%Y-%m-%d")
+    if bar_size and "sec" in bar_size:
+        # Second-precision bars (e.g. IB 5 secs) need HH:MM:SS so consecutive
+        # bars in the same minute do not collapse onto one X-axis label.
+        return dt_et.strftime("%m/%d %H:%M:%S")
     return dt_et.strftime("%m/%d %H:%M")
 
 
@@ -834,7 +807,7 @@ async def _get_ib_history(symbol: str, period: str, interval_override: str | Non
     if not bars:
         raise ValueError(f"No IB OHLCV data returned for {symbol}")
 
-    intraday = "min" in bar_size or "hour" in bar_size
+    intraday = "min" in bar_size or "hour" in bar_size or "sec" in bar_size
     records: list[dict[str, Any]] = []
     for bar in bars:
         dt = _parse_ib_bar_datetime(bar.get("date"))
@@ -842,7 +815,7 @@ async def _get_ib_history(symbol: str, period: str, interval_override: str | Non
             continue
         records.append(
             {
-                "date": _format_dt_for_period(dt, intraday, period),
+                "date": _format_dt_for_period(dt, intraday, period, bar_size),
                 "open": round(float(bar["open"]), 4),
                 "high": round(float(bar["high"]), 4),
                 "low": round(float(bar["low"]), 4),
@@ -894,43 +867,64 @@ async def get_quote(symbol: str, source_preference: str | None = None) -> dict:
     else:
         source = "ib" if _ib_data_pull_allowed_now() else "yf"
     ttl = IB_QUOTE_TTL if source == "ib" else QUOTE_TTL
+    if source == "yf" and _is_market_closed_day_now():
+        ttl = max(ttl, 300.0)
     cache_key = f"quote:{source}:{sym}"
-    cached = await _cache.get(cache_key, ttl)
-    if cached is not None:
-        if source == "ib" and isinstance(cached, dict) and "ib_telemetry" not in cached:
-            cached["ib_telemetry"] = _ib_hist_telemetry("5 secs", "TRADES", False)
-        return cached
 
-    if source == "ib":
-        result = await _get_ib_quote_deduped(sym)
-        await _cache.set(cache_key, result)
-        return result
+    async def _fetch_quote_payload() -> dict[str, Any]:
+        if source == "ib":
+            return await _get_ib_quote_deduped(sym)
 
-    chart = await _yf_chart(sym, range_="1d", interval="1m", include_pre_post=True)
-    meta = chart["meta"]
-    snapshot = _build_quote_snapshot(chart)
+        chart = await _yf_chart(sym, range_="1d", interval="1m", include_pre_post=True)
+        meta = chart["meta"]
+        snapshot = _build_quote_snapshot(chart)
 
-    reg_info     = symbol_registry.lookup(sym)
-    company_name = (
-        reg_info["name"] if reg_info
-        else meta.get("shortName") or meta.get("longName")
+        reg_info = symbol_registry.lookup(sym)
+        company_name = (
+            reg_info["name"] if reg_info
+            else meta.get("shortName") or meta.get("longName")
+        )
+
+        return {
+            "symbol": sym,
+            "company_name": company_name,
+            "last_price": snapshot["last_price"],
+            "previous_close": snapshot["previous_close"],
+            "open": snapshot["open"],
+            "day_high": snapshot["day_high"],
+            "day_low": snapshot["day_low"],
+            "volume": snapshot["volume"],
+            "market_cap": None,
+            "change": snapshot["change"],
+            "change_pct": snapshot["change_pct"],
+            "market_state": snapshot["market_state"],
+        }
+
+    result = await _cache.pull(cache_key, ttl, _fetch_quote_payload, wait_timeout=8.0)
+    if source == "ib" and isinstance(result, dict) and "ib_telemetry" not in result:
+        result["ib_telemetry"] = _ib_hist_telemetry("5 secs", "TRADES", False)
+    return result
+
+
+async def get_live_quote_5s(symbol: str, wait_timeout: float = 8.0) -> dict[str, Any]:
+    """Return a quote stream-friendly payload with a 5-second freshness target.
+
+    IB-connected mode uses a dedicated 5-second cache key path with key-scoped
+    locking so concurrent subscribers for the same symbol share one upstream pull.
+    """
+    sym = symbol.upper()
+    if not _ib_connected():
+        return await get_quote(sym, source_preference="yf")
+
+    cache_key = f"quote:ib:{sym}"
+    result = await _cache.pull(
+        cache_key,
+        IB_QUOTE_TTL,
+        lambda: _get_ib_quote_deduped(sym),
+        wait_timeout=wait_timeout,
     )
-
-    result: dict = {
-        "symbol":         sym,
-        "company_name":   company_name,
-        "last_price":     snapshot["last_price"],
-        "previous_close": snapshot["previous_close"],
-        "open":           snapshot["open"],
-        "day_high":       snapshot["day_high"],
-        "day_low":        snapshot["day_low"],
-        "volume":         snapshot["volume"],
-        "market_cap":     None,
-        "change":         snapshot["change"],
-        "change_pct":     snapshot["change_pct"],
-        "market_state":   snapshot["market_state"],
-    }
-    await _cache.set(cache_key, result)
+    if "ib_telemetry" not in result:
+        result["ib_telemetry"] = _ib_hist_telemetry("5 secs", "TRADES", False)
     return result
 
 
@@ -963,14 +957,19 @@ def _normalize_interval_override(interval: str | None) -> str | None:
     if not interval:
         return None
     normalized = interval.strip().lower()
-    allowed = {"1m", "2m", "5m", "15m", "1h", "1d", "1wk", "1mo", "3mo"}
+    allowed = {"5s", "1m", "2m", "5m", "15m", "1h", "1d", "1wk", "1mo", "3mo"}
     return normalized if normalized in allowed else None
 
 
 async def _fetch_yf_history(sym: str, period: str, interval_override: str | None = None) -> dict:
     """Fetch OHLCV history from Yahoo Finance and return the formatted result dict."""
     yf_range = _PERIOD_RANGE_MAP.get(period, "1y")
-    yf_interval = _normalize_interval_override(interval_override) or _PERIOD_INTERVAL_MAP.get(period, "1d")
+    # Yahoo does not support sub-minute intervals; degrade "5s" to "1m" so the
+    # chart still renders something when IB (the only 5s source) is unavailable.
+    requested = _normalize_interval_override(interval_override)
+    if requested == "5s":
+        requested = "1m"
+    yf_interval = requested or _PERIOD_INTERVAL_MAP.get(period, "1d")
     intraday_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
     intraday = yf_interval in intraday_intervals
 
@@ -1147,11 +1146,13 @@ async def get_history(symbol: str, period: str = "1y", interval_override: str | 
         # providing price verification for historical bars while YF covers
         # the most recent candles that IB hasn't emitted yet.
         yf_cache_key = f"history:yf:{sym}:{period}:{interval_key}"
-        ttl = _HISTORY_TTL_MAP.get(period, 900)
-        yf_data = await _cache.get(yf_cache_key, ttl)
-        if yf_data is None:
-            yf_data = await _fetch_yf_history(sym, period, interval_override=resolved_interval)
-            await _cache.set(yf_cache_key, yf_data)
+        ttl = _weekend_history_ttl(period)
+        yf_data = await _cache.pull(
+            yf_cache_key,
+            ttl,
+            lambda: _fetch_yf_history(sym, period, interval_override=resolved_interval),
+            wait_timeout=12.0,
+        )
 
         # Check IB cache and fire a background refresh when stale.
         ib_cache_key = f"history:ib:{sym}:{period}:{interval_key}"
@@ -1187,14 +1188,13 @@ async def get_history(symbol: str, period: str = "1y", interval_override: str | 
 
     # ---- Pure YF mode ----
     cache_key = f"history:yf:{sym}:{period}:{interval_key}"
-    ttl = _HISTORY_TTL_MAP.get(period, 900)
-    cached = await _cache.get(cache_key, ttl)
-    if cached is not None:
-        return cached
-
-    result = await _fetch_yf_history(sym, period, interval_override=resolved_interval)
-    await _cache.set(cache_key, result)
-    return result
+    ttl = _weekend_history_ttl(period)
+    return await _cache.pull(
+        cache_key,
+        ttl,
+        lambda: _fetch_yf_history(sym, period, interval_override=resolved_interval),
+        wait_timeout=12.0,
+    )
 
 
 # Liquid large-cap universe used for the movers screen
@@ -1655,76 +1655,75 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
         if source == "ib"
         else INTRADAY_DF_TTL
     )
-    cached = await _cache.get(cache_key, ttl)
-    if cached is not None:
-        df = pd.DataFrame(cached)
-        df.index = pd.RangeIndex(len(df))
-        return df
+    if source == "yf" and _is_market_closed_day_now() and cache_ttl_override is None:
+        ttl = max(ttl, 1800.0)
 
-    if source == "ib":
-        duration_map = {
-            "1d": "2 D",
-            "2d": "3 D",
-            "5d": "7 D",
-            "2w": "20 D",
-            "1mo": "2 M",
-            "3mo": "4 M",
-        }
-        bars = await _ib_historical_request(
-            symbol=sym,
-            end_datetime="",
-            duration=duration_map.get(range_, "7 D"),
-            bar_size=ib_bar_size,
-            what_to_show="TRADES",
-            use_rth=not include_pre_post,
-        )
-        rows: list[dict[str, Any]] = []
-        for bar in bars:
-            rows.append(
-                {
-                    "Open": float(bar["open"]),
-                    "High": float(bar["high"]),
-                    "Low": float(bar["low"]),
-                    "Close": float(bar["close"]),
-                    "Volume": int(bar["volume"]) if bar.get("volume") is not None else 0,
-                }
+    async def _fetch_rows() -> list[dict[str, Any]]:
+        if source == "ib":
+            duration_map = {
+                "1d": "2 D",
+                "2d": "3 D",
+                "5d": "7 D",
+                "2w": "20 D",
+                "1mo": "2 M",
+                "3mo": "4 M",
+            }
+            ib_duration = duration_map.get(range_, "7 D")
+            # 5-sec bars: IB caps each request at ~2000 bars, so force the
+            # request down to a single day regardless of caller's range.
+            if ib_bar_size == "5 secs":
+                ib_duration = "1 D"
+            bars = await _ib_historical_request(
+                symbol=sym,
+                end_datetime="",
+                duration=ib_duration,
+                bar_size=ib_bar_size,
+                what_to_show="TRADES",
+                use_rth=not include_pre_post,
             )
+            rows: list[dict[str, Any]] = []
+            for bar in bars:
+                rows.append(
+                    {
+                        "Open": float(bar["open"]),
+                        "High": float(bar["high"]),
+                        "Low": float(bar["low"]),
+                        "Close": float(bar["close"]),
+                        "Volume": int(bar["volume"]) if bar.get("volume") is not None else 0,
+                    }
+                )
+            if not rows:
+                raise ValueError(f"No intraday data returned for {symbol}")
+            return rows
+
+        chart = await _yf_chart(sym, range_=range_, interval=resolved_interval, include_pre_post=include_pre_post)
+        timestamps = chart.get("timestamp", [])
+        quotes = chart.get("indicators", {}).get("quote", [{}])[0]
+
+        opens = quotes.get("open", [])
+        highs = quotes.get("high", [])
+        lows = quotes.get("low", [])
+        closes = quotes.get("close", [])
+        volumes = quotes.get("volume", [])
+
+        rows = []
+        for i, ts in enumerate(timestamps):  # noqa: F841 – ts unused but kept for alignment
+            c = closes[i] if i < len(closes) else None
+            if c is None:
+                continue
+            rows.append({
+                "Open": float(opens[i]) if i < len(opens) and opens[i] is not None else float(c),
+                "High": float(highs[i]) if i < len(highs) and highs[i] is not None else float(c),
+                "Low": float(lows[i]) if i < len(lows) and lows[i] is not None else float(c),
+                "Close": float(c),
+                "Volume": int(volumes[i]) if i < len(volumes) and volumes[i] is not None else 0,
+            })
+
         if not rows:
             raise ValueError(f"No intraday data returned for {symbol}")
+        return rows
 
-        await _cache.set(cache_key, rows)
-        df = pd.DataFrame(rows)
-        df.index = pd.RangeIndex(len(df))
-        return df
-
-    chart = await _yf_chart(sym, range_=range_, interval=resolved_interval,
-                            include_pre_post=include_pre_post)
-    timestamps = chart.get("timestamp", [])
-    quotes = chart.get("indicators", {}).get("quote", [{}])[0]
-
-    opens   = quotes.get("open",   [])
-    highs   = quotes.get("high",   [])
-    lows    = quotes.get("low",    [])
-    closes  = quotes.get("close",  [])
-    volumes = quotes.get("volume", [])
-
-    rows = []
-    for i, ts in enumerate(timestamps):  # noqa: F841 – ts unused but kept for alignment
-        c = closes[i] if i < len(closes) else None
-        if c is None:
-            continue
-        rows.append({
-            "Open":   float(opens[i])   if i < len(opens)   and opens[i]   is not None else float(c),
-            "High":   float(highs[i])   if i < len(highs)   and highs[i]   is not None else float(c),
-            "Low":    float(lows[i])    if i < len(lows)    and lows[i]    is not None else float(c),
-            "Close":  float(c),
-            "Volume": int(volumes[i])   if i < len(volumes) and volumes[i] is not None else 0,
-        })
-
-    if not rows:
-        raise ValueError(f"No intraday data returned for {symbol}")
-
-    await _cache.set(cache_key, rows)
+    rows = await _cache.pull(cache_key, ttl, _fetch_rows, wait_timeout=10.0)
     df = pd.DataFrame(rows)
     df.index = pd.RangeIndex(len(df))
     return df

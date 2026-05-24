@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useSearchParams, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { getBulkQuotes, getHistory } from '../api/client'
+import { getBulkQuotes, getHistory, getIBStatus } from '../api/client'
 import { useMarketOpen } from '../hooks/useMarketOpen'
+import { isOpeningFrenzyWindow } from '../utils/marketHours'
 import { useWatchlist } from '../hooks/useWatchlist'
 import { useAppSettings } from '../hooks/useAppSettings'
 import WatchlistPanel from './dashboard/WatchlistPanel'
@@ -242,6 +243,16 @@ export default function Dashboard() {
   const [chartSymbol, setChartSymbol] = useState(() => searchParams.get('symbol') || watchlist[0] || 'AAPL')
   const [chartPeriod, setChartPeriod] = useState('1d')
   const [chartType, setChartType] = useState(readStoredChartType)
+  // IB-only 5-second candles toggle. Only meaningful for the 1D candle view.
+  const [useFiveSec, setUseFiveSec] = useState(false)
+
+  const { data: ibStatus } = useQuery({
+    queryKey: ['ib-status'],
+    queryFn: getIBStatus,
+    refetchInterval: appSettings.trading_status_ms ?? 30_000,
+    staleTime: 15_000,
+  })
+  const ibConnected = ibStatus?.connected === true
 
   // Consume ?symbol= param on navigation from sandbox.
   // Guard with pathname === '/' so this panel doesn't strip params
@@ -260,7 +271,6 @@ export default function Dashboard() {
 
   const periodOptions = chartType === 'candles' ? CANDLE_PERIOD_OPTIONS : LINE_PERIOD_OPTIONS
   const intervalHints = chartType === 'candles' ? CANDLE_PERIOD_INTERVAL_HINTS : PERIOD_INTERVAL_HINTS
-  const chartInterval = intervalHints[chartPeriod] ?? '1d'
 
   useEffect(() => {
     if (!periodOptions.some(p => p.key === chartPeriod)) {
@@ -312,9 +322,40 @@ export default function Dashboard() {
   // Feed quotesMap back into the hook so market_state signals are used
   useEffect(() => { setQuotesMapForHook(quotesMap ?? null) }, [quotesMap])
 
+  // 5-second candles are only useful around the open: pre-market warmup so we
+  // can stage orders, and the first hour of trading when price action is
+  // frenzied. Outside that window we revert to 1-minute bars so we stop
+  // hammering IB for 5s data we don't need. Recomputed each minute below.
+  const [inOpeningWindow, setInOpeningWindow] = useState(() => isOpeningFrenzyWindow())
+  useEffect(() => {
+    const id = setInterval(() => {
+      setInOpeningWindow(prev => {
+        const next = isOpeningFrenzyWindow()
+        return next !== prev ? next : prev
+      })
+    }, 60_000)
+    return () => clearInterval(id)
+  }, [])
+
+  const fiveSecActive =
+    useFiveSec && ibConnected && marketOpen && inOpeningWindow &&
+    chartType === 'candles' && chartPeriod === '1d'
+  const chartInterval = fiveSecActive ? '5s' : (intervalHints[chartPeriod] ?? '1d')
+
+  // Reflect the auto-revert in the toggle state so the button shows it's off
+  // once the market closes or we leave the opening frenzy window.
+  useEffect(() => {
+    if (useFiveSec && (!marketOpen || !inOpeningWindow)) setUseFiveSec(false)
+  }, [useFiveSec, marketOpen, inOpeningWindow])
+
   const shortPeriod = ['1d', '2d', '5d', '2w'].includes(chartPeriod)
-  const histRefetchInterval = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms : 5 * 60_000) : 15 * 60_000
-  const histStaleTime       = shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms - 5_000 : 4 * 60_000) : 840_000
+  // 5s bars need a much faster refresh; 1m+ falls back to user-configured cadence.
+  const histRefetchInterval = fiveSecActive
+    ? 10_000
+    : (shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms : 5 * 60_000) : 15 * 60_000)
+  const histStaleTime = fiveSecActive
+    ? 5_000
+    : (shortPeriod ? (marketOpen ? appSettings.chart_refresh_ms - 5_000 : 4 * 60_000) : 840_000)
   const cachedHistory = useMemo(
     () => getCachedHistory(chartSymbol, chartPeriod, chartInterval),
     [chartSymbol, chartPeriod, chartInterval]
@@ -370,6 +411,17 @@ export default function Dashboard() {
       writeHistoryCache(chartSymbol, warmupPeriod, warmupInterval, warmupHistData)
     }
   }, [warmupHistData, chartSymbol, warmupPeriod, warmupInterval])
+
+  // Cap displayed bars when in 5s mode so the chart stays readable and snappy.
+  // ~60 min of trading (5s bars) is enough to gauge short-term momentum without
+  // overwhelming the X-axis.
+  const FIVE_SEC_MAX_BARS = 720
+  const displayHistData = useMemo(() => {
+    if (!fiveSecActive || !histData?.data?.length) return histData
+    const rows = histData.data
+    if (rows.length <= FIVE_SEC_MAX_BARS) return histData
+    return { ...histData, data: rows.slice(-FIVE_SEC_MAX_BARS) }
+  }, [fiveSecActive, histData])
 
   const chartPrevClose =
     quotesMap?.[chartSymbol]?.previous_close ??
@@ -460,12 +512,16 @@ export default function Dashboard() {
               periodOptions={periodOptions}
               indicators={indicators}
               toggleIndicator={toggleIndicator}
-              histData={histData}
+              histData={displayHistData}
               histLoading={histLoading}
               chartPrevClose={chartPrevClose}
               warmupData={warmupData}
               quoteTelemetry={quotesMap?.[chartSymbol]?.ib_telemetry ?? null}
               isInWatchlist={watchlist.includes(chartSymbol)}
+              ibConnected={ibConnected}
+              useFiveSec={useFiveSec}
+              setUseFiveSec={setUseFiveSec}
+              fiveSecAvailable={ibConnected && marketOpen && inOpeningWindow}
             />
           </div>
         </div>

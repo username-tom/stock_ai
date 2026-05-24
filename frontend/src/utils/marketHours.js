@@ -34,3 +34,29 @@ export function isMarketHours() {
   const mins = hour * 60 + minute
   return mins >= 9 * 60 + 30 && mins < 16 * 60
 }
+
+/**
+ * Returns true during the open-order "warm-up + frenzy" window — the period
+ * where 5-second bars are most useful for placing orders at the bell and
+ * surviving the opening volatility burst.
+ *
+ * Window (America/New_York): 09:15 (15 min pre-open warmup) through 10:30
+ * (first hour of regular trading). Weekends always return false.
+ */
+export function isOpeningFrenzyWindow() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  }).formatToParts(new Date())
+
+  const day    = parts.find(p => p.type === 'weekday')?.value
+  const hour   = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10)
+  const minute = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10)
+
+  if (day === 'Sat' || day === 'Sun') return false
+  const mins = hour * 60 + minute
+  return mins >= 9 * 60 + 15 && mins <= 10 * 60 + 30
+}
