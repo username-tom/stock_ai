@@ -1525,10 +1525,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   onChange={e => updateDraft(d => ({ ...d, sentiment_interval: e.target.value }))}
                   className="input text-sm py-1.5"
                 >
-                  {ibConnected && <option value="5s">5 seconds (IB only)</option>}
-                  {!ibConnected && draft.sentiment_interval === '5s' && (
-                    <option value="5s">5 seconds (requires IB connection)</option>
-                  )}
+                  <option value="5s">
+                    {ibConnected ? '5 seconds (IB only)' : '5 seconds (requires IB connection)'}
+                  </option>
                   <option value="1m">1 minute</option>
                   <option value="5m">5 minutes</option>
                   <option value="15m">15 minutes</option>

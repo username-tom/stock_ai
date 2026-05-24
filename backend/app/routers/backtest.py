@@ -2,28 +2,35 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-
-logger = logging.getLogger(__name__)
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models.report import BacktestReport
 from app.models.custom_script import CustomScript
+from app.models.report import BacktestReport
 from app.services.backtester import run_backtest
-from app.services.reporter import generate_html_report
-from app.services.strategies import list_strategies
 from app.services.data_provider import DataSource, list_data_sources
-from app.services.script_executor import validate_script
 from app.services.local_storage import (
-    save_backtest_report, load_backtest_report, list_backtest_report_files,
-    records_to_csv_bytes, records_to_json_bytes, _safe_filename,
+    _safe_filename,
+    list_backtest_report_files,
+    load_backtest_report,
+    records_to_csv_bytes,
+    records_to_json_bytes,
+    save_backtest_report,
 )
+from app.services.portfolio_manager import get_manager_settings
+from app.services.reporter import generate_html_report
+from app.services.script_executor import validate_script
+from app.services.strategies import list_strategies
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
@@ -143,6 +150,14 @@ class SentimentBacktestRequest(BaseModel):
                     f"Valid: {sorted(valid_strategy_types)}"
                 )
 
+
+def _build_pm_settings_snapshot(overrides: dict | None = None) -> dict:
+    """Return a complete PM settings snapshot for report storage."""
+    snapshot = copy.deepcopy(get_manager_settings())
+    if overrides:
+        snapshot.update(overrides)
+    return snapshot
+
 @router.post("/run-sentiment")
 async def run_sentiment_backtest_endpoint(
     req: SentimentBacktestRequest,
@@ -206,16 +221,19 @@ async def run_sentiment_backtest_endpoint(
         "trades": result["trades"],
         "ohlcv": result["ohlcv"],
     }
+    pm_settings_snapshot = _build_pm_settings_snapshot({
+        "sentiment_strategies": req.sentiment_strategies,
+        "sentiment_warmup": req.sentiment_warmup,
+        "stop_loss_pct": req.stop_loss_pct,
+        "take_profit_pct": req.take_profit_pct,
+        "hold_positions_overnight": req.hold_positions_overnight,
+        "eod_sell_window_minutes": req.eod_sell_window_minutes,
+    })
     report = BacktestReport(
         name=name,
         symbol=req.symbol.upper(),
         strategy_type="sentiment_switching",
-        parameters={
-            "sentiment_strategies": req.sentiment_strategies,
-            "sentiment_warmup": req.sentiment_warmup,
-            "stop_loss_pct": req.stop_loss_pct,
-            "take_profit_pct": req.take_profit_pct,
-        },
+        parameters={"pm_settings": pm_settings_snapshot},
         start_date=req.start_date,
         end_date=req.end_date,
         initial_capital=req.initial_capital,
@@ -322,14 +340,7 @@ async def run_backtest_endpoint(
     # file is fully self-contained and reproducible.
     frozen_snapshot: str | None = None
     if script_code is not None:
-        # Derive merged params the same way script_executor does
-        script_defaults = validate_script(script_code).get("default_params", {})
-        merged = {**script_defaults}
-        merged.update(
-            {k: v for k, v in req.strategy_params.items()
-             if v is not None and not (isinstance(v, str) and not str(v).strip())}
-        )
-        params_repr = repr(merged)
+        params_repr = repr(req.strategy_params)
         frozen_snapshot = (
             f"{script_code.rstrip()}\n\n\n"
             f"# ── Frozen parameters for this backtest run ──────────────────────────────\n"
@@ -766,14 +777,7 @@ async def run_sandbox_backtest_endpoint(
             "use_shared_pool": True,
             "per_position_min_pct": req.per_position_min_pct,
             "per_position_max_pct": req.per_position_max_pct,
-            "pm_settings": {
-                "stop_loss_pct": stop_loss_pct,
-                "take_profit_pct": take_profit_pct,
-                "hold_positions_overnight": hold_overnight,
-                "eod_sell_window_minutes": eod_window,
-                "sentiment_strategies": sentiment_strategies,
-                "sentiment_warmup": sentiment_warmup,
-            },
+            "pm_settings": pm_settings_snapshot,
             "per_symbol_min_alloc": min_alloc_by_symbol,
             "per_symbol_max_alloc": max_alloc_each,
         }
@@ -789,7 +793,7 @@ async def run_sandbox_backtest_endpoint(
             "use_sentiment_routing": req.use_sentiment_routing,
             "use_shared_pool": True,
             "pool_final": coord.get("pool_final"),
-            "pm_settings": parameters_payload["pm_settings"],
+            "pm_settings": pm_settings_snapshot,
             "errors": coord.get("errors") or {},
         }
         report = BacktestReport(
@@ -824,7 +828,7 @@ async def run_sandbox_backtest_endpoint(
                 "per_symbol_min_alloc": min_alloc_by_symbol,
                 "per_symbol_max_alloc": max_alloc_each,
                 "pool_final": coord.get("pool_final"),
-                "pm_settings": parameters_payload["pm_settings"],
+                "pm_settings": pm_settings_snapshot,
                 "use_sentiment_routing": req.use_sentiment_routing,
                 "use_shared_pool": True,
                 "activity_log": result_data_payload["activity_log"],
@@ -1058,6 +1062,15 @@ async def run_sandbox_backtest_endpoint(
         "symbols_failed": sum(1 for r in per_results if r.get("error")),
     }
 
+    pm_settings_snapshot = _build_pm_settings_snapshot({
+        "stop_loss_pct": stop_loss_pct,
+        "take_profit_pct": take_profit_pct,
+        "hold_positions_overnight": hold_overnight,
+        "eod_sell_window_minutes": eod_window,
+        "sentiment_strategies": sentiment_strategies,
+        "sentiment_warmup": sentiment_warmup,
+    })
+
     # Persist a summary report.
     name = (
         f"SANDBOX_{'sentiment' if req.use_sentiment_routing else 'positions'}"
@@ -1067,14 +1080,7 @@ async def run_sandbox_backtest_endpoint(
         "symbols": symbols,
         "use_sentiment_routing": req.use_sentiment_routing,
         "allocation_mode": req.allocation_mode,
-        "pm_settings": {
-            "stop_loss_pct": stop_loss_pct,
-            "take_profit_pct": take_profit_pct,
-            "hold_positions_overnight": hold_overnight,
-            "eod_sell_window_minutes": eod_window,
-            "sentiment_strategies": sentiment_strategies,
-            "sentiment_warmup": sentiment_warmup,
-        },
+        "pm_settings": pm_settings_snapshot,
         "per_symbol_capital": per_symbol_capital,
     }
     result_data_payload = {
@@ -1086,7 +1092,7 @@ async def run_sandbox_backtest_endpoint(
         "initial_capital": req.initial_capital,
         "per_symbol_capital": per_symbol_capital,
         "use_sentiment_routing": req.use_sentiment_routing,
-        "pm_settings": parameters_payload["pm_settings"],
+        "pm_settings": pm_settings_snapshot,
     }
     report = BacktestReport(
         name=name,

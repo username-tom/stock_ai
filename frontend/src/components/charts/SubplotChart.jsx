@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   ComposedChart, Line, Bar, Area, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, ReferenceArea,
+  ResponsiveContainer, ReferenceLine, ReferenceArea, ReferenceDot,
 } from 'recharts'
 
 import { enrichData, enrichDataWithWarmup } from './indicators'
@@ -206,8 +206,8 @@ function OneDayChart({
   // Day separator vertical lines
   const dayLines = days.slice(1).map(day => segmented.find(d => dayOf(d) === day)?.date).filter(Boolean)
 
-  const externalHover = hoverState?.source === 'candlestick' ? hoverState.date : null
-  const externalHoverPoint = externalHover ? segmented.find((d) => d.date === externalHover) : null
+  const externalHoverPoint = hoverState?.date ? segmented.find((d) => d.date === hoverState.date) : null
+  const externalHover = externalHoverPoint?.date ?? null
 
   const handleHoverMove = useCallback((event) => {
     const payload = event?.activePayload?.[0]?.payload
@@ -321,8 +321,7 @@ function OneDayChart({
           {dayLines.map((x, i) => (
             <ReferenceLine key={`day-${i}`} yAxisId="price" x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
           ))}
-            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
-            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
+            {externalHover && <ReferenceLine yAxisId="price" x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
 
           {/* Previous close reference */}
           {prevClose != null && prevCloseInRange && (
@@ -375,22 +374,31 @@ function OneDayChart({
           />
 
           {/* Pre-market: muted dashed line */}
-          <Line yAxisId="price" type="monotone" dataKey="preClose"     {...offHourLine} dot={false} connectNulls={false} isAnimationActive={false} name="Pre" />
+          <Line yAxisId="price" type="monotone" dataKey="preClose"     {...offHourLine} dot={false} activeDot={{ r: 3.5, stroke: '#0f172a', strokeWidth: 1.25, fill: lineColor }} connectNulls={false} isAnimationActive={false} name="Pre" />
           {/* Regular session: full-color solid line */}
-          <Line yAxisId="price" type="monotone" dataKey="regularClose" stroke={lineColor} strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} name="Close" />
+          <Line yAxisId="price" type="monotone" dataKey="regularClose" stroke={lineColor} strokeWidth={1.5} dot={false} activeDot={{ r: 3.5, stroke: '#0f172a', strokeWidth: 1.25, fill: lineColor }} connectNulls={false} isAnimationActive={false} name="Close" />
           {/* Post-market: muted dashed line */}
-          <Line yAxisId="price" type="monotone" dataKey="postClose"    {...offHourLine} dot={false} connectNulls={false} isAnimationActive={false} name="After" />
+          <Line yAxisId="price" type="monotone" dataKey="postClose"    {...offHourLine} dot={false} activeDot={{ r: 3.5, stroke: '#0f172a', strokeWidth: 1.25, fill: lineColor }} connectNulls={false} isAnimationActive={false} name="After" />
+          {externalHover && externalHoverPoint && (
+            (() => {
+              const py = externalHoverPoint.regularClose ?? externalHoverPoint.preClose ?? externalHoverPoint.postClose
+              if (py == null) return null
+              return (
+                <ReferenceDot yAxisId="price" x={externalHover} y={py} r={3.5} fill={lineColor} stroke="#0f172a" strokeWidth={1.25} isFront />
+              )
+            })()
+          )}
 
-          {hasBB && <Line yAxisId="price" type="monotone" dataKey="upper"   stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
-          {hasBB && <Line yAxisId="price" type="monotone" dataKey="lower"   stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} isAnimationActive={false} />}
-          {hasBB && <Line yAxisId="price" type="monotone" dataKey="mid"     stroke={BB_MID}   strokeWidth={0.8} strokeDasharray="2 2" dot={false} isAnimationActive={false} />}
-          {hasFastMA && <Line yAxisId="price" type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
-          {hasSlowMA && <Line yAxisId="price" type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} isAnimationActive={false} />}
-          {hasMA9   && <Line yAxisId="price" type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} name="MA(9)"   isAnimationActive={false} />}
-          {hasMA20  && <Line yAxisId="price" type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} name="MA(20)"  isAnimationActive={false} />}
-          {hasMA50  && <Line yAxisId="price" type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} name="MA(50)"  isAnimationActive={false} />}
-          {hasMA100 && <Line yAxisId="price" type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} name="MA(100)" isAnimationActive={false} />}
-          {hasMA200 && <Line yAxisId="price" type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} name="MA(200)" isAnimationActive={false} />}
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="upper"   stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} activeDot={false} isAnimationActive={false} />}
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="lower"   stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} activeDot={false} isAnimationActive={false} />}
+          {hasBB && <Line yAxisId="price" type="monotone" dataKey="mid"     stroke={BB_MID}   strokeWidth={0.8} strokeDasharray="2 2" dot={false} activeDot={false} isAnimationActive={false} />}
+          {hasFastMA && <Line yAxisId="price" type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} activeDot={false} isAnimationActive={false} />}
+          {hasSlowMA && <Line yAxisId="price" type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} activeDot={false} isAnimationActive={false} />}
+          {hasMA9   && <Line yAxisId="price" type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} activeDot={false} name="MA(9)"   isAnimationActive={false} />}
+          {hasMA20  && <Line yAxisId="price" type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} activeDot={false} name="MA(20)"  isAnimationActive={false} />}
+          {hasMA50  && <Line yAxisId="price" type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} activeDot={false} name="MA(50)"  isAnimationActive={false} />}
+          {hasMA100 && <Line yAxisId="price" type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} activeDot={false} name="MA(100)" isAnimationActive={false} />}
+          {hasMA200 && <Line yAxisId="price" type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} activeDot={false} name="MA(200)" isAnimationActive={false} />}
         </ComposedChart>
       </ResponsiveContainer>
 
@@ -411,7 +419,10 @@ function OneDayChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={70} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={30} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} activeDot={false} isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.rsi != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.rsi} r={3} fill={RSI_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">RSI</div>
@@ -438,8 +449,14 @@ function OneDayChart({
                 <Cell key={`1d-macd-cell-${i}`} fill={entry.macd_hist >= 0 ? '#4ade80' : '#f87171'} opacity={0.6} />
               ))}
             </Bar>
-            <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} isAnimationActive={false} />
-            <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} activeDot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} activeDot={false} isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.macd != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.macd} r={3} fill={MACD_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
+            {externalHover && externalHoverPoint?.macd_signal != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.macd_signal} r={3} fill={SIGNAL_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">MACD</div>
@@ -462,8 +479,14 @@ function OneDayChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} isAnimationActive={false} name="Stoch %K" />
-            <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} name="Stoch %D" />
+            <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} activeDot={false} isAnimationActive={false} name="Stoch %K" />
+            <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} activeDot={false} isAnimationActive={false} name="Stoch %D" />
+            {externalHover && externalHoverPoint?.stoch_k != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stoch_k} r={3} fill={STOCH_K} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
+            {externalHover && externalHoverPoint?.stoch_d != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stoch_d} r={3} fill={STOCH_D} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">Stoch</div>
@@ -486,8 +509,14 @@ function OneDayChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="stochrsi_k" stroke={STOCHRSI_K} strokeWidth={1}   dot={false} isAnimationActive={false} name="StochRSI %K" />
-            <Line type="monotone" dataKey="stochrsi_d" stroke={STOCHRSI_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} isAnimationActive={false} name="StochRSI %D" />
+            <Line type="monotone" dataKey="stochrsi_k" stroke={STOCHRSI_K} strokeWidth={1}   dot={false} activeDot={false} isAnimationActive={false} name="StochRSI %K" />
+            <Line type="monotone" dataKey="stochrsi_d" stroke={STOCHRSI_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} activeDot={false} isAnimationActive={false} name="StochRSI %D" />
+            {externalHover && externalHoverPoint?.stochrsi_k != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stochrsi_k} r={3} fill={STOCHRSI_K} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
+            {externalHover && externalHoverPoint?.stochrsi_d != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stochrsi_d} r={3} fill={STOCHRSI_D} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">StochRSI</div>
@@ -511,7 +540,10 @@ function OneDayChart({
             <ReferenceLine y={100}  stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={-100} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={0}    stroke="#475569" strokeOpacity={0.5} />
-            <Line type="monotone" dataKey="cci" stroke={CCI_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="CCI(14)" />
+            <Line type="monotone" dataKey="cci" stroke={CCI_COLOR} strokeWidth={1} dot={false} activeDot={false} isAnimationActive={false} name="CCI(14)" />
+            {externalHover && externalHoverPoint?.cci != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.cci} r={3} fill={CCI_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">CCI</div>
@@ -534,7 +566,10 @@ function OneDayChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={-20} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={-80} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="williams_r" stroke={WILLIAMS_R_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="%R(14)" />
+            <Line type="monotone" dataKey="williams_r" stroke={WILLIAMS_R_COLOR} strokeWidth={1} dot={false} activeDot={false} isAnimationActive={false} name="%R(14)" />
+            {externalHover && externalHoverPoint?.williams_r != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.williams_r} r={3} fill={WILLIAMS_R_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">Williams %R</div>
@@ -555,7 +590,10 @@ function OneDayChart({
               <ReferenceLine key={`day-at-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
-            <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} isAnimationActive={false} name="ATR(14)" />
+            <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} activeDot={false} isAnimationActive={false} name="ATR(14)" />
+            {externalHover && externalHoverPoint?.atr != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.atr} r={3} fill={ATR_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">ATR</div>
@@ -575,8 +613,9 @@ function OneDayChart({
             {dayLines.map((x, i) => (
               <ReferenceLine key={`day-ov-${i}`} x={x} stroke="#334155" strokeWidth={1} strokeDasharray="4 2" />
             ))}
+            {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.5} />
-            <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} isAnimationActive={false} name="OBV" />
+            <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} activeDot={false} isAnimationActive={false} name="OBV" />
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5">OBV</div>
@@ -1046,6 +1085,8 @@ export default function SubplotChart({
           indicators={indicators}
           prevClose={prevClose}
           syncId={syncId}
+          hoverState={hoverState}
+          onHoverStateChange={onHoverStateChange}
           onHoverPointChange={onHoverPointChange}
           showSharedHoverTooltip={showSharedHoverTooltip}
         />
@@ -1134,17 +1175,20 @@ export default function SubplotChart({
               <ReferenceLine key={`day-p-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
             ))}
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
-            <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={<SignalDot />} activeDot={{ r: 3 }} name="Close" isAnimationActive={false} />
-            {hasBB && <Line type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Upper" isAnimationActive={false} />}
-            {hasBB && <Line type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} name="BB Lower" isAnimationActive={false} />}
-            {hasBB && <Line type="monotone" dataKey="mid" stroke={BB_MID} strokeWidth={0.8} strokeDasharray="2 2" dot={false} name="BB Mid" isAnimationActive={false} />}
-            {hasFastMA && <Line type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} name="Fast MA" isAnimationActive={false} />}
-            {hasSlowMA && <Line type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} name="Slow MA" isAnimationActive={false} />}
-            {hasMA9   && <Line type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} name="MA(9)"   isAnimationActive={false} />}
-            {hasMA20  && <Line type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} name="MA(20)"  isAnimationActive={false} />}
-            {hasMA50  && <Line type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} name="MA(50)"  isAnimationActive={false} />}
-            {hasMA100 && <Line type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} name="MA(100)" isAnimationActive={false} />}
-            {hasMA200 && <Line type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} name="MA(200)" isAnimationActive={false} />}
+            <Line type="monotone" dataKey="close" stroke={PRICE_COLOR} strokeWidth={1.5} dot={<SignalDot />} activeDot={{ r: 3.5, stroke: '#0f172a', strokeWidth: 1.25, fill: PRICE_COLOR }} name="Close" isAnimationActive={false} />
+            {hasBB && <Line type="monotone" dataKey="upper" stroke={BB_UPPER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} activeDot={false} name="BB Upper" isAnimationActive={false} />}
+            {hasBB && <Line type="monotone" dataKey="lower" stroke={BB_LOWER} strokeWidth={0.8} strokeDasharray="4 2" dot={false} activeDot={false} name="BB Lower" isAnimationActive={false} />}
+            {hasBB && <Line type="monotone" dataKey="mid" stroke={BB_MID} strokeWidth={0.8} strokeDasharray="2 2" dot={false} activeDot={false} name="BB Mid" isAnimationActive={false} />}
+            {hasFastMA && <Line type="monotone" dataKey="fast_ma" stroke={FAST_MA} strokeWidth={0.9} dot={false} activeDot={false} name="Fast MA" isAnimationActive={false} />}
+            {hasSlowMA && <Line type="monotone" dataKey="slow_ma" stroke={SLOW_MA} strokeWidth={0.9} dot={false} activeDot={false} name="Slow MA" isAnimationActive={false} />}
+            {hasMA9   && <Line type="monotone" dataKey="ma_9"   stroke={MA_9}   strokeWidth={0.9} dot={false} activeDot={false} name="MA(9)"   isAnimationActive={false} />}
+            {hasMA20  && <Line type="monotone" dataKey="ma_20"  stroke={MA_20}  strokeWidth={0.9} dot={false} activeDot={false} name="MA(20)"  isAnimationActive={false} />}
+            {hasMA50  && <Line type="monotone" dataKey="ma_50"  stroke={MA_50}  strokeWidth={0.9} dot={false} activeDot={false} name="MA(50)"  isAnimationActive={false} />}
+            {hasMA100 && <Line type="monotone" dataKey="ma_100" stroke={MA_100} strokeWidth={0.9} dot={false} activeDot={false} name="MA(100)" isAnimationActive={false} />}
+            {hasMA200 && <Line type="monotone" dataKey="ma_200" stroke={MA_200} strokeWidth={1}   dot={false} activeDot={false} name="MA(200)" isAnimationActive={false} />}
+            {externalHover && externalHoverPoint?.close != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.close} r={3.5} fill={PRICE_COLOR} stroke="#0f172a" strokeWidth={1.25} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
       )}
@@ -1166,7 +1210,10 @@ export default function SubplotChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={70} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={30} stroke={BUY_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} name="RSI" isAnimationActive={false} />
+            <Line type="monotone" dataKey="rsi" stroke={RSI_COLOR} strokeWidth={1} dot={false} activeDot={false} name="RSI" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.rsi != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.rsi} r={3} fill={RSI_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
@@ -1196,8 +1243,14 @@ export default function SubplotChart({
                 <Cell key={`macd-cell-${i}`} fill={entry.macd_hist >= 0 ? '#4ade80' : '#f87171'} opacity={0.6} />
               ))}
             </Bar>
-            <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} name="MACD"   isAnimationActive={false} />
-            <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="Signal" isAnimationActive={false} />
+            <Line type="monotone" dataKey="macd"        stroke={MACD_COLOR}   strokeWidth={1}   dot={false} activeDot={false} name="MACD"   isAnimationActive={false} />
+            <Line type="monotone" dataKey="macd_signal" stroke={SIGNAL_COLOR} strokeWidth={0.9} strokeDasharray="4 2" dot={false} activeDot={false} name="Signal" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.macd != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.macd} r={3} fill={MACD_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
+            {externalHover && externalHoverPoint?.macd_signal != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.macd_signal} r={3} fill={SIGNAL_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
@@ -1224,8 +1277,14 @@ export default function SubplotChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} name="Stoch %K" isAnimationActive={false} />
-            <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="Stoch %D" isAnimationActive={false} />
+            <Line type="monotone" dataKey="stoch_k" stroke={STOCH_K} strokeWidth={1}   dot={false} activeDot={false} name="Stoch %K" isAnimationActive={false} />
+            <Line type="monotone" dataKey="stoch_d" stroke={STOCH_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} activeDot={false} name="Stoch %D" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.stoch_k != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stoch_k} r={3} fill={STOCH_K} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
+            {externalHover && externalHoverPoint?.stoch_d != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stoch_d} r={3} fill={STOCH_D} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
@@ -1251,8 +1310,14 @@ export default function SubplotChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={80} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={20} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="stochrsi_k" stroke={STOCHRSI_K} strokeWidth={1}   dot={false} name="StochRSI %K" isAnimationActive={false} />
-            <Line type="monotone" dataKey="stochrsi_d" stroke={STOCHRSI_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} name="StochRSI %D" isAnimationActive={false} />
+            <Line type="monotone" dataKey="stochrsi_k" stroke={STOCHRSI_K} strokeWidth={1}   dot={false} activeDot={false} name="StochRSI %K" isAnimationActive={false} />
+            <Line type="monotone" dataKey="stochrsi_d" stroke={STOCHRSI_D} strokeWidth={0.9} strokeDasharray="4 2" dot={false} activeDot={false} name="StochRSI %D" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.stochrsi_k != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stochrsi_k} r={3} fill={STOCHRSI_K} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
+            {externalHover && externalHoverPoint?.stochrsi_d != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.stochrsi_d} r={3} fill={STOCHRSI_D} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
@@ -1279,7 +1344,10 @@ export default function SubplotChart({
             <ReferenceLine y={100}  stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={-100} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={0}    stroke="#475569" strokeOpacity={0.5} />
-            <Line type="monotone" dataKey="cci" stroke={CCI_COLOR} strokeWidth={1} dot={false} name="CCI(14)" isAnimationActive={false} />
+            <Line type="monotone" dataKey="cci" stroke={CCI_COLOR} strokeWidth={1} dot={false} activeDot={false} name="CCI(14)" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.cci != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.cci} r={3} fill={CCI_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
@@ -1305,7 +1373,10 @@ export default function SubplotChart({
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={-20} stroke={SELL_COLOR} strokeDasharray="3 3" strokeOpacity={0.6} />
             <ReferenceLine y={-80} stroke={BUY_COLOR}  strokeDasharray="3 3" strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="williams_r" stroke={WILLIAMS_R_COLOR} strokeWidth={1} dot={false} name="%R(14)" isAnimationActive={false} />
+            <Line type="monotone" dataKey="williams_r" stroke={WILLIAMS_R_COLOR} strokeWidth={1} dot={false} activeDot={false} name="%R(14)" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.williams_r != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.williams_r} r={3} fill={WILLIAMS_R_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
@@ -1329,7 +1400,10 @@ export default function SubplotChart({
               <ReferenceLine key={`day-at-${i}`} x={d} stroke="#475569" strokeWidth={1} strokeDasharray="4 2" />
             ))}
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
-            <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} name="ATR(14)" isAnimationActive={false} />
+            <Line type="monotone" dataKey="atr" stroke={ATR_COLOR} strokeWidth={1} dot={false} activeDot={false} name="ATR(14)" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.atr != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.atr} r={3} fill={ATR_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">
@@ -1354,7 +1428,10 @@ export default function SubplotChart({
             ))}
             {externalHover && <ReferenceLine x={externalHover} stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" />}
             <ReferenceLine y={0} stroke="#475569" strokeOpacity={0.5} />
-            <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} name="OBV" isAnimationActive={false} />
+            <Area type="monotone" dataKey="obv" stroke={OBV_COLOR} strokeWidth={1} fill={OBV_COLOR} fillOpacity={0.08} dot={false} activeDot={false} name="OBV" isAnimationActive={false} />
+            {externalHover && externalHoverPoint?.obv != null && (
+              <ReferenceDot x={externalHover} y={externalHoverPoint.obv} r={3} fill={OBV_COLOR} stroke="#0f172a" strokeWidth={1} isFront />
+            )}
           </ComposedChart>
         </ResponsiveContainer>
         <div className="text-[10px] font-semibold text-slate-500 text-center pb-2 pt-0.5 flex justify-center items-center gap-1.5">

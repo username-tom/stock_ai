@@ -33,6 +33,87 @@ logger = logging.getLogger(__name__)
 
 _MIN_SENTIMENT_DATA_POINTS = 35
 
+# ── default 5×5 sentiment matrices ───────────────────────────────────────── #
+# These mirror the curated defaults rendered by the PM panel
+# (frontend/src/components/sandbox/PortfolioManagerPanel.jsx). Keeping them
+# in sync ensures the matrix the user sees in the UI is the matrix actually
+# used by the engine, even before the user clicks Save.
+_DEFAULT_SENTIMENT_MATRIX_STRATEGIES: dict[str, dict[str, str]] = {
+    "crash": {
+        "STRONG LONG": "stoch_rsi",
+        "LONG": "rsi",
+        "NEUTRAL": "williams_r",
+        "SHORT": "stoch_rsi",
+        "STRONG SHORT": "williams_r",
+    },
+    "bearish": {
+        "STRONG LONG": "macd",
+        "LONG": "bollinger_bands",
+        "NEUTRAL": "rsi",
+        "SHORT": "stochastic",
+        "STRONG SHORT": "stoch_rsi",
+    },
+    "neutral": {
+        "STRONG LONG": "sma_crossover",
+        "LONG": "macd",
+        "NEUTRAL": "bollinger_bands",
+        "SHORT": "stochastic",
+        "STRONG SHORT": "cci",
+    },
+    "bullish": {
+        "STRONG LONG": "sma_crossover",
+        "LONG": "macd",
+        "NEUTRAL": "bollinger_bands",
+        "SHORT": "rsi",
+        "STRONG SHORT": "stochastic",
+    },
+    "euphoric": {
+        "STRONG LONG": "cci",
+        "LONG": "macd",
+        "NEUTRAL": "bollinger_bands",
+        "SHORT": "rsi",
+        "STRONG SHORT": "stoch_rsi",
+    },
+}
+
+_DEFAULT_SENTIMENT_MATRIX_ACTIONS: dict[str, dict[str, str]] = {
+    "crash":    {"STRONG LONG": "hold",     "LONG": "trade", "NEUTRAL": "no_trade", "SHORT": "engine_off", "STRONG SHORT": "engine_off"},
+    "bearish":  {"STRONG LONG": "trade",    "LONG": "trade", "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "engine_off"},
+    "neutral":  {"STRONG LONG": "trade",    "LONG": "trade", "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "trade"},
+    "bullish":  {"STRONG LONG": "hold",     "LONG": "trade", "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "force_sell"},
+    "euphoric": {"STRONG LONG": "hold",     "LONG": "hold",  "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "force_sell"},
+}
+
+
+def _clone_matrix(m: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    return {row: dict(cols) for row, cols in m.items()}
+
+
+def _merge_matrix_with_defaults(
+    raw: Any, defaults: dict[str, dict[str, str]]
+) -> dict[str, dict[str, str]]:
+    """Return a complete 5×5 matrix by overlaying ``raw`` on top of ``defaults``.
+
+    Empty / missing cells fall back to the curated default so the engine
+    always has a value to act on (matches frontend behavior).
+    """
+    merged = _clone_matrix(defaults)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = None
+    if isinstance(raw, dict):
+        for row, cols in raw.items():
+            if not isinstance(cols, dict):
+                continue
+            target = merged.setdefault(row, {})
+            for col, val in cols.items():
+                if isinstance(val, str) and val.strip():
+                    target[col] = val
+    return merged
+
+
 # ── default settings ──────────────────────────────────────────────────────── #
 
 _settings: dict[str, Any] = {
@@ -84,10 +165,10 @@ _settings: dict[str, Any] = {
     "auto_trade_buy_price_offset_pct": 0.1,   # BUY price = prev OHLC midpoint + this % (IB automated orders)
     "auto_trade_sell_price_offset_pct": 0.1,  # SELL price = prev OHLC midpoint - this % (IB automated orders)
     # 5×5 matrix: keys are PM sentiment bucket → AI tag → strategy name
-    "sentiment_matrix_strategies": {},
+    "sentiment_matrix_strategies": _clone_matrix(_DEFAULT_SENTIMENT_MATRIX_STRATEGIES),
     # 5×5 matrix: keys are PM sentiment bucket → AI tag → action
     # actions: trade | hold | engine_off | force_sell | no_trade
-    "sentiment_matrix_actions": {},
+    "sentiment_matrix_actions": _clone_matrix(_DEFAULT_SENTIMENT_MATRIX_ACTIONS),
     # Max number of days a PM buy-and-hold position can be held before auto-release (0 = no limit).
     # Default 1 day suits day-trading workflows; sentiment-driven exits also trigger inside this window.
     "pm_hold_duration_days": 1,
@@ -250,12 +331,16 @@ async def _load_settings_from_db() -> None:
             _sell_offset = getattr(row, "auto_trade_sell_price_offset_pct", None)
             _settings["auto_trade_buy_price_offset_pct"] = 0.1 if _buy_offset is None else float(_buy_offset)
             _settings["auto_trade_sell_price_offset_pct"] = 0.1 if _sell_offset is None else float(_sell_offset)
-            # 5×5 matrices
-            _settings["sentiment_matrix_strategies"] = _load_json_dict(
-                getattr(row, "sentiment_matrix_strategies", None), {}
+            # 5×5 matrices – overlay any stored cells on top of the curated
+            # defaults so an empty DB row still produces the same matrix the
+            # PM UI displays out-of-the-box.
+            _settings["sentiment_matrix_strategies"] = _merge_matrix_with_defaults(
+                getattr(row, "sentiment_matrix_strategies", None),
+                _DEFAULT_SENTIMENT_MATRIX_STRATEGIES,
             )
-            _settings["sentiment_matrix_actions"] = _load_json_dict(
-                getattr(row, "sentiment_matrix_actions", None), {}
+            _settings["sentiment_matrix_actions"] = _merge_matrix_with_defaults(
+                getattr(row, "sentiment_matrix_actions", None),
+                _DEFAULT_SENTIMENT_MATRIX_ACTIONS,
             )
             _settings["pm_hold_duration_days"] = int(getattr(row, "pm_hold_duration_days", 1) or 0)
             _settings["pm_hold_extended_multiplier"] = float(getattr(row, "pm_hold_extended_multiplier", 2.0) or 0.0)

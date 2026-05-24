@@ -548,7 +548,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     market_sentiment_strategies: Optional[dict[str, str]] = None
     symbol_sentiment_strategies: Optional[dict[str, str]] = None
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=365)
-    sentiment_interval: Optional[str] = Field(default=None, pattern="^(1m|5m|15m|30m|1h|daily)$")
+    sentiment_interval: Optional[str] = Field(default=None, pattern="^(5s|1m|5m|15m|30m|1h|daily)$")
     ai_tag_strategy_enabled: Optional[bool] = None
     ai_sentiment_change_enabled: Optional[bool] = None
     ai_tag_strategies: Optional[dict[str, str]] = None
