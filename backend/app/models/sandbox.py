@@ -114,6 +114,8 @@ class PortfolioManagerSettings(Base):
     sentiment_strategy_enabled = Column(Boolean, default=True, nullable=False)
     stop_loss_pct = Column(Float, default=0.8, nullable=False)
     take_profit_pct = Column(Float, default=2.5, nullable=False)
+    stop_loss_value = Column(Float, default=0.0, nullable=False)
+    take_profit_value = Column(Float, default=0.0, nullable=False)
     hold_positions_overnight = Column(Boolean, default=True, nullable=False)
     eod_engine_shutoff_minutes_before_sell = Column(Integer, default=120, nullable=False)
     eod_sell_window_minutes = Column(Integer, default=30, nullable=False)
@@ -134,6 +136,8 @@ class PortfolioManagerSettings(Base):
     ai_tag_long_engine_off = Column(Boolean, default=True, nullable=False)
     ai_tag_long_tp_pct = Column(Float, default=0.0, nullable=False)
     ai_tag_long_sl_pct = Column(Float, default=0.0, nullable=False)
+    ai_tag_long_tp_value = Column(Float, default=0.0, nullable=False)
+    ai_tag_long_sl_value = Column(Float, default=0.0, nullable=False)
     ai_tag_no_loss_sell = Column(Boolean, default=True, nullable=False)
     pending_price_drift_cancel_pct = Column(Float, default=0.75, nullable=False)
     pending_cancel_after_bars = Column(Integer, default=3, nullable=False)
@@ -144,8 +148,13 @@ class PortfolioManagerSettings(Base):
     # 5×5 sentiment × AI-tag matrix (JSON)
     sentiment_matrix_strategies = Column(Text, nullable=False, server_default=text("'{}'"  ))
     sentiment_matrix_actions = Column(Text, nullable=False, server_default=text("'{}'"))
+    default_strategy_name = Column(String(120), default="template:intraday_1m_regime_template.py", nullable=False)
+    intraday_1m_template_params = Column(Text, nullable=False, server_default=text("'{}'"))
+    position_overrides = Column(Text, nullable=False, server_default=text("'{}'"))
     # Buy & Hold (matrix `hold` action) max duration in days; 0 = no limit. Day-trade default.
     pm_hold_duration_days = Column(Integer, default=1, nullable=False)
+    # Buy & Hold max duration in bars; supersedes day-based cap when >0.
+    pm_hold_duration_bars = Column(Integer, default=20, nullable=False)
     # Advanced Hold multiplier applied to duration when cell action is `advanced_hold:extended`
     pm_hold_extended_multiplier = Column(Float, default=2.0, nullable=False)
     # Trailing stop % used for `advanced_hold:trailing` (exit when price drops this % from peak)

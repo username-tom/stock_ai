@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     REPORTS_DIR: str = "reports_output"
     LOCAL_STORAGE_DIR: str = "local_storage"
     AUTO_UPDATE: bool = False
+    DATA_MANAGER_AUTO_WARM_ENABLED: bool = True
+    DATA_MANAGER_AUTO_WARM_INTERVAL_MIN: int = 15
+    DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS: int = 35
+    DATA_MANAGER_AUTO_WARM_SOURCE: str = "auto"
+    DATA_MANAGER_AUTO_WARM_PREFER_IB: bool = True
+    DATA_MANAGER_AUTO_WARM_CHUNK_DAYS: int = 20
 
     @property
     def cors_origins_list(self) -> List[str]:

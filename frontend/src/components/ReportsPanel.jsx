@@ -472,7 +472,12 @@ export default function ReportsPanel() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="font-medium text-sm text-slate-200 truncate">{r.symbol}</div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="font-medium text-sm text-slate-200 truncate">{r.symbol}</div>
+                    <span className="shrink-0 inline-flex items-center rounded border border-dark-500 bg-dark-800/70 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">
+                      #{r.id}
+                    </span>
+                  </div>
                   <div className="text-xs text-slate-500 mt-0.5 truncate">
                     {r.strategy_type.replace(/_/g, ' ')} · {r.start_date} → {r.end_date}
                   </div>
@@ -525,6 +530,7 @@ export default function ReportsPanel() {
                         ? `Sandbox Portfolio — ${(detail.result_data?.per_symbol?.length ?? 0)} symbols`
                         : `${detail.symbol} — ${detail.strategy_type}`}
                     </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">Report ID #{detail.id}</p>
                     <p className="text-sm text-slate-400">{detail.start_date} → {detail.end_date}</p>
                     {detail.data_warning && (
                       <p className="text-xs text-amber-400 mt-1">{detail.data_warning}</p>

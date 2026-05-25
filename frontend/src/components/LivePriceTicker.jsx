@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { SignalIcon, ExclamationTriangleIcon } from '@heroicons/react/24/solid'
 import { getBulkQuotes } from '../api/client'
-import { isMarketHours } from '../utils/marketHours'
 import { useAppSettings } from '../hooks/useAppSettings'
 
 const DEFAULT_WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'SPY']
@@ -129,11 +128,7 @@ export default function LivePriceTicker() {
   })
 
   const marketState = items[0]?.market_state ?? 'CLOSED'
-  // Yahoo's daily-chart endpoint often returns 'CLOSED' even during the
-  // session. Trust REGULAR/PRE/POST explicitly; fall back to the clock
-  // for the CLOSED case so the ticker reflects real market hours.
-  const isLive = marketState === 'REGULAR' ||
-    (marketState === 'CLOSED' && isMarketHours())
+  const isLive = marketState === 'REGULAR'
 
   if (!items.length) return null
 

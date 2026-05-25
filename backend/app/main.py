@@ -12,6 +12,7 @@ from app.routers import trading, backtest, market_data, ws, scripts, settings as
 from app.routers.ollama_chat import router as ollama_chat_router
 from app.routers.sandbox_router import router as sandbox_router
 from app.services import market_service, symbol_registry
+from app.services.data_maintenance import run_data_manager_maintenance
 from app.services.sandbox_engine import run_engine
 from app.services.portfolio_manager import run_portfolio_manager
 class Suppress200OKFilter(logging.Filter):
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(market_service.pre_warm(DASHBOARD_SYMBOLS, periods=["1d", "1y"]))
     asyncio.create_task(symbol_registry.ensure_registry())
     asyncio.create_task(_daily_registry_refresh())
+    asyncio.create_task(run_data_manager_maintenance())
     asyncio.create_task(run_engine())
     asyncio.create_task(run_portfolio_manager())
     yield

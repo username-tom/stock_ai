@@ -97,6 +97,123 @@ def _resolve_backtest_sentiment_strategies(pm_settings: dict) -> tuple[dict[str,
     return resolved, source
 
 
+def _intraday_cache_covers_range(coverage: dict, start_date: str, end_date: str) -> bool:
+    """Return True when cached intraday data spans the requested date range."""
+    oldest = coverage.get("oldest")
+    newest = coverage.get("newest")
+    if not oldest or not newest:
+        return False
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        oldest_dt = datetime.fromisoformat(str(oldest)).date()
+        newest_dt = datetime.fromisoformat(str(newest)).date()
+    except ValueError:
+        return False
+    return oldest_dt <= start_dt and newest_dt >= end_dt
+
+
+def _intraday_cache_covers_range_for_source(
+    symbol: str,
+    data_source: DataSource,
+    start_date: str,
+    end_date: str,
+) -> bool:
+    """Check whether cache coverage satisfies the requested date range.
+
+    In ``auto`` mode, either IB or Yahoo cache can satisfy the requirement.
+    """
+    if data_source != "auto":
+        return _intraday_cache_covers_range(
+            get_intraday_cache_coverage(symbol, data_source),
+            start_date,
+            end_date,
+        )
+
+    return (
+        _intraday_cache_covers_range(get_intraday_cache_coverage(symbol, "ib"), start_date, end_date)
+        or _intraday_cache_covers_range(get_intraday_cache_coverage(symbol, "yfinance"), start_date, end_date)
+    )
+
+
+async def _ensure_watchlist_intraday_cache(
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    data_source: DataSource,
+) -> None:
+    """Warm intraday cache for a watchlist backtest and fail fast on gaps.
+
+    Sandbox portfolio backtests are cache-first. For a month-long 1m run we
+    need the whole watchlist covered up front; otherwise the coordinator would
+    silently skip symbols with cache misses and return a partial report.
+    """
+    if not symbols:
+        return
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return
+
+    lookback_days = max(1, (end_dt - start_dt).days + 1)
+    today_dt = datetime.now().date()
+    warm_lookback_days = max(lookback_days, (today_dt - start_dt).days + 1)
+
+    async def _warm_symbols(target_symbols: list[str], source: DataSource) -> None:
+        sem = asyncio.Semaphore(3)
+
+        async def _warm_one(sym: str) -> None:
+            async with sem:
+                await asyncio.to_thread(
+                    warm_intraday_cache,
+                    sym,
+                    lookback_days=warm_lookback_days,
+                    source=source,
+                    chunk_days=min(max(1, warm_lookback_days), 20),
+                    prefer_ib=True,
+                    ib_use_rth=False,
+                    ib_what_to_show="TRADES",
+                    ib_max_retries=2,
+                    ib_pause_ms=150,
+                )
+
+        await asyncio.gather(*[_warm_one(sym) for sym in target_symbols])
+
+    missing = [
+        sym for sym in symbols
+        if not _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)
+    ]
+    if missing:
+        await _warm_symbols(missing, data_source)
+
+    still_missing = [
+        sym for sym in symbols
+        if not _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)
+    ]
+    if still_missing and data_source != "yfinance":
+        # Force a second pass against Yahoo for symbols that still have gaps.
+        # This handles cases where IB is technically connected but not serving
+        # historical bars for the current host/session.
+        await _warm_symbols(still_missing, "yfinance")
+        still_missing = [
+            sym for sym in symbols
+            if not _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)
+        ]
+
+    if still_missing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Intraday cache does not cover the requested backtest range for: "
+                + ", ".join(still_missing)
+                + ". Existing local cache was checked first, then internet fallback (Yahoo) was attempted. "
+                + "Coverage is still insufficient for the requested range."
+            ),
+        )
+
+
 def _bars_per_year_from_interval(interval: str | None) -> float:
     """Map interval strings to trading bars per year for Sharpe scaling."""
     interval_key = (interval or "1d").strip().lower()
@@ -827,10 +944,15 @@ async def run_sandbox_backtest_endpoint(
             detail="No watchlist symbols found in sandbox. Add positions or pass `symbols`.",
         )
 
+    if req.day_trade:
+        await _ensure_watchlist_intraday_cache(symbols, req.start_date, req.end_date, req.data_source)
+
     pm = get_manager_settings()
     sentiment_strategies, sentiment_strategy_source = _resolve_backtest_sentiment_strategies(pm)
     stop_loss_pct = float(pm.get("stop_loss_pct") or 0.0)
     take_profit_pct = float(pm.get("take_profit_pct") or 0.0)
+    stop_loss_value = float(pm.get("stop_loss_value") or 0.0)
+    take_profit_value = float(pm.get("take_profit_value") or 0.0)
     hold_overnight = bool(pm.get("hold_positions_overnight", True))
     eod_window = int(pm.get("eod_sell_window_minutes") or 30)
     sentiment_warmup = int(pm.get("sentiment_data_points") or 35)
@@ -838,6 +960,9 @@ async def run_sandbox_backtest_endpoint(
     sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 70.0) or 0.0)
     pending_drift_cancel = float(pm.get("pending_price_drift_cancel_pct", 0.75) or 0.0)
     pending_cancel_after_bars = int(max(1, pm.get("pending_cancel_after_bars", 3) or 3))
+    default_strategy_name = str(pm.get("default_strategy_name") or "template:intraday_1m_regime_template.py")
+    intraday_1m_template_params = pm.get("intraday_1m_template_params") if isinstance(pm.get("intraday_1m_template_params"), dict) else {}
+    position_overrides = pm.get("position_overrides") if isinstance(pm.get("position_overrides"), dict) else {}
     if req.sim_buy_fill_rate_pct is not None:
         sim_buy_fill_rate = float(req.sim_buy_fill_rate_pct)
     if req.sim_sell_fill_rate_pct is not None:
@@ -848,6 +973,8 @@ async def run_sandbox_backtest_endpoint(
         "effective_sentiment_strategies": sentiment_strategies,
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
+        "stop_loss_value": stop_loss_value,
+        "take_profit_value": take_profit_value,
         "hold_positions_overnight": hold_overnight,
         "eod_sell_window_minutes": eod_window,
         "sentiment_strategies": sentiment_strategies,
@@ -856,6 +983,9 @@ async def run_sandbox_backtest_endpoint(
         "sim_sell_fill_rate_pct": sim_sell_fill_rate,
         "pending_price_drift_cancel_pct": pending_drift_cancel,
         "pending_cancel_after_bars": pending_cancel_after_bars,
+        "default_strategy_name": default_strategy_name,
+        "intraday_1m_template_params": intraday_1m_template_params,
+        "position_overrides": position_overrides,
     })
 
     # Capital split.
@@ -958,18 +1088,37 @@ async def run_sandbox_backtest_endpoint(
                 kind, sid, tfn = _classify_strategy(
                     getattr(by_symbol.get(s), "strategy_name", None)
                 )
+                sym_override = position_overrides.get(s, {}) if isinstance(position_overrides, dict) else {}
+                override_strategy = str(sym_override.get("strategy_name") or "").strip() if isinstance(sym_override, dict) else ""
+                if override_strategy:
+                    kind, sid, tfn = _classify_strategy(override_strategy)
                 if kind == "custom" and sid is not None and sid in custom_scripts:
                     fixed_strategy = f"custom:{sid}"
                 elif kind == "template" and tfn and tfn in template_filenames:
                     fixed_strategy = f"template:{tfn}"
                 else:
-                    fixed_strategy = getattr(by_symbol.get(s), "strategy_name", None) or "sma_crossover"
+                    fixed_strategy = override_strategy or getattr(by_symbol.get(s), "strategy_name", None) or default_strategy_name or "sma_crossover"
+                if fixed_strategy == "":
+                    fixed_strategy = default_strategy_name or "sma_crossover"
+                sl_pct_eff = stop_loss_pct
+                tp_pct_eff = take_profit_pct
+                sl_value_eff = stop_loss_value
+                tp_value_eff = take_profit_value
+                if isinstance(sym_override, dict):
+                    sl_pct_eff = float(sym_override.get("stop_loss_pct", sl_pct_eff) or 0.0)
+                    tp_pct_eff = float(sym_override.get("take_profit_pct", tp_pct_eff) or 0.0)
+                    sl_value_eff = float(sym_override.get("stop_loss_value", sl_value_eff) or 0.0)
+                    tp_value_eff = float(sym_override.get("take_profit_value", tp_value_eff) or 0.0)
             specs.append({
                 "symbol": s,
                 "routing": routing,
                 "fixed_strategy": fixed_strategy,
                 "min_alloc": min_alloc_by_symbol.get(s, 0.0),
                 "max_alloc": max_alloc_each,
+                "stop_loss_pct": sl_pct_eff if not req.use_sentiment_routing else stop_loss_pct,
+                "take_profit_pct": tp_pct_eff if not req.use_sentiment_routing else take_profit_pct,
+                "stop_loss_value": sl_value_eff if not req.use_sentiment_routing else stop_loss_value,
+                "take_profit_value": tp_value_eff if not req.use_sentiment_routing else take_profit_value,
             })
 
         try:
@@ -987,12 +1136,15 @@ async def run_sandbox_backtest_endpoint(
                 custom_scripts=custom_scripts or None,
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
+                stop_loss_value=stop_loss_value,
+                take_profit_value=take_profit_value,
                 hold_positions_overnight=hold_overnight,
                 eod_sell_window_minutes=eod_window,
                 sim_buy_fill_rate_pct=sim_buy_fill_rate,
                 sim_sell_fill_rate_pct=sim_sell_fill_rate,
                 pending_price_drift_cancel_pct=pending_drift_cancel,
                 sim_pending_duration_bars=pending_cancel_after_bars,
+                intraday_1m_template_params=intraday_1m_template_params,
             )
         except Exception as exc:
             logger.exception("Sandbox shared-pool backtest failed")

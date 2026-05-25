@@ -270,6 +270,19 @@ function buildDefaultSentimentMatrix(marketStrategies) {
 }
 
 function buildDraftFromSettings(settings) {
+  const stopLossPct = Number(settings.stop_loss_pct ?? 0.5)
+  const takeProfitPct = Number(settings.take_profit_pct ?? 1.25)
+  const stopLossValue = Number(settings.stop_loss_value ?? 0)
+  const takeProfitValue = Number(settings.take_profit_value ?? 0)
+  const pctRiskActive = stopLossPct > 0 || takeProfitPct > 0
+  const valueRiskActive = stopLossValue > 0 || takeProfitValue > 0
+  const aiLongTpPct = Number(settings.ai_tag_long_tp_pct ?? 0)
+  const aiLongSlPct = Number(settings.ai_tag_long_sl_pct ?? 0)
+  const aiLongTpValue = Number(settings.ai_tag_long_tp_value ?? 0)
+  const aiLongSlValue = Number(settings.ai_tag_long_sl_value ?? 0)
+  const aiLongPctActive = aiLongTpPct > 0 || aiLongSlPct > 0
+  const aiLongValueActive = aiLongTpValue > 0 || aiLongSlValue > 0
+
   return {
     transfer_pct: Math.round(settings.transfer_pct * 100),
     transfer_interval_s: settings.transfer_interval_s,
@@ -284,8 +297,22 @@ function buildDraftFromSettings(settings) {
     reallocation_mode: settings.reallocation_mode ?? 'to_stock',
     allow_buy_outside_allocation: settings.allow_buy_outside_allocation ?? false,
     sentiment_strategy_enabled: settings.sentiment_strategy_enabled ?? true,
-    stop_loss_pct: settings.stop_loss_pct ?? 0.5,
-    take_profit_pct: settings.take_profit_pct ?? 1.25,
+    risk_exit_mode: valueRiskActive && !pctRiskActive ? 'value' : 'percent',
+    stop_loss_pct: stopLossPct,
+    take_profit_pct: takeProfitPct,
+    stop_loss_value: stopLossValue,
+    take_profit_value: takeProfitValue,
+    default_strategy_name: settings.default_strategy_name ?? INTRADAY_1M_TEMPLATE,
+    intraday_1m_template_params: {
+      orb_bars: Number(settings.intraday_1m_template_params?.orb_bars ?? 5),
+      cooldown_bars: Number(settings.intraday_1m_template_params?.cooldown_bars ?? 1),
+      max_hold_bars: Number(settings.intraday_1m_template_params?.max_hold_bars ?? 20),
+      atr_sl_mult: Number(settings.intraday_1m_template_params?.atr_sl_mult ?? 1.5),
+      atr_tp_mult: Number(settings.intraday_1m_template_params?.atr_tp_mult ?? 2.0),
+      numeric_sl_value: Number(settings.intraday_1m_template_params?.numeric_sl_value ?? 0),
+      numeric_tp_value: Number(settings.intraday_1m_template_params?.numeric_tp_value ?? 0),
+    },
+    position_overrides: settings.position_overrides ?? {},
     hold_positions_overnight: settings.hold_positions_overnight ?? false,
     eod_engine_shutoff_minutes_before_sell: settings.eod_engine_shutoff_minutes_before_sell ?? 120,
     eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 5,
@@ -302,10 +329,14 @@ function buildDraftFromSettings(settings) {
     ai_tag_allow_overnight: settings.ai_tag_allow_overnight ?? true,
     ai_external_sentiment_weight: Math.max(0, Math.min(1, Number(settings.ai_external_sentiment_weight ?? 0))),
     ai_tag_long_engine_off: settings.ai_tag_long_engine_off ?? true,
-    ai_tag_long_tp_pct: settings.ai_tag_long_tp_pct ?? 0,
-    ai_tag_long_sl_pct: settings.ai_tag_long_sl_pct ?? 0,
+    ai_long_exit_mode: aiLongValueActive && !aiLongPctActive ? 'value' : 'percent',
+    ai_tag_long_tp_pct: aiLongTpPct,
+    ai_tag_long_sl_pct: aiLongSlPct,
+    ai_tag_long_tp_value: aiLongTpValue,
+    ai_tag_long_sl_value: aiLongSlValue,
     ai_tag_no_loss_sell: settings.ai_tag_no_loss_sell ?? true,
     pm_hold_duration_days: settings.pm_hold_duration_days ?? 1,
+    pm_hold_duration_bars: settings.pm_hold_duration_bars ?? 20,
     pm_hold_extended_multiplier: settings.pm_hold_extended_multiplier ?? 2.0,
     pm_hold_trailing_pct: settings.pm_hold_trailing_pct ?? 3.0,
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.25,
@@ -530,7 +561,7 @@ function buildImportDraft(baseSettings, imported) {
   return candidate
 }
 
-function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOptions, scripts, templates }) {
+function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOptions, scripts, templates, aiColumns = AI_TAG_BUCKETS, headerLabel = 'PM ↓ / AI →' }) {
   function updateCell(pm, ai, newVal) {
     updateDraft(d => ({
       ...d,
@@ -556,18 +587,16 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
       <table className="w-full table-fixed border-collapse text-[10px] leading-tight">
         <colgroup>
           <col className="w-[96px]" />
-          <col className="w-[calc((100%-96px)/5)]" />
-          <col className="w-[calc((100%-96px)/5)]" />
-          <col className="w-[calc((100%-96px)/5)]" />
-          <col className="w-[calc((100%-96px)/5)]" />
-          <col className="w-[calc((100%-96px)/5)]" />
+          {aiColumns.map(ai => (
+            <col key={ai} className="w-[calc((100%-96px)/5)]" />
+          ))}
         </colgroup>
         <thead>
           <tr>
             <th className="px-2 py-1 text-left font-semibold text-slate-500 uppercase tracking-wide border-b border-r border-dark-600 bg-dark-800 whitespace-nowrap">
-              PM ↓ / AI →
+              {headerLabel}
             </th>
-            {AI_TAG_BUCKETS.map(ai => (
+            {aiColumns.map(ai => (
               <th
                 key={ai}
                 className="px-1.5 py-1 text-center font-semibold border-b border-r border-dark-600 bg-dark-800 last:border-r-0 whitespace-nowrap"
@@ -587,7 +616,7 @@ function SentimentMatrixTable({ draft, updateDraft, editSettings, strategyOption
               >
                 {SENTIMENT_LABELS[pm]}
               </td>
-              {AI_TAG_BUCKETS.map(ai => {
+              {aiColumns.map(ai => {
                 const val = draft.sentiment_matrix_strategies?.[pm]?.[ai] ?? DEFAULT_SENTIMENT_MATRIX[pm]?.[ai] ?? DEFAULT_SENTIMENT_STRATEGIES[pm]
                 const rawAction = draft.sentiment_matrix_actions?.[pm]?.[ai] ?? DEFAULT_SENTIMENT_MATRIX_ACTIONS[pm]?.[ai] ?? 'trade'
                 const { base: actionBase, variant: actionVariant } = splitCellAction(rawAction)
@@ -739,7 +768,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [sentimentError, setSentimentError] = useState(null)
   const [importNotice, setImportNotice] = useState(null)
   const [presetNotice, setPresetNotice] = useState(null)
-  const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false })
+  const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false, pmValues: false })
   const activePresets = presetStore[activeProfile] ?? []
   const launchDefaultPresetId = defaultPresetByProfile[activeProfile] ?? ''
   const selectedPreset = activePresets.find(p => p.id === selectedPresetId) ?? null
@@ -1011,6 +1040,17 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       setSentimentError('Select a specific script or template for every sentiment bucket before saving.')
       return
     }
+    const riskExitMode = draft.risk_exit_mode === 'value' ? 'value' : 'percent'
+    const stopLossPct = riskExitMode === 'percent' ? Number(draft.stop_loss_pct) : 0
+    const takeProfitPct = riskExitMode === 'percent' ? Number(draft.take_profit_pct) : 0
+    const stopLossValue = riskExitMode === 'value' ? Number(draft.stop_loss_value) : 0
+    const takeProfitValue = riskExitMode === 'value' ? Number(draft.take_profit_value) : 0
+    const aiLongExitMode = draft.ai_long_exit_mode === 'value' ? 'value' : 'percent'
+    const aiLongTpPct = aiLongExitMode === 'percent' ? Number(draft.ai_tag_long_tp_pct) : 0
+    const aiLongSlPct = aiLongExitMode === 'percent' ? Number(draft.ai_tag_long_sl_pct) : 0
+    const aiLongTpValue = aiLongExitMode === 'value' ? Number(draft.ai_tag_long_tp_value) : 0
+    const aiLongSlValue = aiLongExitMode === 'value' ? Number(draft.ai_tag_long_sl_value) : 0
+
     setSentimentError(null)
     setImportNotice(null)
     setPresetNotice(null)
@@ -1028,8 +1068,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       reallocation_mode: draft.reallocation_mode,
       allow_buy_outside_allocation: draft.allow_buy_outside_allocation,
       sentiment_strategy_enabled: draft.sentiment_strategy_enabled,
-      stop_loss_pct: Number(draft.stop_loss_pct),
-      take_profit_pct: Number(draft.take_profit_pct),
+      stop_loss_pct: stopLossPct,
+      take_profit_pct: takeProfitPct,
+      stop_loss_value: stopLossValue,
+      take_profit_value: takeProfitValue,
       hold_positions_overnight: draft.hold_positions_overnight,
       eod_engine_shutoff_minutes_before_sell: Number(draft.eod_engine_shutoff_minutes_before_sell),
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
@@ -1043,10 +1085,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       ai_tag_allow_overnight: draft.ai_tag_allow_overnight,
       ai_external_sentiment_weight: Math.max(0, Math.min(1, Number(draft.ai_external_sentiment_weight ?? 0))),
       ai_tag_long_engine_off: draft.ai_tag_long_engine_off,
-      ai_tag_long_tp_pct: Number(draft.ai_tag_long_tp_pct),
-      ai_tag_long_sl_pct: Number(draft.ai_tag_long_sl_pct),
+      ai_tag_long_tp_pct: aiLongTpPct,
+      ai_tag_long_sl_pct: aiLongSlPct,
+      ai_tag_long_tp_value: aiLongTpValue,
+      ai_tag_long_sl_value: aiLongSlValue,
       ai_tag_no_loss_sell: draft.ai_tag_no_loss_sell,
       pm_hold_duration_days: Math.max(0, Math.floor(Number(draft.pm_hold_duration_days ?? 1) || 0)),
+      pm_hold_duration_bars: Math.max(0, Math.floor(Number(draft.pm_hold_duration_bars ?? 20) || 0)),
       pm_hold_extended_multiplier: Math.max(0, Number(draft.pm_hold_extended_multiplier ?? 2.0) || 0),
       pm_hold_trailing_pct: Math.max(0, Number(draft.pm_hold_trailing_pct ?? 3.0) || 0),
       pending_price_drift_cancel_pct: Number(draft.pending_price_drift_cancel_pct),
@@ -1055,6 +1100,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       sim_sell_fill_rate_pct: Number(draft.sim_sell_fill_rate_pct),
       auto_trade_buy_price_offset_pct: Number(draft.auto_trade_buy_price_offset_pct),
       auto_trade_sell_price_offset_pct: Number(draft.auto_trade_sell_price_offset_pct),
+      default_strategy_name: draft.default_strategy_name,
+      intraday_1m_template_params: draft.intraday_1m_template_params ?? {},
+      position_overrides: draft.position_overrides ?? {},
       sentiment_matrix_strategies: sanitizeSentimentMatrix(draft.sentiment_matrix_strategies),
       sentiment_matrix_actions: draft.sentiment_matrix_actions ?? {},
     })
@@ -1444,7 +1492,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
-          Risk exits: SL {Number(settings.stop_loss_pct ?? 0.5).toFixed(1)}% | TP {Number(settings.take_profit_pct ?? 1.25).toFixed(1)}%
+          {((Number(settings.stop_loss_value ?? 0) > 0) || (Number(settings.take_profit_value ?? 0) > 0))
+            ? `Risk exits ($): SL $${Number(settings.stop_loss_value ?? 0).toFixed(2)} | TP $${Number(settings.take_profit_value ?? 0).toFixed(2)}`
+            : `Risk exits (%): SL ${Number(settings.stop_loss_pct ?? 0).toFixed(1)}% | TP ${Number(settings.take_profit_pct ?? 0).toFixed(1)}%`}
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
@@ -1597,6 +1647,107 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             ))}
           </div>
         </div>
+      )}
+
+      {/* Current PM Values (Collapsed Read-Only) */}
+      {draft && (
+        <CollapsibleSection
+          title="Current PM Values"
+          badge="Read-only"
+          isOpen={openSections.pmValues}
+          onToggle={() => toggleSection('pmValues')}
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            {Number(settings.transfer_pct ?? 0.5) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Transfer %:</span>
+                <span className="ml-2 font-mono text-slate-300">{Math.round((settings.transfer_pct ?? 0.5) * 100)}%</span>
+              </div>
+            )}
+            <div className="bg-dark-700/50 rounded px-2 py-1.5">
+              <span className="text-slate-500">Transfer interval:</span>
+              <span className="ml-2 font-mono text-slate-300">{settings.transfer_interval_s ?? 300}s</span>
+            </div>
+            <div className="bg-dark-700/50 rounded px-2 py-1.5">
+              <span className="text-slate-500">Score refresh:</span>
+              <span className="ml-2 font-mono text-slate-300">{settings.indicator_interval_s ?? 120}s</span>
+            </div>
+            {Number(settings.min_position_funds ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Min position:</span>
+                <span className="ml-2 font-mono text-slate-300">
+                  {(settings.min_position_funds_mode ?? 'dollar') === 'percent'
+                    ? `${settings.min_position_funds_pct ?? 1}%`
+                    : `$${Number(settings.min_position_funds).toFixed(2)}`}
+                </span>
+              </div>
+            )}
+            {(settings.deploy_available_funds ?? false) && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Deploy to:</span>
+                <span className="ml-2 font-mono text-violet-300">{settings.deploy_target ?? 'most_bearish'}</span>
+              </div>
+            )}
+            {Number(settings.stop_loss_pct ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Stop loss:</span>
+                <span className="ml-2 font-mono text-slate-300">{Number(settings.stop_loss_pct).toFixed(2)}%</span>
+              </div>
+            )}
+            {Number(settings.take_profit_pct ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Take profit:</span>
+                <span className="ml-2 font-mono text-slate-300">{Number(settings.take_profit_pct).toFixed(2)}%</span>
+              </div>
+            )}
+            {Number(settings.eod_engine_shutoff_minutes_before_sell ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">EOD shutoff:</span>
+                <span className="ml-2 font-mono text-slate-300">{settings.eod_engine_shutoff_minutes_before_sell}min</span>
+              </div>
+            )}
+            {Number(settings.eod_sell_window_minutes ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">EOD sell window:</span>
+                <span className="ml-2 font-mono text-slate-300">{settings.eod_sell_window_minutes}min</span>
+              </div>
+            )}
+            {Number(settings.pending_cancel_after_bars ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Pending cancel:</span>
+                <span className="ml-2 font-mono text-slate-300">{settings.pending_cancel_after_bars} bars</span>
+              </div>
+            )}
+            <div className="bg-dark-700/50 rounded px-2 py-1.5">
+              <span className="text-slate-500">Sentiment window:</span>
+              <span className="ml-2 font-mono text-slate-300">{settings.sentiment_data_points ?? 10} bars</span>
+            </div>
+            <div className="bg-dark-700/50 rounded px-2 py-1.5">
+              <span className="text-slate-500">Sentiment interval:</span>
+              <span className="ml-2 font-mono text-slate-300">{settings.sentiment_interval ?? '1m'}</span>
+            </div>
+            <div className="bg-dark-700/50 rounded px-2 py-1.5">
+              <span className="text-slate-500">Sentiment lookback:</span>
+              <span className="ml-2 font-mono text-slate-300">{settings.sentiment_lookback_days ?? 5}d</span>
+            </div>
+            <div className="bg-dark-700/50 rounded px-2 py-1.5">
+              <span className="text-slate-500">Sentiment debounce:</span>
+              <span className="ml-2 font-mono text-slate-300">{settings.sentiment_bucket_persistence ?? 3} bars</span>
+            </div>
+            {Number(settings.sim_buy_fill_rate_pct ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Buy fill rate:</span>
+                <span className="ml-2 font-mono text-slate-300">{Number(settings.sim_buy_fill_rate_pct).toFixed(0)}%</span>
+              </div>
+            )}
+            {Number(settings.sim_sell_fill_rate_pct ?? 0) > 0 && (
+              <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                <span className="text-slate-500">Sell fill rate:</span>
+                <span className="ml-2 font-mono text-slate-300">{Number(settings.sim_sell_fill_rate_pct).toFixed(0)}%</span>
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
       )}
 
       {/* Inline settings */}
@@ -2031,10 +2182,43 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 </div>
               </SettingRow>
 
-              {!draft.ai_sentiment_change_enabled ? (
-                <div className="text-xs text-slate-500">AI sentiment changes are disabled. Matrix configuration is preserved but not actively applied by PM.</div>
-              ) : (
-                <>
+              <SettingRow
+                label="Intraday 1m Template Tunables"
+                hint="These parameters are injected into template:intraday_1m_regime_template.py for PM engine and sandbox backtests."
+              >
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  {[
+                    ['orb_bars', 'ORB Bars'],
+                    ['cooldown_bars', 'Cooldown Bars'],
+                    ['max_hold_bars', 'Max Hold Bars'],
+                    ['atr_sl_mult', 'ATR SL Mult'],
+                    ['atr_tp_mult', 'ATR TP Mult'],
+                    ['numeric_sl_value', 'Numeric SL $'],
+                    ['numeric_tp_value', 'Numeric TP $'],
+                  ].map(([key, label]) => (
+                    <label key={key} className="flex items-center gap-1 text-xs text-slate-300">
+                      <span className="w-28 text-slate-500">{label}</span>
+                      <input
+                        type="number"
+                        step={key.includes('mult') ? 0.1 : 1}
+                        min={0}
+                        disabled={!editSettings}
+                        className="input w-24 text-xs py-1"
+                        value={draft.intraday_1m_template_params?.[key] ?? 0}
+                        onChange={e => updateDraft(d => ({
+                          ...d,
+                          intraday_1m_template_params: {
+                            ...(d.intraday_1m_template_params ?? {}),
+                            [key]: Number(e.target.value),
+                          },
+                        }))}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </SettingRow>
+
+              <>
                   <SettingRow
                     label="Allow Overnight for Long Tags"
                     hint="LONG/STRONG LONG positions are exempt from end-of-day liquidation. In Direct mode the PM position stays open; in Strategy Override mode the engine skips EOD sell for these positions."
@@ -2053,38 +2237,81 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     </label>
                   </SettingRow>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <SettingRow
-                      label="Long Take Profit %"
-                      hint="Sell when price rises this % above avg cost. 0 = disabled."
-                    >
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="number" min={0} max={100} step={0.1}
+                  <SettingRow
+                    label="Long Hold Exits"
+                    hint="Choose one mode; inactive fields are saved as 0."
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="inline-flex rounded-md border border-dark-600 overflow-hidden shrink-0">
+                        <button
+                          type="button"
                           disabled={!editSettings}
-                          value={draft.ai_tag_long_tp_pct}
-                          onChange={e => updateDraft(d => ({ ...d, ai_tag_long_tp_pct: e.target.value }))}
+                          onClick={() => editSettings && updateDraft(d => ({ ...d, ai_long_exit_mode: 'percent' }))}
+                          className={`px-2.5 py-1 text-xs transition-colors ${
+                            (draft.ai_long_exit_mode ?? 'percent') === 'percent'
+                              ? 'bg-violet-600 text-white'
+                              : 'bg-dark-700 text-slate-300 hover:bg-dark-600'
+                          }`}
+                        >
+                          %
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!editSettings}
+                          onClick={() => editSettings && updateDraft(d => ({ ...d, ai_long_exit_mode: 'value' }))}
+                          className={`px-2.5 py-1 text-xs transition-colors border-l border-dark-600 ${
+                            (draft.ai_long_exit_mode ?? 'percent') === 'value'
+                              ? 'bg-violet-600 text-white'
+                              : 'bg-dark-700 text-slate-300 hover:bg-dark-600'
+                          }`}
+                        >
+                          $
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">SL</span>
+                        {(draft.ai_long_exit_mode ?? 'percent') === 'value' && <span className="text-slate-400 text-sm">$</span>}
+                        <input
+                          type="number"
+                          min={0}
+                          max={(draft.ai_long_exit_mode ?? 'percent') === 'value' ? 10000 : 100}
+                          step={(draft.ai_long_exit_mode ?? 'percent') === 'value' ? 0.01 : 0.1}
+                          disabled={!editSettings}
+                          value={(draft.ai_long_exit_mode ?? 'percent') === 'value' ? draft.ai_tag_long_sl_value : draft.ai_tag_long_sl_pct}
+                          onChange={e => updateDraft(d => ({
+                            ...d,
+                            ...(d.ai_long_exit_mode ?? 'percent') === 'value'
+                              ? { ai_tag_long_sl_value: e.target.value }
+                              : { ai_tag_long_sl_pct: e.target.value },
+                          }))}
                           className="input w-24 text-sm py-1.5"
                         />
-                        <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_tp_pct) > 0 ? '' : ' (off)'}</span>
+                        {(draft.ai_long_exit_mode ?? 'percent') !== 'value' && <span className="text-slate-400 text-sm">%</span>}
                       </div>
-                    </SettingRow>
-                    <SettingRow
-                      label="Long Stop Loss %"
-                      hint="Sell when price drops this % below avg cost. 0 = disabled."
-                    >
+
                       <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">TP</span>
+                        {(draft.ai_long_exit_mode ?? 'percent') === 'value' && <span className="text-slate-400 text-sm">$</span>}
                         <input
-                          type="number" min={0} max={100} step={0.1}
+                          type="number"
+                          min={0}
+                          max={(draft.ai_long_exit_mode ?? 'percent') === 'value' ? 10000 : 100}
+                          step={(draft.ai_long_exit_mode ?? 'percent') === 'value' ? 0.01 : 0.1}
                           disabled={!editSettings}
-                          value={draft.ai_tag_long_sl_pct}
-                          onChange={e => updateDraft(d => ({ ...d, ai_tag_long_sl_pct: e.target.value }))}
+                          value={(draft.ai_long_exit_mode ?? 'percent') === 'value' ? draft.ai_tag_long_tp_value : draft.ai_tag_long_tp_pct}
+                          onChange={e => updateDraft(d => ({
+                            ...d,
+                            ...(d.ai_long_exit_mode ?? 'percent') === 'value'
+                              ? { ai_tag_long_tp_value: e.target.value }
+                              : { ai_tag_long_tp_pct: e.target.value },
+                          }))}
                           className="input w-24 text-sm py-1.5"
                         />
-                        <span className="text-slate-400 text-sm">%{Number(draft.ai_tag_long_sl_pct) > 0 ? '' : ' (off)'}</span>
+                        {(draft.ai_long_exit_mode ?? 'percent') !== 'value' && <span className="text-slate-400 text-sm">%</span>}
                       </div>
-                    </SettingRow>
-                  </div>
+                    </div>
+                  </SettingRow>
 
                   <SettingRow
                     label="No-Loss AI Sell Guard"
@@ -2105,66 +2332,62 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   </SettingRow>
 
                   <SettingRow
-                    label="Pending Price Drift Cancel %"
-                    hint="Cancel pending BUY orders when market price drifts from the pending fill/limit by at least this percentage."
+                    label="Pending Order Controls"
+                    hint="Drift threshold and max bars before auto-cancel."
                   >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={100} step={0.05}
-                        disabled={!editSettings}
-                        value={draft.pending_price_drift_cancel_pct}
-                        onChange={e => updateDraft(d => ({ ...d, pending_price_drift_cancel_pct: e.target.value }))}
-                        className="input w-28 text-sm py-1.5"
-                      />
-                      <span className="text-slate-400 text-sm">%</span>
+                    <div className="flex items-center gap-4 flex-wrap">
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">Drift</span>
+                        <input
+                          type="number" min={0} max={100} step={0.05}
+                          disabled={!editSettings}
+                          value={draft.pending_price_drift_cancel_pct}
+                          onChange={e => updateDraft(d => ({ ...d, pending_price_drift_cancel_pct: e.target.value }))}
+                          className="input w-24 text-sm py-1.5"
+                        />
+                        <span className="text-slate-400 text-sm">%</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">Timeout</span>
+                        <input
+                          type="number" min={1} max={120} step={1}
+                          disabled={!editSettings}
+                          value={draft.pending_cancel_after_bars}
+                          onChange={e => updateDraft(d => ({ ...d, pending_cancel_after_bars: e.target.value }))}
+                          className="input w-24 text-sm py-1.5"
+                        />
+                        <span className="text-slate-400 text-sm">bars</span>
+                      </div>
                     </div>
                   </SettingRow>
 
                   <SettingRow
-                    label="Pending Cancel Timeout (bars)"
-                    hint="Cancel pending orders that remain unfilled after this many bars in the selected sentiment interval."
+                    label="Simulated Fill Rates"
+                    hint="Per-bar fill probability while order stays in range."
                   >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={1} max={120} step={1}
-                        disabled={!editSettings}
-                        value={draft.pending_cancel_after_bars}
-                        onChange={e => updateDraft(d => ({ ...d, pending_cancel_after_bars: e.target.value }))}
-                        className="input w-28 text-sm py-1.5"
-                      />
-                      <span className="text-slate-400 text-sm">bars</span>
-                    </div>
-                  </SettingRow>
-
-                  <SettingRow
-                    label="Sim BUY Fill Rate %"
-                    hint="For simulated/backtest pending BUY orders: when price is still within drift range, this is the per-bar probability of filling. 100 = always fill, 0 = never fill."
-                  >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={100} step={1}
-                        disabled={!editSettings}
-                        value={draft.sim_buy_fill_rate_pct}
-                        onChange={e => updateDraft(d => ({ ...d, sim_buy_fill_rate_pct: e.target.value }))}
-                        className="input w-28 text-sm py-1.5"
-                      />
-                      <span className="text-slate-400 text-sm">%</span>
-                    </div>
-                  </SettingRow>
-
-                  <SettingRow
-                    label="Sim SELL Fill Rate %"
-                    hint="For simulated/backtest pending SELL orders: when price is still within drift range, this is the per-bar probability of filling. 100 = always fill, 0 = never fill."
-                  >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={100} step={1}
-                        disabled={!editSettings}
-                        value={draft.sim_sell_fill_rate_pct}
-                        onChange={e => updateDraft(d => ({ ...d, sim_sell_fill_rate_pct: e.target.value }))}
-                        className="input w-28 text-sm py-1.5"
-                      />
-                      <span className="text-slate-400 text-sm">%</span>
+                    <div className="flex items-center gap-4 flex-wrap">
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">BUY</span>
+                        <input
+                          type="number" min={0} max={100} step={1}
+                          disabled={!editSettings}
+                          value={draft.sim_buy_fill_rate_pct}
+                          onChange={e => updateDraft(d => ({ ...d, sim_buy_fill_rate_pct: e.target.value }))}
+                          className="input w-24 text-sm py-1.5"
+                        />
+                        <span className="text-slate-400 text-sm">%</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">SELL</span>
+                        <input
+                          type="number" min={0} max={100} step={1}
+                          disabled={!editSettings}
+                          value={draft.sim_sell_fill_rate_pct}
+                          onChange={e => updateDraft(d => ({ ...d, sim_sell_fill_rate_pct: e.target.value }))}
+                          className="input w-24 text-sm py-1.5"
+                        />
+                        <span className="text-slate-400 text-sm">%</span>
+                      </div>
                     </div>
                   </SettingRow>
 
@@ -2187,134 +2410,280 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     </SettingRow>
 
                   <SettingRow
-                    label="Buy & Hold Duration (days)"
-                    hint="Maximum number of days a matrix `Buy & Hold` position is held before PM auto-sells and re-enables the engine. 0 = no limit. Day-trade default = 1 (closes by next session); use 2–5 for short swing holds."
+                    label="Advanced Hold Controls"
+                    hint="Bars, duration multiplier, and trailing stop."
                   >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={3650} step={1}
-                        disabled={!editSettings}
-                        value={draft.pm_hold_duration_days ?? 1}
-                        onChange={(e) => updateDraft(d => ({ ...d, pm_hold_duration_days: Math.max(0, Math.floor(Number(e.target.value) || 0)) }))}
-                        className="w-20 px-2 py-1 bg-dark-900 border border-dark-700 rounded text-xs text-slate-200 focus:border-violet-500 focus:outline-none disabled:opacity-50"
-                      />
-                      <span className="text-slate-400 text-xs">days</span>
+                    <div className="flex items-center gap-4 flex-wrap">
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">Bars</span>
+                        <input
+                          type="number" min={0} max={50000} step={1}
+                          disabled={!editSettings}
+                          value={draft.pm_hold_duration_bars ?? 20}
+                          onChange={(e) => updateDraft(d => ({ ...d, pm_hold_duration_bars: Math.max(0, Math.floor(Number(e.target.value) || 0)) }))}
+                          className="w-20 px-2 py-1 bg-dark-900 border border-dark-700 rounded text-xs text-slate-200 focus:border-violet-500 focus:outline-none disabled:opacity-50"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">Extend</span>
+                        <input
+                          type="number" min={0} max={20} step={0.5}
+                          disabled={!editSettings}
+                          value={draft.pm_hold_extended_multiplier ?? 2.0}
+                          onChange={(e) => updateDraft(d => ({ ...d, pm_hold_extended_multiplier: Math.max(0, Number(e.target.value) || 0) }))}
+                          className="w-20 px-2 py-1 bg-dark-900 border border-dark-700 rounded text-xs text-slate-200 focus:border-violet-500 focus:outline-none disabled:opacity-50"
+                        />
+                        <span className="text-slate-400 text-xs">x</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">Trail</span>
+                        <input
+                          type="number" min={0} max={50} step={0.1}
+                          disabled={!editSettings}
+                          value={draft.pm_hold_trailing_pct ?? 3.0}
+                          onChange={(e) => updateDraft(d => ({ ...d, pm_hold_trailing_pct: Math.max(0, Number(e.target.value) || 0) }))}
+                          className="w-20 px-2 py-1 bg-dark-900 border border-dark-700 rounded text-xs text-slate-200 focus:border-violet-500 focus:outline-none disabled:opacity-50"
+                        />
+                        <span className="text-slate-400 text-xs">%</span>
+                      </div>
                     </div>
+                  </SettingRow>
+              </>
+
+              {(draft.sentiment_strategy_enabled && draft.ai_sentiment_change_enabled) && (
+                <SettingRow
+                  label="Strategy & Action Matrix (5×5)"
+                  hint="Shown only when both Sentiment Strategy Switching and AI Sentiment Changes are enabled."
+                >
+                  <SentimentMatrixTable
+                    draft={draft}
+                    updateDraft={updateDraft}
+                    editSettings={editSettings}
+                    strategyOptions={strategyOptions}
+                    scripts={scripts}
+                    templates={templates}
+                  />
+                </SettingRow>
+              )}
+
+              {(draft.sentiment_strategy_enabled && !draft.ai_sentiment_change_enabled) && (
+                <SettingRow
+                  label="Sentiment Strategy Row (5 cells)"
+                  hint="AI sentiment is off, so each PM sentiment bucket uses one strategy/action cell (AI NEUTRAL column)."
+                >
+                  <SentimentMatrixTable
+                    draft={draft}
+                    updateDraft={updateDraft}
+                    editSettings={editSettings}
+                    strategyOptions={strategyOptions}
+                    scripts={scripts}
+                    templates={templates}
+                    aiColumns={['NEUTRAL']}
+                    headerLabel="PM ↓ / Strategy"
+                  />
+                </SettingRow>
+              )}
+
+              {!draft.sentiment_strategy_enabled && (
+                <>
+                  <SettingRow
+                    label="Default Strategy"
+                    hint="Sentiment strategy switching is off. PM falls back to this strategy unless a symbol override is provided below."
+                  >
+                    <select
+                      className="input text-sm py-1.5"
+                      disabled={!editSettings}
+                      value={draft.default_strategy_name ?? INTRADAY_1M_TEMPLATE}
+                      onChange={e => updateDraft(d => ({ ...d, default_strategy_name: e.target.value }))}
+                    >
+                      {strategyOptions.map(s => (
+                        <option key={s.type} value={s.type}>{s.type}</option>
+                      ))}
+                      {templates.map(t => (
+                        <option key={t.filename} value={`template:${t.filename}`}>📄 {t.name ?? t.filename}</option>
+                      ))}
+                    </select>
                   </SettingRow>
 
                   <SettingRow
-                    label="Advanced Hold — Extended Multiplier"
-                    hint="Applies to cells set to `Advanced Hold → ×N Extended Duration`. Effective duration = Buy & Hold Duration × this multiplier. Default 2× suits STRONG LONG signals; raise to 3–5× to let high-conviction winners run."
+                    label="Per-Position Overrides"
+                    hint="Override strategy / TP / SL / hold bars for individual symbols."
                   >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={20} step={0.5}
-                        disabled={!editSettings}
-                        value={draft.pm_hold_extended_multiplier ?? 2.0}
-                        onChange={(e) => updateDraft(d => ({ ...d, pm_hold_extended_multiplier: Math.max(0, Number(e.target.value) || 0) }))}
-                        className="w-20 px-2 py-1 bg-dark-900 border border-dark-700 rounded text-xs text-slate-200 focus:border-violet-500 focus:outline-none disabled:opacity-50"
-                      />
-                      <span className="text-slate-400 text-xs">×</span>
-                    </div>
-                  </SettingRow>
-
-                  <SettingRow
-                    label="Advanced Hold — Trailing Stop %"
-                    hint="Applies to cells set to `Advanced Hold → ↘ Trailing Stop`. PM tracks the peak price since hold entry and auto-sells when price drops this % from peak. Common range: 2–5% for day-trade momentum, 7–10% for swing trades."
-                  >
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number" min={0} max={50} step={0.1}
-                        disabled={!editSettings}
-                        value={draft.pm_hold_trailing_pct ?? 3.0}
-                        onChange={(e) => updateDraft(d => ({ ...d, pm_hold_trailing_pct: Math.max(0, Number(e.target.value) || 0) }))}
-                        className="w-20 px-2 py-1 bg-dark-900 border border-dark-700 rounded text-xs text-slate-200 focus:border-violet-500 focus:outline-none disabled:opacity-50"
-                      />
-                      <span className="text-slate-400 text-xs">%</span>
+                    <div className="overflow-x-auto rounded-md border border-dark-600">
+                      <table className="w-full text-xs">
+                        <thead className="bg-dark-800 text-slate-400">
+                          <tr>
+                            <th className="text-left px-2 py-1">Symbol</th>
+                            <th className="text-left px-2 py-1">Strategy</th>
+                            <th className="text-left px-2 py-1">SL %</th>
+                            <th className="text-left px-2 py-1">TP %</th>
+                            <th className="text-left px-2 py-1">SL $</th>
+                            <th className="text-left px-2 py-1">TP $</th>
+                            <th className="text-left px-2 py-1">Hold Bars</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.keys(scores).sort().map(sym => {
+                            const ov = draft.position_overrides?.[sym] ?? {}
+                            return (
+                              <tr key={sym} className="border-t border-dark-700">
+                                <td className="px-2 py-1 font-mono text-slate-200">{sym}</td>
+                                <td className="px-2 py-1">
+                                  <select
+                                    className="input text-xs py-1"
+                                    disabled={!editSettings}
+                                    value={ov.strategy_name ?? ''}
+                                    onChange={e => updateDraft(d => ({
+                                      ...d,
+                                      position_overrides: {
+                                        ...(d.position_overrides ?? {}),
+                                        [sym]: { ...(d.position_overrides?.[sym] ?? {}), strategy_name: e.target.value },
+                                      },
+                                    }))}
+                                  >
+                                    <option value="">(use default)</option>
+                                    {strategyOptions.map(s => (
+                                      <option key={s.type} value={s.type}>{s.type}</option>
+                                    ))}
+                                    {templates.map(t => (
+                                      <option key={t.filename} value={`template:${t.filename}`}>{t.name ?? t.filename}</option>
+                                    ))}
+                                  </select>
+                                </td>
+                                {['stop_loss_pct', 'take_profit_pct', 'stop_loss_value', 'take_profit_value', 'hold_duration_bars'].map(k => (
+                                  <td key={k} className="px-2 py-1">
+                                    <input
+                                      type="number"
+                                      className="input text-xs py-1 w-20"
+                                      disabled={!editSettings}
+                                      value={ov[k] ?? ''}
+                                      onChange={e => updateDraft(d => ({
+                                        ...d,
+                                        position_overrides: {
+                                          ...(d.position_overrides ?? {}),
+                                          [sym]: { ...(d.position_overrides?.[sym] ?? {}), [k]: e.target.value === '' ? 0 : Number(e.target.value) },
+                                        },
+                                      }))}
+                                    />
+                                  </td>
+                                ))}
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
                     </div>
                   </SettingRow>
                 </>
               )}
-
-              <SettingRow
-                label="Strategy & Action Matrix"
-                hint="Each cell defines the trading strategy (top) and engine action (bottom) for a PM sentiment row × AI tag column. Actions: ↺ Trade (normal), ⚓ Buy & Hold (timed hold), 🛡 Advanced Hold (per-cell exit policy: extended duration / until tag changes / trailing stop), ⏸ Engine Off (pause entries), ⚡ Force Sell (exit immediately), — Skip Cycle (no action)."
-              >
-                <SentimentMatrixTable
-                  draft={draft}
-                  updateDraft={updateDraft}
-                  editSettings={editSettings}
-                  strategyOptions={strategyOptions}
-                  scripts={scripts}
-                  templates={templates}
-                />
-              </SettingRow>
             </CollapsibleSection>
 
             {/* ── Risk & End of Day ── */}
             <CollapsibleSection
               title="Risk & End of Day"
-              badge={`SL ${Number(draft.stop_loss_pct) > 0 ? draft.stop_loss_pct + '%' : 'off'} · TP ${Number(draft.take_profit_pct) > 0 ? draft.take_profit_pct + '%' : 'off'} · ${draft.hold_positions_overnight ? 'overnight' : 'EOD sell'}`}
+              badge={`${(draft.risk_exit_mode ?? 'percent') === 'value' ? 'Dollar risk' : 'Percent risk'} · ${draft.hold_positions_overnight ? 'overnight' : 'EOD sell'}`}
               isOpen={openSections.risk}
               onToggle={() => toggleSection('risk')}
             >
               <SettingRow
-                label="Engine Stop-Loss % (0 = off)"
-                hint="Auto-sell when price drops this percent below average entry cost."
-              >
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" min={0} max={100} step={0.1}
-                    value={draft.stop_loss_pct}
-                    onChange={e => updateDraft(d => ({ ...d, stop_loss_pct: e.target.value }))}
-                    className="input w-28 text-sm py-1.5"
-                  />
-                  <span className="text-slate-400 text-sm">%</span>
-                </div>
-              </SettingRow>
-
-              <SettingRow
-                label="Engine Take-Profit % (0 = off)"
-                hint="Auto-sell when price rises this percent above average entry cost."
-              >
-                <div className="flex items-center gap-1">
-                  <input
-                    type="number" min={0} max={1000} step={0.1}
-                    value={draft.take_profit_pct}
-                    onChange={e => updateDraft(d => ({ ...d, take_profit_pct: e.target.value }))}
-                    className="input w-28 text-sm py-1.5"
-                  />
-                  <span className="text-slate-400 text-sm">%</span>
-                </div>
-              </SettingRow>
-
-              <SettingRow
-                label="Automated BUY Price Offset %"
-                hint="Automated trades only: BUY limit uses previous OHLC midpoint plus this percentage (default 0.01%)."
+                label="Risk Exits"
+                hint="Choose one mode; inactive fields are saved as 0."
               >
                 <div className="flex items-center gap-3">
-                  <input
-                    type="range" min={0} max={2} step={0.01}
-                    value={Number(draft.auto_trade_buy_price_offset_pct ?? 0.01)}
-                    onChange={e => updateDraft(d => ({ ...d, auto_trade_buy_price_offset_pct: Number(e.target.value) }))}
-                    className="flex-1 accent-violet-500"
-                  />
-                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}%</span>
+                  <div className="inline-flex rounded-md border border-dark-600 overflow-hidden shrink-0">
+                    <button
+                      type="button"
+                      disabled={!editSettings}
+                      onClick={() => editSettings && updateDraft(d => ({ ...d, risk_exit_mode: 'percent' }))}
+                      className={`px-2.5 py-1 text-xs transition-colors ${
+                        (draft.risk_exit_mode ?? 'percent') === 'percent'
+                          ? 'bg-violet-600 text-white'
+                          : 'bg-dark-700 text-slate-300 hover:bg-dark-600'
+                      }`}
+                    >
+                      %
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!editSettings}
+                      onClick={() => editSettings && updateDraft(d => ({ ...d, risk_exit_mode: 'value' }))}
+                      className={`px-2.5 py-1 text-xs transition-colors border-l border-dark-600 ${
+                        (draft.risk_exit_mode ?? 'percent') === 'value'
+                          ? 'bg-violet-600 text-white'
+                          : 'bg-dark-700 text-slate-300 hover:bg-dark-600'
+                      }`}
+                    >
+                      $
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-slate-400">SL</span>
+                    {(draft.risk_exit_mode ?? 'percent') === 'value' && <span className="text-slate-400 text-sm">$</span>}
+                    <input
+                      type="number"
+                      min={0}
+                      max={(draft.risk_exit_mode ?? 'percent') === 'value' ? 10000 : 100}
+                      step={(draft.risk_exit_mode ?? 'percent') === 'value' ? 0.01 : 0.1}
+                      value={(draft.risk_exit_mode ?? 'percent') === 'value' ? draft.stop_loss_value : draft.stop_loss_pct}
+                      onChange={e => updateDraft(d => ({
+                        ...d,
+                        ...(d.risk_exit_mode ?? 'percent') === 'value'
+                          ? { stop_loss_value: e.target.value }
+                          : { stop_loss_pct: e.target.value },
+                      }))}
+                      className="input w-24 text-sm py-1.5"
+                    />
+                    {(draft.risk_exit_mode ?? 'percent') !== 'value' && <span className="text-slate-400 text-sm">%</span>}
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-slate-400">TP</span>
+                    {(draft.risk_exit_mode ?? 'percent') === 'value' && <span className="text-slate-400 text-sm">$</span>}
+                    <input
+                      type="number"
+                      min={0}
+                      max={(draft.risk_exit_mode ?? 'percent') === 'value' ? 10000 : 1000}
+                      step={(draft.risk_exit_mode ?? 'percent') === 'value' ? 0.01 : 0.1}
+                      value={(draft.risk_exit_mode ?? 'percent') === 'value' ? draft.take_profit_value : draft.take_profit_pct}
+                      onChange={e => updateDraft(d => ({
+                        ...d,
+                        ...(d.risk_exit_mode ?? 'percent') === 'value'
+                          ? { take_profit_value: e.target.value }
+                          : { take_profit_pct: e.target.value },
+                      }))}
+                      className="input w-24 text-sm py-1.5"
+                    />
+                    {(draft.risk_exit_mode ?? 'percent') !== 'value' && <span className="text-slate-400 text-sm">%</span>}
+                  </div>
                 </div>
               </SettingRow>
 
               <SettingRow
-                label="Automated SELL Price Offset %"
-                hint="Automated trades only: SELL limit uses previous OHLC midpoint minus this percentage (default 0.01%)."
+                label="Automated Price Offsets"
+                hint="Offsets from previous OHLC midpoint."
               >
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range" min={0} max={2} step={0.01}
-                    value={Number(draft.auto_trade_sell_price_offset_pct ?? 0.01)}
-                    onChange={e => updateDraft(d => ({ ...d, auto_trade_sell_price_offset_pct: Number(e.target.value) }))}
-                    className="flex-1 accent-violet-500"
-                  />
-                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%</span>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 w-full">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-400 w-9">BUY</span>
+                    <input
+                      type="range" min={0} max={2} step={0.01}
+                      value={Number(draft.auto_trade_buy_price_offset_pct ?? 0.01)}
+                      onChange={e => updateDraft(d => ({ ...d, auto_trade_buy_price_offset_pct: Number(e.target.value) }))}
+                      className="flex-1 accent-violet-500"
+                    />
+                    <span className="w-14 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}%</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-400 w-9">SELL</span>
+                    <input
+                      type="range" min={0} max={2} step={0.01}
+                      value={Number(draft.auto_trade_sell_price_offset_pct ?? 0.01)}
+                      onChange={e => updateDraft(d => ({ ...d, auto_trade_sell_price_offset_pct: Number(e.target.value) }))}
+                      className="flex-1 accent-violet-500"
+                    />
+                    <span className="w-14 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%</span>
+                  </div>
                 </div>
               </SettingRow>
 
@@ -2338,34 +2707,30 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
               {!draft.hold_positions_overnight && (
                 <SettingRow
-                  label="Pre-Sell Engine Shutoff (minutes)"
-                  hint="Duration before the final sell window where new engine BUY entries are blocked."
+                  label="EOD Window Controls"
+                  hint="Shutoff blocks new buys; sell window forces exits near close."
                 >
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number" min={1} max={480} step={1}
-                      value={draft.eod_engine_shutoff_minutes_before_sell}
-                      onChange={e => updateDraft(d => ({ ...d, eod_engine_shutoff_minutes_before_sell: e.target.value }))}
-                      className="input w-32 text-sm py-1.5"
-                    />
-                    <span className="text-slate-400 text-sm">minutes before final sell window</span>
-                  </div>
-                </SettingRow>
-              )}
-
-              {!draft.hold_positions_overnight && (
-                <SettingRow
-                  label="End-of-Day Sell Window (minutes)"
-                  hint="Duration in minutes before market close (16:00 ET) when positions are force-liquidated. The engine will only sell during this window, regardless of TP/SL."
-                >
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number" min={1} max={240} step={1}
-                      value={draft.eod_sell_window_minutes}
-                      onChange={e => updateDraft(d => ({ ...d, eod_sell_window_minutes: e.target.value }))}
-                      className="input w-32 text-sm py-1.5"
-                    />
-                    <span className="text-slate-400 text-sm">minutes before 16:00 ET</span>
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-slate-400">Shutoff</span>
+                      <input
+                        type="number" min={1} max={480} step={1}
+                        value={draft.eod_engine_shutoff_minutes_before_sell}
+                        onChange={e => updateDraft(d => ({ ...d, eod_engine_shutoff_minutes_before_sell: e.target.value }))}
+                        className="input w-24 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">min</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-slate-400">Sell</span>
+                      <input
+                        type="number" min={1} max={240} step={1}
+                        value={draft.eod_sell_window_minutes}
+                        onChange={e => updateDraft(d => ({ ...d, eod_sell_window_minutes: e.target.value }))}
+                        className="input w-24 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">min</span>
+                    </div>
                   </div>
                 </SettingRow>
               )}

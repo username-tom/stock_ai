@@ -24,9 +24,8 @@ from typing import Any
 import httpx
 
 from app.services import symbol_registry
-from app.services.data_manager import DataManager
+from app.services.data_manager import DataManager, compute_us_equity_market_status
 from app.services.ib_service import IB_AVAILABLE, ib_service
-from app.services.market_calendar import is_nyse_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -172,19 +171,8 @@ async def _yf_chart(symbol: str, range_: str = "5d", interval: str = "1d", inclu
 
 
 def _market_state_now() -> str:
-    """Return the current US equity session in America/New_York."""
-    now_et = datetime.now(tz=_ET)
-    if not is_nyse_trading_day(now_et.date()):
-        return "CLOSED"
-
-    current_time = now_et.time()
-    if dt_time(4, 0) <= current_time < dt_time(9, 30):
-        return "PRE"
-    if dt_time(9, 30) <= current_time < dt_time(16, 0):
-        return "REGULAR"
-    if dt_time(16, 0) <= current_time < dt_time(20, 0):
-        return "POST"
-    return "CLOSED"
+    """Return the current NYSE session from centralized market-status logic."""
+    return str(compute_us_equity_market_status().get("market_state") or "CLOSED")
 
 
 def _session_for_dt(dt: datetime) -> str:
@@ -298,17 +286,13 @@ def _ib_data_pull_allowed_now() -> bool:
     if not _ib_connected():
         return False
 
-    now_et = datetime.now(tz=_ET)
-    if not is_nyse_trading_day(now_et.date()):
-        return False
-
-    t = now_et.time()
-    return dt_time(4, 0) <= t < dt_time(20, 0)
+    status = compute_us_equity_market_status()
+    return bool(status.get("is_trading_day")) and status.get("market_state") in {"PRE", "REGULAR", "POST"}
 
 
 def _is_market_closed_day_now() -> bool:
-    now_et = datetime.now(tz=_ET)
-    return not is_nyse_trading_day(now_et.date())
+    status = compute_us_equity_market_status()
+    return not bool(status.get("is_trading_day"))
 
 
 def _weekend_history_ttl(period: str) -> float:

@@ -39,6 +39,31 @@ import pandas as pd
 _ET = ZoneInfo("America/New_York")
 
 
+def _coerce_et_index(df: pd.DataFrame) -> tuple[pd.Index, pd.DatetimeIndex | None]:
+    """Return (day_keys, et_index_or_none) from index or common datetime columns.
+
+    Some execution paths provide a non-datetime index (e.g. RangeIndex). In
+    that case we attempt to recover timestamps from common columns; otherwise we
+    fall back to a single pseudo-day key to keep logic deterministic.
+    """
+    idx = df.index
+    if isinstance(idx, pd.DatetimeIndex):
+        idx_et = idx.tz_localize(_ET) if idx.tz is None else idx.tz_convert(_ET)
+        return pd.Index(idx_et.date), idx_et
+
+    for col in ("Datetime", "datetime", "Date", "date", "timestamp"):
+        if col not in df.columns:
+            continue
+        ts = pd.to_datetime(df[col], errors="coerce")
+        if ts.notna().sum() == 0:
+            continue
+        ts_et = ts.dt.tz_localize(_ET) if ts.dt.tz is None else ts.dt.tz_convert(_ET)
+        idx_et = pd.DatetimeIndex(ts_et)
+        return pd.Index(idx_et.date), idx_et
+
+    return pd.Index(np.zeros(len(df), dtype=int)), None
+
+
 def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
@@ -49,9 +74,8 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> pd.S
     return tr.ewm(com=period - 1, min_periods=period).mean()
 
 
-def _session_vwap(df: pd.DataFrame) -> pd.Series:
+def _session_vwap(df: pd.DataFrame, day: pd.Index) -> pd.Series:
     tp = (df["High"] + df["Low"] + df["Close"]) / 3.0
-    day = df.index.tz_convert(_ET).date
     vol = df["Volume"].astype(float)
     pv = tp * vol
     cum_pv = pv.groupby(day).cumsum()
@@ -59,8 +83,7 @@ def _session_vwap(df: pd.DataFrame) -> pd.Series:
     return cum_pv / cum_v.replace(0.0, np.nan)
 
 
-def _session_sigma(close: pd.Series, vwap: pd.Series) -> pd.Series:
-    day = close.index.tz_convert(_ET).date
+def _session_sigma(close: pd.Series, vwap: pd.Series, day: pd.Index) -> pd.Series:
     dev = close - vwap
     # Expanding intraday stdev of deviation from VWAP.
     return dev.groupby(day).transform(lambda s: s.expanding(min_periods=10).std())
@@ -93,15 +116,20 @@ def get_default_params() -> dict:
         "vsa_top_pct": 0.95,
         # Generic ATR risk model
         "atr_sl_mult": 1.5,
-        "atr_tp_mult": 3.0,
+        "atr_tp_mult": 2.0,
+        # Optional absolute risk targets ($ per share from entry)
+        "numeric_sl_value": 0.0,
+        "numeric_tp_value": 0.0,
         # ORB rule-set
         "orb_rr": 2.0,
         # VSA scalp rule-set
         "vsa_sl_pct": 0.15,
         "vsa_tp_pct": 0.40,
         # Session safety
-        "max_trades_per_day": 8,
-        "cooldown_bars": 2,
+        "max_trades_per_day": 12,
+        "cooldown_bars": 1,
+        # Max bars to hold any open position (0 = no cap)
+        "max_hold_bars": 20,
         "hold_overnight": 0,
         # Optional overrides
         "allow_bearish_longs": 0,
@@ -112,24 +140,27 @@ def get_default_params() -> dict:
 def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
     df = df.copy()
 
-    orb_bars = max(1, _i(params.get("orb_bars"), 5))
-    vwap_band_std = max(0.5, _f(params.get("vwap_band_std"), 2.0))
-    roc_period = max(2, _i(params.get("roc_period"), 7))
-    atr_period = max(2, _i(params.get("atr_period"), 14))
+    orb_bars = _i(params.get("orb_bars"), 5)
+    vwap_band_std = _f(params.get("vwap_band_std"), 2.0)
+    roc_period = _i(params.get("roc_period"), 7)
+    atr_period = _i(params.get("atr_period"), 14)
 
-    orb_vol_mult = max(0.0, _f(params.get("orb_breakout_volume_mult"), 1.5))
-    roc_vol_mult = max(0.0, _f(params.get("roc_volume_mult"), 1.5))
-    vsa_top_pct = min(0.999, max(0.80, _f(params.get("vsa_top_pct"), 0.95)))
+    orb_vol_mult = _f(params.get("orb_breakout_volume_mult"), 1.5)
+    roc_vol_mult = _f(params.get("roc_volume_mult"), 1.5)
+    vsa_top_pct = _f(params.get("vsa_top_pct"), 0.95)
 
-    atr_sl_mult = max(0.1, _f(params.get("atr_sl_mult"), 1.5))
-    atr_tp_mult = max(0.1, _f(params.get("atr_tp_mult"), 3.0))
-    orb_rr = max(1.0, _f(params.get("orb_rr"), 2.0))
+    atr_sl_mult = _f(params.get("atr_sl_mult"), 1.5)
+    atr_tp_mult = _f(params.get("atr_tp_mult"), 2.0)
+    numeric_sl_value = _f(params.get("numeric_sl_value"), 0.0)
+    numeric_tp_value = _f(params.get("numeric_tp_value"), 0.0)
+    orb_rr = _f(params.get("orb_rr"), 2.0)
 
-    vsa_sl_pct = max(0.05, _f(params.get("vsa_sl_pct"), 0.15)) / 100.0
-    vsa_tp_pct = max(0.10, _f(params.get("vsa_tp_pct"), 0.40)) / 100.0
+    vsa_sl_pct = _f(params.get("vsa_sl_pct"), 0.15) / 100.0
+    vsa_tp_pct = _f(params.get("vsa_tp_pct"), 0.40) / 100.0
 
-    max_trades_per_day = max(1, _i(params.get("max_trades_per_day"), 8))
-    cooldown_bars = max(0, _i(params.get("cooldown_bars"), 2))
+    max_trades_per_day = _i(params.get("max_trades_per_day"), 12)
+    cooldown_bars = _i(params.get("cooldown_bars"), 1)
+    max_hold_bars = _i(params.get("max_hold_bars"), 20)
     hold_overnight = bool(_i(params.get("hold_overnight"), 0))
     allow_bearish_longs = bool(_i(params.get("allow_bearish_longs"), 0))
     allow_crash_scalps = bool(_i(params.get("allow_crash_scalps"), 1))
@@ -140,11 +171,10 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
     open_ = df["Open"].astype(float)
     volume = df["Volume"].astype(float)
 
-    idx_et = df.index.tz_convert(_ET)
-    day = idx_et.date
+    day, idx_et = _coerce_et_index(df)
 
-    vwap = _session_vwap(df)
-    sigma = _session_sigma(close, vwap).fillna(0.0)
+    vwap = _session_vwap(df, day)
+    sigma = _session_sigma(close, vwap, day).fillna(0.0)
     upper_band = vwap + vwap_band_std * sigma
     lower_band = vwap - vwap_band_std * sigma
 
@@ -278,6 +308,8 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
                 exit_reason = f"risk_stop ({stop_price:.2f})"
             elif px >= take_profit:
                 exit_reason = f"target_hit ({take_profit:.2f})"
+            elif max_hold_bars > 0 and entry_bar >= 0 and (i - entry_bar) >= max_hold_bars:
+                exit_reason = f"time_exit ({max_hold_bars} bars)"
             elif i in eod_set:
                 exit_reason = "eod_close"
 
@@ -318,8 +350,10 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
             last_pierce_low = float(low.iloc[i])
 
         # Avoid VWAP reversion during first 30 min.
-        mins = idx_et[i].hour * 60 + idx_et[i].minute
-        in_first_30m = 9 * 60 + 30 <= mins < 10 * 60
+        in_first_30m = False
+        if idx_et is not None:
+            mins = idx_et[i].hour * 60 + idx_et[i].minute
+            in_first_30m = 9 * 60 + 30 <= mins < 10 * 60
 
         # Entry candidates.
         reason = ""
@@ -369,6 +403,12 @@ def generate_signals(df: pd.DataFrame, **params) -> pd.DataFrame:
                 reason = "roc_volume_momentum"
 
         if reason:
+            if numeric_sl_value > 0:
+                sl = px - numeric_sl_value
+            if numeric_tp_value > 0:
+                tp = px + numeric_tp_value
+            sl = min(sl, px - 1e-6)
+            tp = max(tp, px + 1e-6)
             signals[i] = 1
             signal_source[i] = f"{reason} [{reg}]"
             in_pos = True

@@ -219,6 +219,12 @@ def run_backtest(
     # stop_loss_pct is a universal safeguard param (0 = disabled)
     _raw_slp = strategy_params.pop("stop_loss_pct", 0.0)
     stop_loss_pct = float(_raw_slp) if str(_raw_slp).strip() != "" else 0.0
+    _raw_slv = strategy_params.pop("stop_loss_value", 0.0)
+    stop_loss_value = float(_raw_slv) if str(_raw_slv).strip() != "" else 0.0
+    _raw_tpp = strategy_params.pop("take_profit_pct", 0.0)
+    take_profit_pct = float(_raw_tpp) if str(_raw_tpp).strip() != "" else 0.0
+    _raw_tpv = strategy_params.pop("take_profit_value", 0.0)
+    take_profit_value = float(_raw_tpv) if str(_raw_tpv).strip() != "" else 0.0
 
     if script_code is not None:
         from app.services.script_executor import execute_script
@@ -251,6 +257,7 @@ def run_backtest(
     pending_buy_reason: str | None = None
 
     stop_loss_mult = (1.0 - stop_loss_pct / 100.0) if stop_loss_pct > 0 else None
+    take_profit_mult = (1.0 + take_profit_pct / 100.0) if take_profit_pct > 0 else None
 
     for date, row in df.iterrows():
         price = float(row["Close"])
@@ -313,12 +320,24 @@ def run_backtest(
 
         # Universal stop-loss safeguard (fires before strategy signals).
         # Only execute during regular session in day-trade mode.
+        stop_targets = []
+        tp_targets = []
+        if shares > 0 and entry_price is not None:
+            if stop_loss_mult is not None:
+                stop_targets.append(entry_price * stop_loss_mult)
+            if stop_loss_value > 0:
+                stop_targets.append(entry_price - stop_loss_value)
+            if take_profit_mult is not None:
+                tp_targets.append(entry_price * take_profit_mult)
+            if take_profit_value > 0:
+                tp_targets.append(entry_price + take_profit_value)
+
         if (
             is_regular
-            and stop_loss_mult is not None
+            and stop_targets
             and shares > 0
             and entry_price is not None
-            and price <= entry_price * stop_loss_mult
+            and price <= max(stop_targets)
         ):
             proceeds = shares * price - shares * commission
             pnl = proceeds - (shares * entry_price + shares * commission)
@@ -333,6 +352,37 @@ def run_backtest(
                     "pnl": round(pnl, 2),
                     "entry_reason": entry_reason or "signal",
                     "exit_reason": "stop_loss",
+                }
+            )
+            cash += proceeds
+            shares = 0.0
+            entry_price = None
+            entry_date = None
+            entry_reason = None
+            portfolio_value = cash
+            equity_values.append(portfolio_value)
+            continue
+
+        if (
+            is_regular
+            and tp_targets
+            and shares > 0
+            and entry_price is not None
+            and price >= min(tp_targets)
+        ):
+            proceeds = shares * price - shares * commission
+            pnl = proceeds - (shares * entry_price + shares * commission)
+            trades.append(
+                {
+                    "entry_date": entry_date,
+                    "exit_date": _fmt_ts(date),
+                    "side": "BUY",
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(price, 4),
+                    "quantity": shares,
+                    "pnl": round(pnl, 2),
+                    "entry_reason": entry_reason or "signal",
+                    "exit_reason": "take_profit",
                 }
             )
             cash += proceeds
@@ -562,6 +612,8 @@ def run_sentiment_backtest(
     sentiment_warmup: int = 35,
     stop_loss_pct: float = 0.0,
     take_profit_pct: float = 0.0,
+    stop_loss_value: float = 0.0,
+    take_profit_value: float = 0.0,
     hold_positions_overnight: bool = True,
     eod_sell_window_minutes: int = 30,
     custom_scripts: "dict[int, str] | None" = None,
@@ -726,9 +778,20 @@ def run_sentiment_backtest(
         # Universal risk exits (optional): checked before strategy signals.
         if shares > 0 and entry_price is not None:
             risk_exit_reason = None
-            if stop_loss_mult is not None and price <= entry_price * stop_loss_mult:
+            stop_targets = []
+            tp_targets = []
+            if stop_loss_mult is not None:
+                stop_targets.append(entry_price * stop_loss_mult)
+            if stop_loss_value > 0:
+                stop_targets.append(entry_price - stop_loss_value)
+            if take_profit_mult is not None:
+                tp_targets.append(entry_price * take_profit_mult)
+            if take_profit_value > 0:
+                tp_targets.append(entry_price + take_profit_value)
+
+            if stop_targets and price <= max(stop_targets):
                 risk_exit_reason = "stop_loss"
-            elif take_profit_mult is not None and price >= entry_price * take_profit_mult:
+            elif tp_targets and price >= min(tp_targets):
                 risk_exit_reason = "take_profit"
 
             if risk_exit_reason is not None:
@@ -907,6 +970,7 @@ def _prepare_symbol_for_portfolio(
     sentiment_strategies: "dict[str, str] | None",
     sentiment_warmup: int,
     custom_scripts: "dict[int, str] | None",
+    template_params_by_filename: "dict[str, dict[str, Any]] | None",
     hold_positions_overnight: bool,
     eod_sell_window_minutes: int,
 ) -> dict[str, Any]:
@@ -996,7 +1060,8 @@ def _prepare_symbol_for_portfolio(
                 if not tmpl_path.exists():
                     raise ValueError(f"Template file not found: {filename}")
                 from app.services.script_executor import execute_script
-                strat_df = execute_script(tmpl_path.read_text(encoding="utf-8"), df.copy())
+                params = (template_params_by_filename or {}).get(filename, {}) if isinstance(template_params_by_filename, dict) else {}
+                strat_df = execute_script(tmpl_path.read_text(encoding="utf-8"), df.copy(), **params)
             else:
                 strat_df = get_strategy(stype).generate_signals(df.copy())
             if "position" in strat_df.columns:
@@ -1032,12 +1097,15 @@ def run_sandbox_portfolio_backtest(
     custom_scripts: "dict[int, str] | None" = None,
     stop_loss_pct: float = 0.0,
     take_profit_pct: float = 0.0,
+    stop_loss_value: float = 0.0,
+    take_profit_value: float = 0.0,
     hold_positions_overnight: bool = True,
     eod_sell_window_minutes: int = 30,
     sim_buy_fill_rate_pct: float = 60.0,
     sim_sell_fill_rate_pct: float = 70.0,
     pending_price_drift_cancel_pct: float = 0.75,
     sim_pending_duration_bars: int = 1,
+    intraday_1m_template_params: "dict[str, Any] | None" = None,
 ) -> dict[str, Any]:
     """Run a coordinated multi-symbol backtest with a shared cash pool.
 
@@ -1063,6 +1131,7 @@ def run_sandbox_portfolio_backtest(
                 sentiment_strategies=sentiment_strategies,
                 sentiment_warmup=sentiment_warmup,
                 custom_scripts=custom_scripts,
+                template_params_by_filename={"intraday_1m_regime_template.py": intraday_1m_template_params or {}},
                 hold_positions_overnight=hold_positions_overnight,
                 eod_sell_window_minutes=eod_sell_window_minutes,
             ))
@@ -1121,6 +1190,10 @@ def run_sandbox_portfolio_backtest(
             "max_gross_exposure": 0.0,
             "realized_pnl_total": 0.0,
             "pending_order": None,
+            "stop_loss_pct": float(spec.get("stop_loss_pct", stop_loss_pct) or 0.0),
+            "take_profit_pct": float(spec.get("take_profit_pct", take_profit_pct) or 0.0),
+            "stop_loss_value": float(spec.get("stop_loss_value", stop_loss_value) or 0.0),
+            "take_profit_value": float(spec.get("take_profit_value", take_profit_value) or 0.0),
         }
 
     total_earmark = sum(s["min_alloc"] for s in state.values())
@@ -1136,8 +1209,6 @@ def run_sandbox_portfolio_backtest(
     # Merged sorted timeline across all symbols.
     union_index = sorted(set().union(*[p["df"].index for p in prepared]))
     by_sym = {p["symbol"]: p for p in prepared}
-    sl_mult = (1.0 - stop_loss_pct / 100.0) if stop_loss_pct > 0 else None
-    tp_mult = (1.0 + take_profit_pct / 100.0) if take_profit_pct > 0 else None
     buy_fill_prob = max(0.0, min(1.0, float(sim_buy_fill_rate_pct) / 100.0))
     sell_fill_prob = max(0.0, min(1.0, float(sim_sell_fill_rate_pct) / 100.0))
     drift_threshold_pct = max(0.0, float(pending_price_drift_cancel_pct or 0.0))
@@ -1358,10 +1429,20 @@ def run_sandbox_portfolio_backtest(
 
             # 2. Stop-loss / take-profit (regular session only when day-trading).
             if st["shares"] > 0 and st["entry_price"] is not None and (is_regular or not day_trade):
-                if sl_mult is not None and price <= st["entry_price"] * sl_mult:
+                sl_targets = []
+                tp_targets = []
+                if st["stop_loss_pct"] > 0:
+                    sl_targets.append(st["entry_price"] * (1.0 - st["stop_loss_pct"] / 100.0))
+                if st["stop_loss_value"] > 0:
+                    sl_targets.append(st["entry_price"] - st["stop_loss_value"])
+                if st["take_profit_pct"] > 0:
+                    tp_targets.append(st["entry_price"] * (1.0 + st["take_profit_pct"] / 100.0))
+                if st["take_profit_value"] > 0:
+                    tp_targets.append(st["entry_price"] + st["take_profit_value"])
+                if sl_targets and price <= max(sl_targets):
                     _try_queue_sell(sym, price, ts_idx, "stop_loss")
                     continue
-                if tp_mult is not None and price >= st["entry_price"] * tp_mult:
+                if tp_targets and price >= min(tp_targets):
                     _try_queue_sell(sym, price, ts_idx, "take_profit")
                     continue
 

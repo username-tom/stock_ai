@@ -11,6 +11,7 @@ import {
   ExclamationTriangleIcon,
   InformationCircleIcon,
   ClockIcon,
+  WrenchScrewdriverIcon,
 } from '@heroicons/react/24/outline'
 import { getSettings, updateSettings } from '../api/client'
 import { useAppSettings, setSettings as setUiSettings, SETTINGS_DEFAULTS } from '../hooks/useAppSettings'
@@ -156,7 +157,13 @@ export default function SettingsPanel() {
       IB_PORT:            data.ib_connection.IB_PORT,
       IB_CLIENT_ID:       data.ib_connection.IB_CLIENT_ID,
       TRADING_MODE:       data.trading.TRADING_MODE,
-        AUTO_UPDATE:        data.launcher.AUTO_UPDATE,
+      AUTO_UPDATE:        data.launcher.AUTO_UPDATE,
+      DATA_MANAGER_AUTO_WARM_ENABLED:      data.data_manager?.DATA_MANAGER_AUTO_WARM_ENABLED ?? true,
+      DATA_MANAGER_AUTO_WARM_INTERVAL_MIN: data.data_manager?.DATA_MANAGER_AUTO_WARM_INTERVAL_MIN ?? 15,
+      DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS: data.data_manager?.DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS ?? 35,
+      DATA_MANAGER_AUTO_WARM_SOURCE:       data.data_manager?.DATA_MANAGER_AUTO_WARM_SOURCE ?? 'auto',
+      DATA_MANAGER_AUTO_WARM_PREFER_IB:    data.data_manager?.DATA_MANAGER_AUTO_WARM_PREFER_IB ?? true,
+      DATA_MANAGER_AUTO_WARM_CHUNK_DAYS:   data.data_manager?.DATA_MANAGER_AUTO_WARM_CHUNK_DAYS ?? 20,
       DATABASE_URL:       data.storage.DATABASE_URL,
       REPORTS_DIR:        data.storage.REPORTS_DIR,
       LOCAL_STORAGE_DIR:  data.storage.LOCAL_STORAGE_DIR,
@@ -179,6 +186,10 @@ export default function SettingsPanel() {
       setDirty(false)
       // Invalidate so next open gets fresh values
       qc.invalidateQueries({ queryKey: ['settings'] })
+      // Refresh PM and backtest data when settings change
+      qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      setTimeout(() => qc.invalidateQueries({ queryKey: ['backtest-results'] }), 600)
     },
     onError: (err) => {
       setSaveResult({ error: err?.response?.data?.detail ?? 'Save failed.' })
@@ -354,6 +365,77 @@ export default function SettingsPanel() {
             ]}
           />
         </Field>
+      </SectionCard>
+
+      <SectionCard
+        icon={WrenchScrewdriverIcon}
+        title="Data Manager"
+        description="Background maintenance for watchlist intraday cache used by sandbox day-trade backtests."
+      >
+        <Field
+          label="Automatic Intraday Maintenance"
+          hint="Continuously refreshes watchlist 1m cache on a fixed interval."
+        >
+          <Select
+            value={form.DATA_MANAGER_AUTO_WARM_ENABLED ? 'on' : 'off'}
+            onChange={v => set('DATA_MANAGER_AUTO_WARM_ENABLED', v === 'on')}
+            options={[
+              { value: 'on', label: 'Enabled' },
+              { value: 'off', label: 'Disabled' },
+            ]}
+          />
+        </Field>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Field label="Interval (minutes)" hint="How often the background cycle runs.">
+            <TextInput
+              value={form.DATA_MANAGER_AUTO_WARM_INTERVAL_MIN}
+              onChange={v => set('DATA_MANAGER_AUTO_WARM_INTERVAL_MIN', Math.max(1, Math.min(1440, Number(v) || 1)))}
+              placeholder="15"
+              mono
+            />
+          </Field>
+          <Field label="Lookback Days" hint="How far back intraday bars are maintained.">
+            <TextInput
+              value={form.DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS}
+              onChange={v => set('DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS', Math.max(1, Math.min(730, Number(v) || 1)))}
+              placeholder="35"
+              mono
+            />
+          </Field>
+          <Field label="Chunk Days" hint="Per-request historical chunk size.">
+            <TextInput
+              value={form.DATA_MANAGER_AUTO_WARM_CHUNK_DAYS}
+              onChange={v => set('DATA_MANAGER_AUTO_WARM_CHUNK_DAYS', Math.max(1, Math.min(90, Number(v) || 1)))}
+              placeholder="20"
+              mono
+            />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <Field label="Primary Data Source" hint="auto picks the best available source.">
+            <Select
+              value={form.DATA_MANAGER_AUTO_WARM_SOURCE}
+              onChange={v => set('DATA_MANAGER_AUTO_WARM_SOURCE', v)}
+              options={[
+                { value: 'auto', label: 'Auto' },
+                { value: 'ib', label: 'Interactive Brokers' },
+                { value: 'yfinance', label: 'Yahoo Finance' },
+              ]}
+            />
+          </Field>
+          <Field label="Prefer IB When Available" hint="Only applies when source is auto.">
+            <Select
+              value={form.DATA_MANAGER_AUTO_WARM_PREFER_IB ? 'on' : 'off'}
+              onChange={v => set('DATA_MANAGER_AUTO_WARM_PREFER_IB', v === 'on')}
+              options={[
+                { value: 'on', label: 'Enabled' },
+                { value: 'off', label: 'Disabled' },
+              ]}
+            />
+          </Field>
+        </div>
       </SectionCard>
 
       {/* ── Group 4: Storage & Paths ── */}

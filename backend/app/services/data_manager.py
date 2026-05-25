@@ -4,10 +4,53 @@ import asyncio
 import json
 import logging
 import time
+import zoneinfo
+from datetime import datetime, time as dt_time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from app.services.market_calendar import is_nyse_trading_day
+
 logger = logging.getLogger(__name__)
+
+_ET = zoneinfo.ZoneInfo("America/New_York")
+_PRE_MARKET_OPEN = dt_time(4, 0)
+_REGULAR_MARKET_OPEN = dt_time(9, 30)
+_ENGINE_WARMUP_OPEN = dt_time(9, 20)
+_REGULAR_MARKET_CLOSE = dt_time(16, 0)
+_POST_MARKET_CLOSE = dt_time(20, 0)
+
+
+def compute_us_equity_market_status(now_et: datetime | None = None) -> dict[str, Any]:
+    """Return authoritative NYSE session status in America/New_York."""
+    ts = now_et.astimezone(_ET) if now_et is not None else datetime.now(tz=_ET)
+    day = ts.date()
+    is_trading_day = is_nyse_trading_day(day)
+    t = ts.time()
+
+    if not is_trading_day:
+        market_state = "CLOSED"
+    elif _PRE_MARKET_OPEN <= t < _REGULAR_MARKET_OPEN:
+        market_state = "PRE"
+    elif _REGULAR_MARKET_OPEN <= t < _REGULAR_MARKET_CLOSE:
+        market_state = "REGULAR"
+    elif _REGULAR_MARKET_CLOSE <= t < _POST_MARKET_CLOSE:
+        market_state = "POST"
+    else:
+        market_state = "CLOSED"
+
+    market_active = is_trading_day and (_ENGINE_WARMUP_OPEN <= t < _REGULAR_MARKET_CLOSE)
+    regular_session_open = is_trading_day and (_REGULAR_MARKET_OPEN <= t < _REGULAR_MARKET_CLOSE)
+
+    return {
+        "timezone": "America/New_York",
+        "as_of": ts.isoformat(),
+        "date": day.isoformat(),
+        "is_trading_day": bool(is_trading_day),
+        "market_state": market_state,
+        "market_active": bool(market_active),
+        "regular_session_open": bool(regular_session_open),
+    }
 
 
 class DataManager:

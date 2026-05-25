@@ -173,7 +173,16 @@ def _save_cached_df(symbol: str, source: str, intraday: bool, df: pd.DataFrame) 
             merged = merged.iloc[-max_rows:]
         out = merged.copy()
         out = out[[c for c in ["Open", "High", "Low", "Close", "Volume", "session"] if c in out.columns]]
-        out = out.reset_index().rename(columns={out.index.name or "index": "ts"})
+        index_col_name = out.index.name
+        out = out.reset_index()
+        if "ts" not in out.columns:
+            if index_col_name and index_col_name in out.columns:
+                out = out.rename(columns={index_col_name: "ts"})
+            elif "index" in out.columns:
+                out = out.rename(columns={"index": "ts"})
+            else:
+                # Fallback: the first reset-index column is the timestamp axis.
+                out = out.rename(columns={out.columns[0]: "ts"})
         out["ts"] = out["ts"].astype(str)
         payload = {
             "symbol": symbol.upper(),
@@ -362,34 +371,52 @@ def warm_intraday_cache(
         pass
 
     if resolved == "yfinance":
-        # Yahoo 1m lookback is short; request recent window and persist if available.
-        # Use last 7 days to avoid guaranteed empty responses for older spans.
-        yf_days = min(int(lookback_days), 7)
-        yf_start = (end_dt - timedelta(days=yf_days)).isoformat()
-        yf_end = end_dt.isoformat()
-        try:
-            ticker = yf.Ticker(sym)
-            df = ticker.history(start=yf_start, end=yf_end, interval="1m", prepost=True)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [col[0] for col in df.columns]
-            if not df.empty:
+        # Yahoo limits 1m history, so progressively widen the interval to cover
+        # longer ranges while still keeping intraday bars in local cache.
+        interval_windows = (
+            ("1m", min(int(lookback_days), 7)),
+            ("2m", min(int(lookback_days), 60)),
+            ("5m", min(int(lookback_days), 60)),
+        )
+        ticker = yf.Ticker(sym)
+        got_any_rows = False
+        for interval, window_days in interval_windows:
+            if window_days < 1:
+                continue
+            period = f"{int(window_days)}d"
+            requests_made += 1
+            try:
+                # Period-based requests are more reliable on Yahoo intraday than
+                # start/end windows for some symbols.
+                df = ticker.history(period=period, interval=interval, prepost=True)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [col[0] for col in df.columns]
+                if df.empty:
+                    continue
+
                 df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
                 df.index = pd.to_datetime(df.index)
+                cutoff_start = pd.Timestamp(end_dt - timedelta(days=window_days)).tz_localize(_ET)
+                cutoff_end = (pd.Timestamp(end_dt) + pd.Timedelta(days=1)).tz_localize(_ET)
+                scoped = _ensure_et_index(df)
+                df = scoped[(scoped.index >= cutoff_start) & (scoped.index < cutoff_end)]
+                if df.empty:
+                    continue
                 df = _tag_market_session(df)
-                df.attrs["interval"] = "1m"
+                df.attrs["interval"] = interval
                 _save_cached_df(sym, resolved, intraday=True, df=df)
                 fetched_rows += int(len(df))
-            if fetched_chunks == 0:
-                fetched_chunks = 1
-            requests_made += 1
-            if failed_chunks > 0 and ib_ip_conflict_detected:
-                failed_chunks = max(0, failed_chunks - 1)
-        except Exception as exc:
-            last_error = str(exc)
-            if fetched_chunks == 0:
-                failed_chunks = 1
-                fetched_chunks = 1
-            requests_made += 1
+                got_any_rows = True
+                fetched_chunks += 1
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+
+        if not got_any_rows:
+            failed_chunks = max(1, failed_chunks)
+            fetched_chunks = max(1, fetched_chunks)
+        elif failed_chunks > 0 and ib_ip_conflict_detected:
+            failed_chunks = max(0, failed_chunks - 1)
 
     coverage = get_intraday_cache_coverage(sym, resolved)
     oldest = coverage.get("oldest")

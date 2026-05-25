@@ -5,8 +5,6 @@ import {
   runBacktest,
   runSentimentBacktest,
   runSandboxBacktest,
-  warmIntradayCache,
-  getIntradayCacheCoverage,
   getScripts,
   getBuiltinTemplates,
   getSandboxPositions,
@@ -22,6 +20,7 @@ import {
   DocumentTextIcon,
   ArrowTopRightOnSquareIcon,
   ArrowDownTrayIcon,
+  ChevronDownIcon,
 } from '@heroicons/react/24/outline'
 import BacktestResultsPanel from './backtest/BacktestResultsPanel'
 import SandboxResultsView from './backtest/SandboxResultsView'
@@ -48,6 +47,12 @@ function getTodayDateString() {
 function getOneWeekAgoDateString(fromDateString) {
   const base = new Date(`${fromDateString}T00:00:00`)
   base.setDate(base.getDate() - 7)
+  return formatDateInput(base)
+}
+
+function getOneMonthAgoDateString(fromDateString) {
+  const base = new Date(`${fromDateString}T00:00:00`)
+  base.setMonth(base.getMonth() - 1)
   return formatDateInput(base)
 }
 
@@ -275,18 +280,7 @@ export default function BacktestPanel() {
   const [sandboxResult, setSandboxResult] = useState(null)
   const [sandboxProgress, setSandboxProgress] = useState(0)
   const sandboxProgressRef = useRef(null)
-  const [cacheWarmForm, setCacheWarmForm] = useState({
-    symbol: 'AAPL',
-    lookback_days: 365,
-    data_source: 'auto',
-    chunk_days: 20,
-    prefer_ib: true,
-    ib_use_rth: false,
-    ib_what_to_show: 'TRADES',
-    ib_max_retries: 2,
-    ib_pause_ms: 150,
-  })
-  const [cacheWarmResult, setCacheWarmResult] = useState(null)
+  const [pmSettingsOpen, setPmSettingsOpen] = useState(false)
 
   const { data: sandboxPositionsData, isLoading: sandboxPositionsLoading } = useQuery({
     queryKey: ['sandbox-positions'],
@@ -294,15 +288,12 @@ export default function BacktestPanel() {
     refetchOnWindowFocus: false,
   })
   const { data: pmData } = useQuery({
-    queryKey: ['pm-state'],
+    queryKey: ['portfolio-manager-state'],
     queryFn: getPortfolioManagerState,
-    refetchOnWindowFocus: false,
-  })
-  const { data: intradayCoverage, refetch: refetchCoverage } = useQuery({
-    queryKey: ['intraday-cache-coverage', cacheWarmForm.symbol, cacheWarmForm.data_source],
-    queryFn: () => getIntradayCacheCoverage(cacheWarmForm.symbol, cacheWarmForm.data_source),
-    enabled: Boolean(cacheWarmForm.symbol),
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true,
+    refetchOnMount: 'always',
+    staleTime: 0,
+    refetchInterval: 10_000,
   })
 
   const sandboxMutation = useMutation({
@@ -317,14 +308,6 @@ export default function BacktestPanel() {
     onError: () => {
       clearInterval(sandboxProgressRef.current)
       setSandboxProgress(0)
-    },
-  })
-
-  const warmCacheMutation = useMutation({
-    mutationFn: (payload) => warmIntradayCache(payload),
-    onSuccess: (data) => {
-      setCacheWarmResult(data)
-      void refetchCoverage()
     },
   })
 
@@ -786,7 +769,19 @@ export default function BacktestPanel() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">Start Date</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="label mb-0">Start Date</label>
+                <button
+                  type="button"
+                  className="text-xs text-emerald-400 hover:text-emerald-300"
+                  onClick={() => {
+                    const today = getTodayDateString()
+                    setForm(f => ({ ...f, start_date: getOneMonthAgoDateString(today), end_date: today }))
+                  }}
+                >
+                  Past Month
+                </button>
+              </div>
               <input
                 className="input"
                 type="date"
@@ -988,7 +983,19 @@ export default function BacktestPanel() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="label">Start Date</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="label mb-0">Start Date</label>
+                    <button
+                      type="button"
+                      className="text-xs text-emerald-400 hover:text-emerald-300"
+                      onClick={() => {
+                        const today = getTodayDateString()
+                        setSentForm(f => ({ ...f, start_date: getOneMonthAgoDateString(today), end_date: today }))
+                      }}
+                    >
+                      Past Month
+                    </button>
+                  </div>
                   <input
                     className="input"
                     type="date"
@@ -1501,7 +1508,19 @@ export default function BacktestPanel() {
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="label">Start Date</label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="label mb-0">Start Date</label>
+                      <button
+                        type="button"
+                        className="text-xs text-emerald-400 hover:text-emerald-300"
+                        onClick={() => {
+                          const today = getTodayDateString()
+                          setSandboxForm(f => ({ ...f, start_date: getOneMonthAgoDateString(today), end_date: today }))
+                        }}
+                      >
+                        Past Month
+                      </button>
+                    </div>
                     <input
                       className="input"
                       type="date"
@@ -1679,171 +1698,82 @@ export default function BacktestPanel() {
                 </div>
 
                 {/* PM settings preview */}
-                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-1.5">
-                  <div className="text-xs text-slate-500 uppercase tracking-wider">Active PM Settings</div>
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-400">
-                    <span>Stop Loss</span>
-                    <span className="font-mono text-slate-200">{Number(pmSettings.stop_loss_pct ?? 0).toFixed(2)}%</span>
-                    <span>Take Profit</span>
-                    <span className="font-mono text-slate-200">{Number(pmSettings.take_profit_pct ?? 0).toFixed(2)}%</span>
-                    <span>Hold Overnight</span>
-                    <span className="font-mono text-slate-200">{pmSettings.hold_positions_overnight ? 'Yes' : 'No'}</span>
-                    <span>EOD Window</span>
-                    <span className="font-mono text-slate-200">{pmSettings.eod_sell_window_minutes ?? 5}m</span>
-                    <span>Drift Cancel</span>
-                    <span className="font-mono text-slate-200">{Number(pmSettings.pending_price_drift_cancel_pct ?? 0.25).toFixed(2)}%</span>
-                    <span>Pending Timeout</span>
-                    <span className="font-mono text-slate-200">{Math.max(1, Number(pmSettings.pending_cancel_after_bars ?? 3))} bars</span>
-                    <span>Auto Offsets</span>
-                    <span className="font-mono text-slate-200">
-                      B+{Number(pmSettings.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}% / S-{Number(pmSettings.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%
-                    </span>
-                    <span>Sentiment Warmup</span>
-                    <span className="font-mono text-slate-200">{pmSettings.sentiment_data_points ?? 35}</span>
-                  </div>
-                </div>
+                <div className="border border-dark-500 rounded-lg bg-dark-900/30 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setPmSettingsOpen(v => !v)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-dark-800/50 transition-colors"
+                  >
+                    <div className="text-xs text-slate-500 uppercase tracking-wider">Active PM Settings</div>
+                    <ChevronDownIcon className={`h-4 w-4 text-slate-500 transition-transform ${pmSettingsOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {pmSettingsOpen && (
+                    <div className="border-t border-dark-700/70 px-3 py-3">
+                      {(() => {
+                        const rows = []
+                        const add = (label, value, show = true) => {
+                          if (show) rows.push({ label, value })
+                        }
 
-                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-2">
-                  <div className="text-xs text-slate-500 uppercase tracking-wider">Intraday Cache Warm-Up</div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <div>
-                      <label className="label">Symbol</label>
-                      <input
-                        className="input"
-                        type="text"
-                        value={cacheWarmForm.symbol}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, symbol: e.target.value.toUpperCase().trim() }))}
-                        placeholder="AAPL"
-                      />
-                    </div>
-                    <div>
-                      <label className="label">Lookback Days</label>
-                      <input
-                        className="input"
-                        type="number"
-                        min={1}
-                        max={730}
-                        value={cacheWarmForm.lookback_days}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, lookback_days: Math.max(1, Math.min(730, Number(e.target.value) || 365)) }))}
-                      />
-                    </div>
-                    <div>
-                      <label className="label">Data Source</label>
-                      <select
-                        className="input"
-                        value={cacheWarmForm.data_source}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, data_source: e.target.value }))}
-                      >
-                        <option value="auto">auto</option>
-                        <option value="ib">ib</option>
-                        <option value="yfinance">yfinance</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="label">Chunk Days</label>
-                      <input
-                        className="input"
-                        type="number"
-                        min={1}
-                        max={90}
-                        value={cacheWarmForm.chunk_days}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, chunk_days: Math.max(1, Math.min(90, Number(e.target.value) || 20)) }))}
-                      />
-                    </div>
-                  </div>
+                        const stopLossPct = Number(pmSettings.stop_loss_pct ?? 0)
+                        const stopLossValue = Number(pmSettings.stop_loss_value ?? 0)
+                        const takeProfitPct = Number(pmSettings.take_profit_pct ?? 0)
+                        const takeProfitValue = Number(pmSettings.take_profit_value ?? 0)
+                        const riskMode = (stopLossValue > 0 || takeProfitValue > 0) ? 'value' : 'percent'
+                        const holdOvernight = !!pmSettings.hold_positions_overnight
+                        const shutoffMins = Number(pmSettings.eod_engine_shutoff_minutes_before_sell ?? 0)
+                        const eodMins = Number(pmSettings.eod_sell_window_minutes ?? 0)
+                        const driftCancel = Number(pmSettings.pending_price_drift_cancel_pct ?? 0)
+                        const pendingBars = Number(pmSettings.pending_cancel_after_bars ?? 0)
+                        const buyFill = Number(pmSettings.sim_buy_fill_rate_pct ?? 0)
+                        const sellFill = Number(pmSettings.sim_sell_fill_rate_pct ?? 0)
+                        const buyOffset = Number(pmSettings.auto_trade_buy_price_offset_pct ?? 0)
+                        const sellOffset = Number(pmSettings.auto_trade_sell_price_offset_pct ?? 0)
+                        const extWeight = Number(pmSettings.ai_external_sentiment_weight ?? 0)
+                        const aiTpPct = Number(pmSettings.ai_tag_long_tp_pct ?? 0)
+                        const aiSlPct = Number(pmSettings.ai_tag_long_sl_pct ?? 0)
+                        const aiTpValue = Number(pmSettings.ai_tag_long_tp_value ?? 0)
+                        const aiSlValue = Number(pmSettings.ai_tag_long_sl_value ?? 0)
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-300">
-                    <label className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={cacheWarmForm.prefer_ib}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, prefer_ib: e.target.checked }))}
-                      />
-                      Prefer IB when connected
-                    </label>
-                    <label className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={cacheWarmForm.ib_use_rth}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_use_rth: e.target.checked }))}
-                      />
-                      IB RTH only
-                    </label>
-                  </div>
+                        add('Risk Exit Mode', riskMode === 'value' ? 'Dollar ($)' : 'Percentage (%)')
+                        add('Stop Loss %', `${stopLossPct.toFixed(2)}%`, riskMode === 'percent' && stopLossPct > 0)
+                        add('Take Profit %', `${takeProfitPct.toFixed(2)}%`, riskMode === 'percent' && takeProfitPct > 0)
+                        add('Stop Loss $', `$${stopLossValue.toFixed(2)}`, riskMode === 'value' && stopLossValue > 0)
+                        add('Take Profit $', `$${takeProfitValue.toFixed(2)}`, riskMode === 'value' && takeProfitValue > 0)
+                        add('Hold Overnight', holdOvernight ? 'Yes' : 'No')
+                        add('EOD Shutoff', `${shutoffMins}m`, !holdOvernight && shutoffMins > 0)
+                        add('EOD Window', `${eodMins}m`, !holdOvernight && eodMins > 0)
+                        add('Drift Cancel', `${driftCancel.toFixed(2)}%`, driftCancel > 0)
+                        add('Pending Timeout', `${Math.max(1, pendingBars)} bars`, pendingBars > 0)
+                        add('Buy Fill Rate', `${buyFill.toFixed(0)}%`, buyFill > 0)
+                        add('Sell Fill Rate', `${sellFill.toFixed(0)}%`, sellFill > 0)
+                        add('Auto Offsets', `B+${buyOffset.toFixed(2)}% / S-${sellOffset.toFixed(2)}%`, buyOffset > 0 || sellOffset > 0)
+                        add('Sentiment Lookback', `${Number(pmSettings.sentiment_lookback_days ?? 5)}d`)
+                        add('Sentiment Interval', String(pmSettings.sentiment_interval ?? '1m'))
+                        add('Sentiment Warmup', `${Number(pmSettings.sentiment_data_points ?? 35)} bars`, Number(pmSettings.sentiment_data_points ?? 0) > 0)
+                        add('Sentiment Debounce', `${Math.max(1, Number(pmSettings.sentiment_bucket_persistence ?? 3))} bars`, Number(pmSettings.sentiment_bucket_persistence ?? 0) > 0)
+                        add('PM Hold Duration', `${Math.max(0, Number(pmSettings.pm_hold_duration_bars ?? 0))} bars`, Number(pmSettings.pm_hold_duration_bars ?? 0) > 0)
+                        add('PM Hold Extended', `${Number(pmSettings.pm_hold_extended_multiplier ?? 0).toFixed(2)}x`, Number(pmSettings.pm_hold_extended_multiplier ?? 0) > 0)
+                        add('PM Hold Trailing', `${Number(pmSettings.pm_hold_trailing_pct ?? 0).toFixed(2)}%`, Number(pmSettings.pm_hold_trailing_pct ?? 0) > 0)
+                        add('AI Sentiment Changes', 'On', pmSettings.ai_sentiment_change_enabled !== false)
+                        add('AI Strategy Routing', 'On', !!pmSettings.ai_tag_strategy_enabled)
+                        add('AI Overnight Exempt', 'LONG/STRONG LONG', !!pmSettings.ai_tag_allow_overnight)
+                        add('AI External Weight', `${(extWeight * 100).toFixed(0)}%`, extWeight > 0)
+                        add('AI Long TP %', `${aiTpPct.toFixed(2)}%`, aiTpPct > 0)
+                        add('AI Long SL %', `${aiSlPct.toFixed(2)}%`, aiSlPct > 0)
+                        add('AI Long TP $', `$${aiTpValue.toFixed(2)}`, aiTpValue > 0)
+                        add('AI Long SL $', `$${aiSlValue.toFixed(2)}`, aiSlValue > 0)
+                        add('AI No-Loss Sell', 'On', pmSettings.ai_tag_no_loss_sell !== false)
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <div>
-                      <label className="label">IB whatToShow</label>
-                      <select
-                        className="input"
-                        value={cacheWarmForm.ib_what_to_show}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_what_to_show: e.target.value }))}
-                      >
-                        <option value="TRADES">TRADES</option>
-                        <option value="MIDPOINT">MIDPOINT</option>
-                        <option value="BID">BID</option>
-                        <option value="ASK">ASK</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="label">IB retries / chunk</label>
-                      <input
-                        className="input"
-                        type="number"
-                        min={0}
-                        max={10}
-                        value={cacheWarmForm.ib_max_retries}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_max_retries: Math.max(0, Math.min(10, Number(e.target.value) || 0)) }))}
-                      />
-                    </div>
-                    <div>
-                      <label className="label">IB pause ms</label>
-                      <input
-                        className="input"
-                        type="number"
-                        min={0}
-                        max={5000}
-                        value={cacheWarmForm.ib_pause_ms}
-                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_pause_ms: Math.max(0, Math.min(5000, Number(e.target.value) || 0)) }))}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={warmCacheMutation.isPending || !cacheWarmForm.symbol}
-                      onClick={() => warmCacheMutation.mutate({ ...cacheWarmForm })}
-                    >
-                      {warmCacheMutation.isPending ? 'Warming 1m Cache…' : 'Warm 1m Cache'}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => refetchCoverage()}
-                    >
-                      Refresh Coverage
-                    </button>
-                  </div>
-
-                  {(intradayCoverage || cacheWarmResult) && (
-                    <div className="text-xs text-slate-400 border-t border-dark-700/60 pt-2">
-                      <div>
-                        Coverage: {(intradayCoverage?.rows ?? cacheWarmResult?.rows_cached ?? 0)} rows
-                        {' · '}oldest {(intradayCoverage?.oldest ?? cacheWarmResult?.cache_oldest ?? '—')}
-                        {' · '}newest {(intradayCoverage?.newest ?? cacheWarmResult?.cache_newest ?? '—')}
-                      </div>
-                      {cacheWarmResult && (
-                        <div className="mt-1">
-                          Last warm: source {cacheWarmResult.source}
-                          {' · '}chunks {cacheWarmResult.chunks_attempted}
-                          {' · '}failed {cacheWarmResult.chunks_failed ?? 0}
-                          {' · '}requests {cacheWarmResult.requests_made ?? 0}
-                          {' · '}fetched {cacheWarmResult.rows_fetched ?? 0}
-                          {cacheWarmResult.error ? ` · error: ${cacheWarmResult.error}` : ''}
-                        </div>
-                      )}
+                        return (
+                          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-400">
+                            {rows.flatMap(row => ([
+                              <span key={`${row.label}-k`}>{row.label}</span>,
+                              <span key={`${row.label}-v`} className="font-mono text-slate-200">{row.value}</span>,
+                            ]))}
+                          </div>
+                        )
+                      })()}
                     </div>
                   )}
                 </div>

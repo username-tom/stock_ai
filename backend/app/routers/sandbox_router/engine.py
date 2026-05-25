@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import Optional
+from typing import Any, Optional
 
 from app.database import get_db
 from app.models.sandbox import SandboxPosition
@@ -111,6 +111,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     sentiment_strategy_enabled: Optional[bool] = None
     stop_loss_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     take_profit_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    stop_loss_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
+    take_profit_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     hold_positions_overnight: Optional[bool] = None
     eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=1, le=480)
     eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
@@ -127,6 +129,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_long_engine_off: Optional[bool] = None
     ai_tag_long_tp_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
     ai_tag_long_sl_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    ai_tag_long_tp_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
+    ai_tag_long_sl_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     ai_tag_no_loss_sell: Optional[bool] = None
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     pending_cancel_after_bars: Optional[int] = Field(default=None, ge=1, le=120)
@@ -134,6 +138,10 @@ class PortfolioManagerSettingsRequest(BaseModel):
     sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     auto_trade_buy_price_offset_pct: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     auto_trade_sell_price_offset_pct: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+    default_strategy_name: Optional[str] = None
+    pm_hold_duration_bars: Optional[int] = Field(default=None, ge=0, le=50000)
+    intraday_1m_template_params: Optional[dict[str, Any]] = None
+    position_overrides: Optional[dict[str, dict[str, Any]]] = None
 
 
 @router.get("/manager/state")

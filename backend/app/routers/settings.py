@@ -1,8 +1,6 @@
 """Settings endpoints – read and write .env configuration at runtime."""
 from __future__ import annotations
 
-import os
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -61,6 +59,17 @@ def _write_env(data: dict[str, str]) -> None:
     ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _coerce_runtime_value(current: object, raw_value: str) -> object:
+    """Coerce string env values to the current in-memory setting type."""
+    if isinstance(current, bool):
+        return str(raw_value).strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(current, int):
+        return int(raw_value)
+    if isinstance(current, float):
+        return float(raw_value)
+    return type(current)(raw_value)
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -75,6 +84,12 @@ class SettingsPayload(BaseModel):
     REPORTS_DIR: str | None = None
     LOCAL_STORAGE_DIR: str | None = None
     AUTO_UPDATE: bool | None = None
+    DATA_MANAGER_AUTO_WARM_ENABLED: bool | None = None
+    DATA_MANAGER_AUTO_WARM_INTERVAL_MIN: int | None = None
+    DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS: int | None = None
+    DATA_MANAGER_AUTO_WARM_SOURCE: str | None = None
+    DATA_MANAGER_AUTO_WARM_PREFER_IB: bool | None = None
+    DATA_MANAGER_AUTO_WARM_CHUNK_DAYS: int | None = None
 
 
 # Keys that require a backend restart to take effect
@@ -116,6 +131,29 @@ async def get_settings():
         "launcher": {
             "AUTO_UPDATE": env.get("AUTO_UPDATE", str(settings.AUTO_UPDATE)).lower() in ("true", "1", "yes", "on"),
         },
+        "data_manager": {
+            "DATA_MANAGER_AUTO_WARM_ENABLED": env.get(
+                "DATA_MANAGER_AUTO_WARM_ENABLED",
+                str(settings.DATA_MANAGER_AUTO_WARM_ENABLED),
+            ).lower() in ("true", "1", "yes", "on"),
+            "DATA_MANAGER_AUTO_WARM_INTERVAL_MIN": int(
+                env.get("DATA_MANAGER_AUTO_WARM_INTERVAL_MIN", str(settings.DATA_MANAGER_AUTO_WARM_INTERVAL_MIN))
+            ),
+            "DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS": int(
+                env.get("DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS", str(settings.DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS))
+            ),
+            "DATA_MANAGER_AUTO_WARM_SOURCE": env.get(
+                "DATA_MANAGER_AUTO_WARM_SOURCE",
+                str(settings.DATA_MANAGER_AUTO_WARM_SOURCE),
+            ),
+            "DATA_MANAGER_AUTO_WARM_PREFER_IB": env.get(
+                "DATA_MANAGER_AUTO_WARM_PREFER_IB",
+                str(settings.DATA_MANAGER_AUTO_WARM_PREFER_IB),
+            ).lower() in ("true", "1", "yes", "on"),
+            "DATA_MANAGER_AUTO_WARM_CHUNK_DAYS": int(
+                env.get("DATA_MANAGER_AUTO_WARM_CHUNK_DAYS", str(settings.DATA_MANAGER_AUTO_WARM_CHUNK_DAYS))
+            ),
+        },
         "network": {
             "CORS_ORIGINS": v("CORS_ORIGINS", settings.CORS_ORIGINS),
         },
@@ -148,6 +186,32 @@ async def update_settings(payload: SettingsPayload):
             int(updates["IB_CLIENT_ID"])
         except ValueError:
             raise HTTPException(status_code=422, detail="IB_CLIENT_ID must be an integer.")
+    if "DATA_MANAGER_AUTO_WARM_INTERVAL_MIN" in updates:
+        try:
+            interval_min = int(updates["DATA_MANAGER_AUTO_WARM_INTERVAL_MIN"])
+            if not (1 <= interval_min <= 1440):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=422, detail="DATA_MANAGER_AUTO_WARM_INTERVAL_MIN must be 1-1440.")
+    if "DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS" in updates:
+        try:
+            lookback_days = int(updates["DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS"])
+            if not (1 <= lookback_days <= 730):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=422, detail="DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS must be 1-730.")
+    if "DATA_MANAGER_AUTO_WARM_CHUNK_DAYS" in updates:
+        try:
+            chunk_days = int(updates["DATA_MANAGER_AUTO_WARM_CHUNK_DAYS"])
+            if not (1 <= chunk_days <= 90):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(status_code=422, detail="DATA_MANAGER_AUTO_WARM_CHUNK_DAYS must be 1-90.")
+    if "DATA_MANAGER_AUTO_WARM_SOURCE" in updates:
+        source = updates["DATA_MANAGER_AUTO_WARM_SOURCE"].lower().strip()
+        if source not in ("auto", "ib", "yfinance"):
+            raise HTTPException(status_code=422, detail="DATA_MANAGER_AUTO_WARM_SOURCE must be auto, ib, or yfinance.")
+        updates["DATA_MANAGER_AUTO_WARM_SOURCE"] = source
 
     # Write to .env
     _write_env(updates)
@@ -156,9 +220,8 @@ async def update_settings(payload: SettingsPayload):
     for key, val in updates.items():
         if key not in RESTART_REQUIRED_KEYS:
             if hasattr(settings, key):
-                field_type = type(getattr(settings, key))
                 try:
-                    setattr(settings, key, field_type(val))
+                    setattr(settings, key, _coerce_runtime_value(getattr(settings, key), val))
                 except Exception:
                     setattr(settings, key, val)
 

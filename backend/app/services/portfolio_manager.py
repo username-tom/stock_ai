@@ -147,6 +147,7 @@ _settings: dict[str, Any] = {
         "euphoric": _INTRADAY_1M_TEMPLATE,
     },
     "sentiment_strategy_enabled": True,   # auto-change strategy based on sentiment
+    "default_strategy_name": _INTRADAY_1M_TEMPLATE,
     "ai_tag_strategy_enabled": False,      # auto-change strategy based on AI learner tag
     "ai_sentiment_change_enabled": True,   # master switch for AI sentiment-driven strategy/trade changes
     "ai_tag_strategies": {
@@ -162,6 +163,8 @@ _settings: dict[str, Any] = {
     "ai_tag_long_engine_off": True,        # disable engine after buy for LONG/STRONG LONG (hold mode)
     "ai_tag_long_tp_pct": 0.0,            # take profit % for long-hold positions (0 = disabled)
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
+    "ai_tag_long_tp_value": 0.0,          # take profit $ for long-hold positions (0 = disabled)
+    "ai_tag_long_sl_value": 0.0,          # stop loss  $ for long-hold positions (0 = disabled)
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
     "pending_price_drift_cancel_pct": 0.25,  # cancel pending BUY when market drifts >= this % from pending fill/limit
     "pending_cancel_after_bars": 3,       # cancel pending orders after N sentiment bars even without price drift
@@ -169,6 +172,8 @@ _settings: dict[str, Any] = {
     "sim_sell_fill_rate_pct": 100.0,      # simulated SELL pending-fill probability (%), evaluated each bar when in price range
     "auto_trade_buy_price_offset_pct": 0.01,    # BUY price = prev OHLC midpoint + this % (IB automated orders)
     "auto_trade_sell_price_offset_pct": 0.01,   # SELL price = prev OHLC midpoint - this % (IB automated orders)
+    "intraday_1m_template_params": {},
+    "position_overrides": {},
     # 5×5 matrix: keys are PM sentiment bucket → AI tag → strategy name
     "sentiment_matrix_strategies": _clone_matrix(_DEFAULT_SENTIMENT_MATRIX_STRATEGIES),
     # 5×5 matrix: keys are PM sentiment bucket → AI tag → action
@@ -177,11 +182,15 @@ _settings: dict[str, Any] = {
     # Max number of days a PM buy-and-hold position can be held before auto-release (0 = no limit).
     # Default 1 day suits day-trading workflows; sentiment-driven exits also trigger inside this window.
     "pm_hold_duration_days": 1,
+    # Buy & Hold cap in bars (0 = no time cap). This is preferred over day-based duration.
+    "pm_hold_duration_bars": 20,
     # Advanced Hold tuning
     "pm_hold_extended_multiplier": 2.0,  # used by `advanced_hold:extended` cells (typically STRONG LONG)
     "pm_hold_trailing_pct": 3.0,         # trailing stop % for `advanced_hold:trailing` cells
     "stop_loss_pct": 0.5,
     "take_profit_pct": 1.25,
+    "stop_loss_value": 0.0,
+    "take_profit_value": 0.0,
     "hold_positions_overnight": False,    # strict day-trade default: flatten before close
     "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
     "eod_sell_window_minutes": 5,         # minutes before market close to start sell-only mode
@@ -377,8 +386,12 @@ async def _load_settings_from_db() -> None:
                 _settings["symbol_sentiment_strategies"],
             )
             _settings["sentiment_strategy_enabled"] = bool(getattr(row, "sentiment_strategy_enabled", True))
-            _settings["stop_loss_pct"] = float(getattr(row, "stop_loss_pct", 0.5) or 0.5)
-            _settings["take_profit_pct"] = float(getattr(row, "take_profit_pct", 1.25) or 1.25)
+            _row_stop_loss_pct = getattr(row, "stop_loss_pct", None)
+            _row_take_profit_pct = getattr(row, "take_profit_pct", None)
+            _settings["stop_loss_pct"] = 0.5 if _row_stop_loss_pct is None else float(_row_stop_loss_pct)
+            _settings["take_profit_pct"] = 1.25 if _row_take_profit_pct is None else float(_row_take_profit_pct)
+            _settings["stop_loss_value"] = float(getattr(row, "stop_loss_value", 0.0) or 0.0)
+            _settings["take_profit_value"] = float(getattr(row, "take_profit_value", 0.0) or 0.0)
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", False))
             _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
             _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 5) or 5)
@@ -405,15 +418,26 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_long_engine_off"] = bool(getattr(row, "ai_tag_long_engine_off", True))
             _settings["ai_tag_long_tp_pct"] = float(getattr(row, "ai_tag_long_tp_pct", 0.0) or 0.0)
             _settings["ai_tag_long_sl_pct"] = float(getattr(row, "ai_tag_long_sl_pct", 0.0) or 0.0)
+            _settings["ai_tag_long_tp_value"] = float(getattr(row, "ai_tag_long_tp_value", 0.0) or 0.0)
+            _settings["ai_tag_long_sl_value"] = float(getattr(row, "ai_tag_long_sl_value", 0.0) or 0.0)
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.25) or 0.25)
-            _settings["pending_cancel_after_bars"] = int(max(1, getattr(row, "pending_cancel_after_bars", 3) or 3))
+            _settings["pending_cancel_after_bars"] = int(max(0, getattr(row, "pending_cancel_after_bars", 3) or 3))
             _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 100.0) or 0.0)))
             _settings["sim_sell_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_sell_fill_rate_pct", 100.0) or 0.0)))
             _buy_offset = getattr(row, "auto_trade_buy_price_offset_pct", None)
             _sell_offset = getattr(row, "auto_trade_sell_price_offset_pct", None)
             _settings["auto_trade_buy_price_offset_pct"] = 0.145 if _buy_offset is None else float(_buy_offset)
             _settings["auto_trade_sell_price_offset_pct"] = 0.185 if _sell_offset is None else float(_sell_offset)
+            _settings["default_strategy_name"] = str(getattr(row, "default_strategy_name", _INTRADAY_1M_TEMPLATE) or _INTRADAY_1M_TEMPLATE)
+            _settings["intraday_1m_template_params"] = _load_json_dict(
+                getattr(row, "intraday_1m_template_params", None),
+                {},
+            )
+            _settings["position_overrides"] = _load_json_dict(
+                getattr(row, "position_overrides", None),
+                {},
+            )
             # 5×5 matrices – overlay any stored cells on top of the curated
             # defaults so an empty DB row still produces the same matrix the
             # PM UI displays out-of-the-box.
@@ -426,6 +450,14 @@ async def _load_settings_from_db() -> None:
                 _DEFAULT_SENTIMENT_MATRIX_ACTIONS,
             )
             _settings["pm_hold_duration_days"] = int(getattr(row, "pm_hold_duration_days", 1) or 0)
+            bars_loaded = int(getattr(row, "pm_hold_duration_bars", 0) or 0)
+            if bars_loaded > 0:
+                _settings["pm_hold_duration_bars"] = bars_loaded
+            else:
+                # Backward compatibility with day-based cap.
+                bar_minutes = max(1e-9, _interval_to_minutes(_settings.get("sentiment_interval", "1m")))
+                bars_per_day = max(1, int(round(390.0 / bar_minutes)))
+                _settings["pm_hold_duration_bars"] = max(0, int(_settings["pm_hold_duration_days"]) * bars_per_day)
             _settings["pm_hold_extended_multiplier"] = float(getattr(row, "pm_hold_extended_multiplier", 2.0) or 0.0)
             _settings["pm_hold_trailing_pct"] = float(getattr(row, "pm_hold_trailing_pct", 3.0) or 0.0)
             # Restore cached scores so the UI shows previous values immediately.
@@ -486,8 +518,12 @@ async def _save_settings_to_db() -> None:
         row.market_sentiment_strategies = json.dumps(_settings.get("market_sentiment_strategies", {}), sort_keys=True)
         row.symbol_sentiment_strategies = json.dumps(_settings.get("symbol_sentiment_strategies", {}), sort_keys=True)
         row.sentiment_strategy_enabled = _settings.get("sentiment_strategy_enabled", True)
-        row.stop_loss_pct = float(_settings.get("stop_loss_pct", 0.5) or 0.5)
-        row.take_profit_pct = float(_settings.get("take_profit_pct", 1.25) or 1.25)
+        _stop_loss_pct = _settings.get("stop_loss_pct", 0.5)
+        _take_profit_pct = _settings.get("take_profit_pct", 1.25)
+        row.stop_loss_pct = float(0.5 if _stop_loss_pct is None else _stop_loss_pct)
+        row.take_profit_pct = float(1.25 if _take_profit_pct is None else _take_profit_pct)
+        row.stop_loss_value = float(_settings.get("stop_loss_value", 0.0) or 0.0)
+        row.take_profit_value = float(_settings.get("take_profit_value", 0.0) or 0.0)
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", False)
         row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
         row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 5) or 5)
@@ -512,16 +548,22 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_long_engine_off = bool(_settings.get("ai_tag_long_engine_off", True))
         row.ai_tag_long_tp_pct = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
         row.ai_tag_long_sl_pct = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
+        row.ai_tag_long_tp_value = float(_settings.get("ai_tag_long_tp_value", 0.0) or 0.0)
+        row.ai_tag_long_sl_value = float(_settings.get("ai_tag_long_sl_value", 0.0) or 0.0)
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.25)
-        row.pending_cancel_after_bars = int(max(1, _settings.get("pending_cancel_after_bars", 3) or 3))
+        row.pending_cancel_after_bars = int(max(0, _settings.get("pending_cancel_after_bars", 3) or 3))
         row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 60.0) or 0.0)))
         row.sim_sell_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_sell_fill_rate_pct", 70.0) or 0.0)))
         row.auto_trade_buy_price_offset_pct = float(_settings.get("auto_trade_buy_price_offset_pct", 0.01))
         row.auto_trade_sell_price_offset_pct = float(_settings.get("auto_trade_sell_price_offset_pct", 0.01))
+        row.default_strategy_name = str(_settings.get("default_strategy_name", _INTRADAY_1M_TEMPLATE) or _INTRADAY_1M_TEMPLATE)
+        row.intraday_1m_template_params = json.dumps(_settings.get("intraday_1m_template_params", {}), sort_keys=True)
+        row.position_overrides = json.dumps(_settings.get("position_overrides", {}), sort_keys=True)
         row.sentiment_matrix_strategies = json.dumps(_settings.get("sentiment_matrix_strategies", {}), sort_keys=True)
         row.sentiment_matrix_actions = json.dumps(_settings.get("sentiment_matrix_actions", {}), sort_keys=True)
         row.pm_hold_duration_days = max(0, int(_settings.get("pm_hold_duration_days", 1) or 0))
+        row.pm_hold_duration_bars = max(0, int(_settings.get("pm_hold_duration_bars", 20) or 0))
         row.pm_hold_extended_multiplier = max(0.0, float(_settings.get("pm_hold_extended_multiplier", 2.0) or 0.0))
         row.pm_hold_trailing_pct = max(0.0, float(_settings.get("pm_hold_trailing_pct", 3.0) or 0.0))
         await db.commit()
@@ -533,18 +575,21 @@ def update_manager_settings(new: dict) -> dict:
                "enabled", "deploy_available_funds", "deploy_target", "deploy_target_symbol",
                "reallocation_enabled", "reallocation_mode", "allow_buy_outside_allocation",
                "market_sentiment_strategies", "symbol_sentiment_strategies",
+              "default_strategy_name", "intraday_1m_template_params", "position_overrides",
               "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval", "sentiment_bucket_persistence",
               "stop_loss_pct", "take_profit_pct",
+              "stop_loss_value", "take_profit_value",
               "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
               "ai_tag_action_mode", "ai_external_sentiment_weight",
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
+              "ai_tag_long_tp_value", "ai_tag_long_sl_value",
               "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
               "pending_cancel_after_bars",
               "sim_buy_fill_rate_pct", "sim_sell_fill_rate_pct",
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct",
               "sentiment_matrix_strategies", "sentiment_matrix_actions",
-              "pm_hold_duration_days", "pm_hold_extended_multiplier", "pm_hold_trailing_pct"}
+              "pm_hold_duration_days", "pm_hold_duration_bars", "pm_hold_extended_multiplier", "pm_hold_trailing_pct"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -560,6 +605,26 @@ def update_manager_settings(new: dict) -> dict:
             1,
             min(20, int(_settings.get("sentiment_bucket_persistence", 3) or 3)),
         )
+    if "default_strategy_name" in new:
+        _settings["default_strategy_name"] = str(_settings.get("default_strategy_name") or _INTRADAY_1M_TEMPLATE)
+    if "intraday_1m_template_params" in new and not isinstance(_settings.get("intraday_1m_template_params"), dict):
+        _settings["intraday_1m_template_params"] = {}
+    if "position_overrides" in new:
+        raw = _settings.get("position_overrides")
+        if isinstance(raw, dict):
+            norm: dict[str, dict[str, Any]] = {}
+            for sym, ov in raw.items():
+                if not isinstance(ov, dict):
+                    continue
+                key = str(sym or "").strip().upper()
+                if not key:
+                    continue
+                norm[key] = dict(ov)
+            _settings["position_overrides"] = norm
+        else:
+            _settings["position_overrides"] = {}
+    if "pm_hold_duration_bars" in new:
+        _settings["pm_hold_duration_bars"] = max(0, int(_settings.get("pm_hold_duration_bars", 20) or 0))
 
     try:
         loop = asyncio.get_running_loop()
@@ -865,7 +930,7 @@ async def _apply_ai_tag_strategies() -> None:
     -------
     trade        – Set strategy; engine runs normally (re-enables engine if off).
     hold         – Buy & Hold: engine off; direct BUY if no open position; hold
-                   with TP/SL once in. Auto-released when pm_hold_duration_days
+                   with TP/SL once in. Auto-released when pm_hold_duration_bars
                    elapses since entry.
     engine_off   – Pause engine (no new entries). No buy/sell.
     force_sell   – Immediately liquidate position and re-enable engine.
@@ -885,10 +950,14 @@ async def _apply_ai_tag_strategies() -> None:
 
     long_tp = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
     long_sl = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
+    long_tp_value = float(_settings.get("ai_tag_long_tp_value", 0.0) or 0.0)
+    long_sl_value = float(_settings.get("ai_tag_long_sl_value", 0.0) or 0.0)
     no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
-    hold_duration_days = max(0, int(_settings.get("pm_hold_duration_days", 1) or 0))
+    hold_duration_bars = max(0, int(_settings.get("pm_hold_duration_bars", 20) or 0))
     hold_extended_mult = max(0.0, float(_settings.get("pm_hold_extended_multiplier", 2.0) or 0.0))
     hold_trailing_pct = max(0.0, float(_settings.get("pm_hold_trailing_pct", 3.0) or 0.0))
+    bar_minutes = max(1e-9, _interval_to_minutes(_settings.get("sentiment_interval", "1m")))
+    symbol_overrides = _settings.get("position_overrides", {}) if isinstance(_settings.get("position_overrides"), dict) else {}
 
     def _is_frenzy_period() -> bool:
         from app.services.sandbox_engine import _ET
@@ -1144,8 +1213,8 @@ async def _apply_ai_tag_strategies() -> None:
 
             # ── hold (Buy & Hold) + advanced_hold variants ────────────────
             # hold_variant values:
-            #   ""                 → simple hold (use pm_hold_duration_days)
-            #   "extended"         → use pm_hold_duration_days * pm_hold_extended_multiplier
+            #   ""                 → simple hold (use pm_hold_duration_bars)
+            #   "extended"         → use pm_hold_duration_bars * pm_hold_extended_multiplier
             #   "until_tag_change" → no time cap; exit when learner_tag changes
             #   "trailing"         → no time cap; exit on trailing % drawdown from peak
             if cell_action == "hold":
@@ -1162,10 +1231,13 @@ async def _apply_ai_tag_strategies() -> None:
                 # Compute per-variant effective duration (0 = no time cap).
                 if hold_variant in ("until_tag_change", "trailing"):
                     effective_duration = 0.0
-                elif hold_variant == "extended":
-                    effective_duration = float(hold_duration_days) * hold_extended_mult
+                sym_override = symbol_overrides.get(pos.symbol.upper(), {}) if isinstance(symbol_overrides, dict) else {}
+                hold_override_bars = max(0, int(sym_override.get("hold_duration_bars", 0) or 0))
+                base_hold_bars = hold_override_bars if hold_override_bars > 0 else hold_duration_bars
+                if hold_variant == "extended":
+                    effective_duration = float(base_hold_bars) * hold_extended_mult
                 else:
-                    effective_duration = float(hold_duration_days)
+                    effective_duration = float(base_hold_bars)
 
                 now_utc = datetime.now(timezone.utc)
                 started = getattr(pos, "pm_hold_started_at", None)
@@ -1201,9 +1273,9 @@ async def _apply_ai_tag_strategies() -> None:
                                 is_hard_stop = True
                     elif effective_duration > 0 and started is not None:
                         started_aware = started if started.tzinfo else started.replace(tzinfo=timezone.utc)
-                        elapsed_days = (now_utc - started_aware).total_seconds() / 86400.0
-                        if elapsed_days >= effective_duration:
-                            exit_reason = f"ai_hold_expiry ({effective_duration:.2g}d)"
+                        elapsed_bars = (now_utc - started_aware).total_seconds() / (bar_minutes * 60.0)
+                        if elapsed_bars >= effective_duration:
+                            exit_reason = f"ai_hold_expiry ({effective_duration:.0f} bars)"
 
                 if exit_reason:
                     cp_exp = cp_live
@@ -1316,13 +1388,25 @@ async def _apply_ai_tag_strategies() -> None:
                     effective_qty = float(pos.shares) if pos.shares > 0 else float(ib_qty)
                     effective_avg_cost = float(pos.avg_cost) if (pos.shares > 0 and pos.avg_cost > 0) else float(ib_avg_cost)
                     if cp > 0 and effective_avg_cost > 0 and effective_qty > 0:
-                        hit_sl = long_sl > 0 and cp <= effective_avg_cost * (1.0 - long_sl / 100.0)
-                        hit_tp = long_tp > 0 and cp >= effective_avg_cost * (1.0 + long_tp / 100.0)
+                        sl_targets = []
+                        tp_targets = []
+                        if long_sl > 0:
+                            sl_targets.append(effective_avg_cost * (1.0 - long_sl / 100.0))
+                        if long_sl_value > 0:
+                            sl_targets.append(effective_avg_cost - long_sl_value)
+                        if long_tp > 0:
+                            tp_targets.append(effective_avg_cost * (1.0 + long_tp / 100.0))
+                        if long_tp_value > 0:
+                            tp_targets.append(effective_avg_cost + long_tp_value)
+                        sl_trigger = max(sl_targets) if sl_targets else None
+                        tp_trigger = min(tp_targets) if tp_targets else None
+                        hit_sl = sl_trigger is not None and cp <= sl_trigger
+                        hit_tp = tp_trigger is not None and cp >= tp_trigger
                         if hit_sl or hit_tp:
                             reason = (
-                                f"ai_long_sl ({long_sl:.2f}% @ ${cp:.2f})"
+                                f"ai_long_sl (@ ${cp:.2f})"
                                 if hit_sl
-                                else f"ai_long_tp ({long_tp:.2f}% @ ${cp:.2f})"
+                                else f"ai_long_tp (@ ${cp:.2f})"
                             )
                             pnl = round((cp - effective_avg_cost) * effective_qty, 4)
                             # SL is a hard risk-limit exit — it must always execute, even at a loss.
@@ -2265,8 +2349,10 @@ async def _process_ib_engine_signals() -> None:
         and float(o.get("remaining") or 0.0) > 0
     }
 
-    stop_loss_pct = float(_settings.get("stop_loss_pct", 0.8) or 0.8)
-    take_profit_pct = float(_settings.get("take_profit_pct", 2.5) or 2.5)
+    _stop_loss_pct = _settings.get("stop_loss_pct", 0.8)
+    _take_profit_pct = _settings.get("take_profit_pct", 2.5)
+    stop_loss_pct = float(0.8 if _stop_loss_pct is None else _stop_loss_pct)
+    take_profit_pct = float(2.5 if _take_profit_pct is None else _take_profit_pct)
     ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
 
     order_candidates: list[dict[str, Any]] = []

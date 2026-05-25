@@ -152,6 +152,18 @@ async def _migrate(conn):
         # Advanced Hold tuning: extended-duration multiplier and trailing-stop %
         "ALTER TABLE portfolio_manager_settings ADD COLUMN pm_hold_extended_multiplier REAL NOT NULL DEFAULT 2.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN pm_hold_trailing_pct REAL NOT NULL DEFAULT 3.0",
+        # PM global numeric TP/SL ($ from average entry)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_value REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN take_profit_value REAL NOT NULL DEFAULT 0.0",
+        # PM long-hold numeric TP/SL ($ from average entry)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_tp_value REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_sl_value REAL NOT NULL DEFAULT 0.0",
+        # PM default strategy + template params + per-symbol overrides
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN default_strategy_name VARCHAR(120) NOT NULL DEFAULT 'template:intraday_1m_regime_template.py'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN intraday_1m_template_params TEXT NOT NULL DEFAULT '{}'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN position_overrides TEXT NOT NULL DEFAULT '{}'",
+        # Buy & Hold duration cap in bars (0 = no limit)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN pm_hold_duration_bars INTEGER NOT NULL DEFAULT 20",
         # Track when PM buy-and-hold position entered
         "ALTER TABLE sandbox_positions ADD COLUMN pm_hold_started_at TIMESTAMP",
         # Track peak price since PM hold entry (for trailing-stop advanced hold)

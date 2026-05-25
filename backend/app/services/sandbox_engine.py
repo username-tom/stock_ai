@@ -74,8 +74,8 @@ def _get_eod_window_starts(
 ) -> tuple[dt_time, dt_time]:
     """Return (engine_shutoff_start, final_sell_start) in ET clock time."""
     close_minutes = _MARKET_CLOSE.hour * 60 + _MARKET_CLOSE.minute
-    sell_window_mins = max(1, int(eod_sell_window_minutes or 30))
-    shutoff_mins = max(1, int(eod_engine_shutoff_minutes_before_sell or 120))
+    sell_window_mins = max(0, int(eod_sell_window_minutes or 30))
+    shutoff_mins = max(0, int(eod_engine_shutoff_minutes_before_sell or 120))
 
     final_sell_start_m = max(0, close_minutes - sell_window_mins)
     engine_shutoff_start_m = max(0, final_sell_start_m - shutoff_mins)
@@ -388,7 +388,12 @@ async def _fetch_intraday_df(symbol: str) -> pd.DataFrame:
 
 # ── signal generation ─────────────────────────────────────────────────────── #
 
-def _run_strategy_sync(strategy_name: str, df: pd.DataFrame, scripts: dict[int, str]) -> pd.DataFrame:
+def _run_strategy_sync(
+    strategy_name: str,
+    df: pd.DataFrame,
+    scripts: dict[int, str],
+    template_params: dict[str, Any] | None = None,
+) -> pd.DataFrame:
     """Run strategy in a thread (CPU-bound).  Returns df with 'signal' column."""
     if strategy_name.startswith("custom:"):
         script_id_str = strategy_name[7:]
@@ -411,7 +416,8 @@ def _run_strategy_sync(strategy_name: str, df: pd.DataFrame, scripts: dict[int, 
         if not tmpl_path.exists():
             raise ValueError(f"Template file not found: {filename}")
         code = tmpl_path.read_text(encoding="utf-8")
-        return execute_script(code, df)
+        params = template_params if isinstance(template_params, dict) else {}
+        return execute_script(code, df, **params)
 
     # Built-in strategy — parse type and params
     colon = strategy_name.find(":")
@@ -453,6 +459,17 @@ async def _process_symbol(
     }
 
     try:
+        from app.services.portfolio_manager import get_manager_settings
+
+        manager_settings = get_manager_settings()
+        symbol_overrides = manager_settings.get("position_overrides") if isinstance(manager_settings.get("position_overrides"), dict) else {}
+        sym_override = symbol_overrides.get(symbol.upper(), {}) if isinstance(symbol_overrides, dict) else {}
+        override_strategy = str(sym_override.get("strategy_name") or "").strip() if isinstance(sym_override, dict) else ""
+        default_strategy = str(manager_settings.get("default_strategy_name") or "").strip()
+        effective_strategy_name = override_strategy or strategy_name or default_strategy
+        if not effective_strategy_name:
+            effective_strategy_name = "sma_crossover"
+
         df = await _fetch_intraday_df(symbol)
 
         if len(df) < MIN_BARS:
@@ -462,7 +479,12 @@ async def _process_symbol(
 
         # Run signal generation off the event loop
         df_sig = await loop.run_in_executor(
-            None, _run_strategy_sync, strategy_name, df, scripts
+            None,
+            _run_strategy_sync,
+            effective_strategy_name,
+            df,
+            scripts,
+            manager_settings.get("intraday_1m_template_params") if effective_strategy_name == "template:intraday_1m_regime_template.py" else None,
         )
 
         # The last bar is the current minute
@@ -470,10 +492,15 @@ async def _process_symbol(
         current_price = float(last_row["Close"])
 
         # Global risk exits from portfolio-manager settings (0 = disabled).
-        from app.services.portfolio_manager import get_manager_settings
-        manager_settings = get_manager_settings()
         stop_loss_pct = float(manager_settings.get("stop_loss_pct", 0.0) or 0.0)
         take_profit_pct = float(manager_settings.get("take_profit_pct", 0.0) or 0.0)
+        stop_loss_value = float(manager_settings.get("stop_loss_value", 0.0) or 0.0)
+        take_profit_value = float(manager_settings.get("take_profit_value", 0.0) or 0.0)
+        if isinstance(sym_override, dict):
+            stop_loss_pct = float(sym_override.get("stop_loss_pct", stop_loss_pct) or 0.0)
+            take_profit_pct = float(sym_override.get("take_profit_pct", take_profit_pct) or 0.0)
+            stop_loss_value = float(sym_override.get("stop_loss_value", stop_loss_value) or 0.0)
+            take_profit_value = float(sym_override.get("take_profit_value", take_profit_value) or 0.0)
         hold_overnight = bool(manager_settings.get("hold_positions_overnight", True))
 
         # Per-symbol AI-tag overnight exemption: if the symbol has a LONG or STRONG LONG
@@ -507,10 +534,10 @@ async def _process_symbol(
         # a fresh post-switch event arrives.
         switch_state = _signal_handoff_state.get(symbol)
         switched_at_idx = None
-        if switch_state is None or switch_state.get("strategy") != strategy_name:
+        if switch_state is None or switch_state.get("strategy") != effective_strategy_name:
             switched_at_idx = df_sig.index[-1]
             _signal_handoff_state[symbol] = {
-                "strategy": strategy_name,
+                "strategy": effective_strategy_name,
                 "switched_at_idx": switched_at_idx,
             }
         else:
@@ -569,7 +596,7 @@ async def _process_symbol(
         disable_engine_after_sell = False
         has_pending_sell = _has_pending_sell(pos.id)
 
-        strat_label = strategy_name.split(':')[0]
+        strat_label = effective_strategy_name.split(':')[0]
 
         # At the first tick of the final sell window (per symbol/day),
         # immediately lock in winners and notify unrealized losers.
@@ -599,16 +626,26 @@ async def _process_symbol(
 
         # Standard risk exits: stop loss and take profit
         if action is None and pos.shares > 0 and pos.avg_cost > 0:
+            sl_targets: list[float] = []
+            tp_targets: list[float] = []
             if stop_loss_pct > 0:
-                stop_price = pos.avg_cost * (1.0 - stop_loss_pct / 100.0)
-                if current_price <= stop_price:
-                    action = "SELL"
-                    reason = f"stop_loss ({stop_loss_pct:.2f}% @ ${stop_price:.2f})"
-            if action is None and take_profit_pct > 0:
-                tp_price = pos.avg_cost * (1.0 + take_profit_pct / 100.0)
-                if current_price >= tp_price:
-                    action = "SELL"
-                    reason = f"take_profit ({take_profit_pct:.2f}% @ ${tp_price:.2f})"
+                sl_targets.append(pos.avg_cost * (1.0 - stop_loss_pct / 100.0))
+            if stop_loss_value > 0:
+                sl_targets.append(pos.avg_cost - stop_loss_value)
+            if take_profit_pct > 0:
+                tp_targets.append(pos.avg_cost * (1.0 + take_profit_pct / 100.0))
+            if take_profit_value > 0:
+                tp_targets.append(pos.avg_cost + take_profit_value)
+
+            stop_price = max(sl_targets) if sl_targets else None
+            tp_price = min(tp_targets) if tp_targets else None
+
+            if stop_price is not None and current_price <= stop_price:
+                action = "SELL"
+                reason = f"stop_loss (@ ${stop_price:.2f})"
+            if action is None and tp_price is not None and current_price >= tp_price:
+                action = "SELL"
+                reason = f"take_profit (@ ${tp_price:.2f})"
 
         disable_engine_without_position = should_force_engine_off_without_position(
             shares=pos.shares,
