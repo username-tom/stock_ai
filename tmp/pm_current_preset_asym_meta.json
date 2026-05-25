@@ -21,10 +21,15 @@
   "initial_capital": 10000.0,
   "run_count": 36,
   "pm_settings_used": {
-    "stop_loss_pct": 1.0,
-    "take_profit_pct": 3.0,
+    "stop_loss_pct": 0.5,
+    "take_profit_pct": 1.25,
     "hold_positions_overnight": false,
-    "sentiment_bucket_persistence": 3,
+    "eod_sell_window_minutes": 5,
+    "pending_price_drift_cancel_pct": 0.25,
+    "pending_cancel_after_bars": 3,
+    "auto_trade_buy_price_offset_pct": 0.01,
+    "auto_trade_sell_price_offset_pct": 0.01,
+    "sentiment_bucket_persistence": 5,
     "market_sentiment_strategies": {
       "crash": "rsi",
       "bearish": "macd",

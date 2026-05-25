@@ -1,9 +1,28 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import event
 from app.config import settings
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
+_IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
+_engine_kwargs = {"echo": False}
+if _IS_SQLITE:
+    # Give writers more time before SQLite returns "database is locked".
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+
+engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+if _IS_SQLITE:
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
 
 
 class Base(DeclarativeBase):
@@ -64,6 +83,8 @@ async def _migrate(conn):
         )""",
         # backtest_reports.result_data_path (offloaded JSON on local storage)
         "ALTER TABLE backtest_reports ADD COLUMN result_data_path VARCHAR(500)",
+        # speed up paginated newest-first report list
+        "CREATE INDEX IF NOT EXISTS idx_backtest_reports_created_at ON backtest_reports(created_at DESC)",
         # sandbox_positions pending open-order columns (simulated order fill latency)
         "ALTER TABLE sandbox_positions ADD COLUMN pending_shares REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE sandbox_positions ADD COLUMN pending_avg_cost REAL NOT NULL DEFAULT 0.0",
@@ -91,8 +112,8 @@ async def _migrate(conn):
         # portfolio_manager_settings global sentiment strategy toggle
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sentiment_strategy_enabled BOOLEAN NOT NULL DEFAULT 1",
         # portfolio_manager_settings global risk exits (sandbox engine)
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_pct REAL NOT NULL DEFAULT 0.0",
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN take_profit_pct REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_pct REAL NOT NULL DEFAULT 0.8",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN take_profit_pct REAL NOT NULL DEFAULT 2.5",
         # portfolio_manager_settings AI tag strategy routing
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_strategy_enabled BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_strategies TEXT NOT NULL DEFAULT '{}'",
@@ -109,11 +130,12 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_sentiment_change_enabled BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_no_loss_sell BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_price_drift_cancel_pct REAL NOT NULL DEFAULT 0.75",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_cancel_after_bars INTEGER NOT NULL DEFAULT 3",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_buy_fill_rate_pct REAL NOT NULL DEFAULT 60.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_sell_fill_rate_pct REAL NOT NULL DEFAULT 70.0",
         # portfolio_manager_settings automated IB order price offsets (vs previous OHLC midpoint)
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_buy_price_offset_pct REAL NOT NULL DEFAULT 0.1",
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_sell_price_offset_pct REAL NOT NULL DEFAULT 0.1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_buy_price_offset_pct REAL NOT NULL DEFAULT 0.145",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_sell_price_offset_pct REAL NOT NULL DEFAULT 0.185",
         # Rename legacy strategy name 'bollinger' → 'bollinger_bands' on any existing positions
         "UPDATE sandbox_positions SET strategy_name = 'bollinger_bands' WHERE strategy_name = 'bollinger'",
         # Keep enough bars so PM RSI/MACD/SMA sentiment scoring is meaningful.

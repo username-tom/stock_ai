@@ -28,9 +28,12 @@ export const getStrategies = () => api.get('/backtest/strategies').then(r => r.d
 export const runBacktest = (payload) => api.post('/backtest/run', payload).then(r => r.data)
 export const runSentimentBacktest = (payload) => api.post('/backtest/run-sentiment', payload).then(r => r.data)
 export const runSandboxBacktest = (payload) => api.post('/backtest/run-sandbox', payload).then(r => r.data)
-export const getReports = () => api.get('/backtest/reports').then(r => r.data)
+export const getReports = ({ page = 1, pageSize = 50 } = {}) =>
+  api.get('/backtest/reports', { params: { page, page_size: pageSize } }).then(r => r.data)
 export const getReport = (id) => api.get(`/backtest/reports/${id}`).then(r => r.data)
 export const deleteReport = (id) => api.delete(`/backtest/reports/${id}`).then(r => r.data)
+export const offloadAllReports = ({ offset = 0, batchSize = 100 } = {}) =>
+  api.post('/backtest/reports/offload-all', null, { params: { offset, batch_size: batchSize } }).then(r => r.data)
 
 // Trading
 export const getIBStatus = () => api.get('/trading/ib/status').then(r => r.data)

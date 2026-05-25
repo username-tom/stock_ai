@@ -6,10 +6,15 @@
 - Runs: 36
 
 ## PM Settings Used (Unchanged During Sweep)
-- stop_loss_pct: 1.0
-- take_profit_pct: 3.0
+- stop_loss_pct: 0.5
+- take_profit_pct: 1.25
 - hold_positions_overnight: False
-- sentiment_bucket_persistence: 3
+- eod_sell_window_minutes: 5
+- pending_price_drift_cancel_pct: 0.25
+- pending_cancel_after_bars: 3
+- auto_trade_buy_price_offset_pct: 0.01
+- auto_trade_sell_price_offset_pct: 0.01
+- sentiment_bucket_persistence: 5
 
 - Control return at B90-S90: 12.8431%
 

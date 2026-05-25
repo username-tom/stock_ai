@@ -316,9 +316,8 @@ export default function SandboxResultsView({ result, metrics }) {
             <thead>
               <tr>
                 <th>Symbol</th>
-                <th>Strategy</th>
-                <th>Capital</th>
-                <th>Final</th>
+                <th>Start Equity</th>
+                <th>End Equity</th>
                 <th>Return %</th>
                 <th>Sharpe</th>
                 <th>Max DD %</th>
@@ -329,13 +328,12 @@ export default function SandboxResultsView({ result, metrics }) {
             <tbody>
               {(r.per_symbol ?? []).map(row => (
                 <tr key={row.symbol}>
-                  <td className="font-semibold">{row.symbol}</td>
-                  <td className="text-xs text-slate-400">
-                    {row.strategy ?? '—'}
+                  <td className="font-semibold">
+                    {row.symbol}
                     {row.error ? <span className="text-red-400"> · {row.error}</span> : null}
                   </td>
-                  <td className="font-mono">${Number(row.initial_capital ?? 0).toFixed(0)}</td>
-                  <td className="font-mono">${Number(row.final_value ?? 0).toFixed(2)}</td>
+                  <td className="font-mono">${Number(row.equity_start ?? row.initial_capital ?? 0).toFixed(2)}</td>
+                  <td className="font-mono">${Number(row.equity_end ?? row.final_value ?? 0).toFixed(2)}</td>
                   <td className={(row.total_return_pct ?? 0) >= 0 ? 'pos' : 'neg'}>
                     {(row.total_return_pct ?? 0) >= 0 ? '+' : ''}{Number(row.total_return_pct ?? 0).toFixed(2)}%
                   </td>

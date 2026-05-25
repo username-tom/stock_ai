@@ -5,11 +5,12 @@ import asyncio
 import copy
 import logging
 from datetime import datetime
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -33,6 +34,23 @@ from app.services.strategies import list_strategies
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+
+
+def _bars_per_year_from_interval(interval: str | None) -> float:
+    """Map interval strings to trading bars per year for Sharpe scaling."""
+    interval_key = (interval or "1d").strip().lower()
+    interval_bars: dict[str, float] = {
+        "5s": 252 * 4680,
+        "1m": 252 * 390,
+        "2m": 252 * 195,
+        "5m": 252 * 78,
+        "15m": 252 * 26,
+        "30m": 252 * 13,
+        "60m": 252 * 6.5,
+        "1h": 252 * 6.5,
+        "1d": 252,
+    }
+    return float(interval_bars.get(interval_key, 252.0))
 
 
 class BacktestRequest(BaseModel):
@@ -158,6 +176,62 @@ def _build_pm_settings_snapshot(overrides: dict | None = None) -> dict:
         snapshot.update(overrides)
     return snapshot
 
+
+async def _offload_report_payload(
+    db: AsyncSession,
+    report: BacktestReport,
+    payload: dict,
+    *,
+    clear_db_result_data: bool = True,
+) -> None:
+    """Persist full report payload to local storage and optionally clear DB JSON blob."""
+    result_data = payload.get("result_data") if isinstance(payload, dict) else None
+    has_result_data = isinstance(result_data, dict) and bool(result_data)
+    if not has_result_data:
+        logger.warning(
+            "Skipping offload for report %s due to empty result_data payload",
+            report.id,
+        )
+        return
+    try:
+        saved_path = save_backtest_report(report.id, report.name, payload)
+        report.result_data_path = saved_path
+        if clear_db_result_data and report.result_data is not None:
+            report.result_data = None
+        await db.commit()
+    except Exception:
+        logger.exception("Failed to offload backtest report %s to local storage", report.id)
+
+
+def _build_trace_log(
+    *,
+    symbol: str,
+    strategy_type: str,
+    start_date: str,
+    end_date: str,
+    initial_capital: float,
+    strategy_params: dict,
+    script_source: str,
+    script_id: int | None,
+    template_filename: str | None,
+    trades: list[dict],
+) -> dict:
+    return {
+        "trace_id": str(uuid4()),
+        "trace_generated_at": datetime.utcnow().isoformat() + "Z",
+        "symbol": symbol,
+        "strategy_type": strategy_type,
+        "script_source": script_source,
+        "script_id": script_id,
+        "template_filename": template_filename,
+        "start_date": start_date,
+        "end_date": end_date,
+        "initial_capital": initial_capital,
+        "strategy_params": strategy_params,
+        "trade_count": len(trades),
+        "sample_trades": trades[:10],
+    }
+
 @router.post("/run-sentiment")
 async def run_sentiment_backtest_endpoint(
     req: SentimentBacktestRequest,
@@ -249,6 +323,20 @@ async def run_sentiment_backtest_endpoint(
     db.add(report)
     await db.commit()
     await db.refresh(report)
+
+    offload_payload = {
+        "id": report.id,
+        "name": name,
+        "symbol": req.symbol.upper(),
+        "strategy_type": "sentiment_switching",
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "initial_capital": req.initial_capital,
+        "metrics": m,
+        "result_data": result_data_payload,
+        "created_at": report.created_at.isoformat() if report.created_at else None,
+    }
+    await _offload_report_payload(db, report, offload_payload)
 
     return {
         "id": report.id,
@@ -380,26 +468,35 @@ async def run_backtest_endpoint(
     await db.commit()
     await db.refresh(report)
 
-    # Offload full result data (equity curve, trades, OHLCV) to local storage
-    try:
-        offload_payload = {
-            "id": report.id,
-            "name": name,
-            "symbol": req.symbol.upper(),
-            "strategy_type": effective_strategy_type,
-            "start_date": req.start_date,
-            "end_date": req.end_date,
-            "initial_capital": req.initial_capital,
-            "metrics": m,
-            "result_data": result_data_payload,
-            "script_snapshot": frozen_snapshot,
-            "created_at": report.created_at.isoformat() if report.created_at else None,
-        }
-        saved_path = save_backtest_report(report.id, name, offload_payload)
-        report.result_data_path = saved_path
-        await db.commit()
-    except Exception:
-        logger.exception("Failed to offload backtest report %s to local storage", report.id)
+    offload_payload = {
+        "id": report.id,
+        "name": name,
+        "symbol": req.symbol.upper(),
+        "strategy_type": effective_strategy_type,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "initial_capital": req.initial_capital,
+        "metrics": m,
+        "result_data": result_data_payload,
+        "script_snapshot": frozen_snapshot,
+        "trace_log": _build_trace_log(
+            symbol=req.symbol.upper(),
+            strategy_type=effective_strategy_type,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            strategy_params=req.strategy_params,
+            script_source=(
+                "template" if req.template_filename is not None
+                else ("custom_script" if req.script_id is not None else "builtin")
+            ),
+            script_id=req.script_id,
+            template_filename=req.template_filename,
+            trades=result_data_payload["trades"],
+        ),
+        "created_at": report.created_at.isoformat() if report.created_at else None,
+    }
+    await _offload_report_payload(db, report, offload_payload)
 
     return {
         "id": report.id,
@@ -579,6 +676,7 @@ async def run_sandbox_backtest_endpoint(
     sim_buy_fill_rate = float(pm.get("sim_buy_fill_rate_pct", 60.0) or 0.0)
     sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 70.0) or 0.0)
     pending_drift_cancel = float(pm.get("pending_price_drift_cancel_pct", 0.75) or 0.0)
+    pending_cancel_after_bars = int(max(1, pm.get("pending_cancel_after_bars", 3) or 3))
     if req.sim_buy_fill_rate_pct is not None:
         sim_buy_fill_rate = float(req.sim_buy_fill_rate_pct)
     if req.sim_sell_fill_rate_pct is not None:
@@ -594,6 +692,7 @@ async def run_sandbox_backtest_endpoint(
         "sim_buy_fill_rate_pct": sim_buy_fill_rate,
         "sim_sell_fill_rate_pct": sim_sell_fill_rate,
         "pending_price_drift_cancel_pct": pending_drift_cancel,
+        "pending_cancel_after_bars": pending_cancel_after_bars,
     })
 
     # Capital split.
@@ -730,7 +829,7 @@ async def run_sandbox_backtest_endpoint(
                 sim_buy_fill_rate_pct=sim_buy_fill_rate,
                 sim_sell_fill_rate_pct=sim_sell_fill_rate,
                 pending_price_drift_cancel_pct=pending_drift_cancel,
-                sim_pending_duration_bars=1,
+                sim_pending_duration_bars=pending_cancel_after_bars,
             )
         except Exception as exc:
             logger.exception("Sandbox shared-pool backtest failed")
@@ -753,11 +852,16 @@ async def run_sandbox_backtest_endpoint(
         if equity_curve:
             import math as _math
             values = [float(p["value"]) for p in equity_curve]
+            interval = next(
+                (str(entry.get("interval")) for entry in per_symbol_summary if entry.get("interval")),
+                "1d",
+            )
+            bars_per_year = _bars_per_year_from_interval(interval)
             cal_days = 0.0
             try:
                 _s = datetime.strptime(req.start_date, "%Y-%m-%d")
                 _e = datetime.strptime(req.end_date, "%Y-%m-%d")
-                cal_days = max((_e - _s).days, 0)
+                cal_days = max((_e - _s).days + 1, 0)
             except (ValueError, TypeError):
                 cal_days = 0.0
             if req.initial_capital > 0 and coord["final_value"] > 0 and cal_days > 0:
@@ -777,7 +881,7 @@ async def run_sandbox_backtest_endpoint(
                     mean_r = sum(rets) / len(rets)
                     var_r = sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1)
                     std_r = _math.sqrt(var_r)
-                    sharpe_ratio = round((mean_r / std_r) * _math.sqrt(252.0), 2) if std_r > 0 else 0.0
+                    sharpe_ratio = round((mean_r / std_r) * _math.sqrt(bars_per_year), 2) if std_r > 0 else 0.0
             peak = values[0]
             worst = 0.0
             for v in values:
@@ -851,6 +955,20 @@ async def run_sandbox_backtest_endpoint(
         db.add(report)
         await db.commit()
         await db.refresh(report)
+
+        offload_payload = {
+            "id": report.id,
+            "name": name,
+            "symbol": report.symbol,
+            "strategy_type": "sandbox_portfolio",
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "initial_capital": req.initial_capital,
+            "metrics": metrics_out,
+            "result_data": result_data_payload,
+            "created_at": report.created_at.isoformat() if report.created_at else None,
+        }
+        await _offload_report_payload(db, report, offload_payload)
 
         return {
             "id": report.id,
@@ -1035,14 +1153,22 @@ async def run_sandbox_backtest_endpoint(
         import math as _math
         values = [float(p["value"]) for p in equity_curve]
         n_bars = len(values)
-        bars_per_year = 252.0
+        interval = next(
+            (
+                str(r.get("result", {}).get("interval"))
+                for r in per_results
+                if isinstance(r.get("result"), dict) and r.get("result", {}).get("interval")
+            ),
+            "1d",
+        )
+        bars_per_year = _bars_per_year_from_interval(interval)
 
         # Calendar-day span for CAGR-style annualisation.
         cal_days: float = 0.0
         try:
             _s = datetime.strptime(req.start_date, "%Y-%m-%d")
             _e = datetime.strptime(req.end_date, "%Y-%m-%d")
-            cal_days = max((_e - _s).days, 0)
+            cal_days = max((_e - _s).days + 1, 0)
         except (ValueError, TypeError):
             cal_days = 0.0
 
@@ -1058,7 +1184,7 @@ async def run_sandbox_backtest_endpoint(
                     ((aggregate_final / req.initial_capital) ** (1.0 / n_years) - 1.0) * 100.0,
                     2,
                 )
-        # Sharpe ratio (rf=0), still computed per equity-curve bar (assumed daily).
+        # Sharpe ratio (rf=0), annualised using the equity-curve bar interval.
         if n_bars > 1:
             rets = [
                 (values[i] - values[i - 1]) / values[i - 1]
@@ -1141,6 +1267,20 @@ async def run_sandbox_backtest_endpoint(
     await db.commit()
     await db.refresh(report)
 
+    offload_payload = {
+        "id": report.id,
+        "name": name,
+        "symbol": report.symbol,
+        "strategy_type": "sandbox_portfolio",
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "initial_capital": req.initial_capital,
+        "metrics": metrics,
+        "result_data": result_data_payload,
+        "created_at": report.created_at.isoformat() if report.created_at else None,
+    }
+    await _offload_report_payload(db, report, offload_payload)
+
     return {
         "id": report.id,
         "name": name,
@@ -1158,13 +1298,42 @@ async def run_sandbox_backtest_endpoint(
 
 
 @router.get("/reports")
-async def list_reports(db: AsyncSession = Depends(get_db)):
-    """List all saved backtest reports (summary only)."""
+async def list_reports(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """List saved backtest reports (summary only), paginated."""
+    total = await db.scalar(select(func.count()).select_from(BacktestReport))
+    total_count = int(total or 0)
+    offset = (page - 1) * page_size
     result = await db.execute(
-        select(BacktestReport).order_by(BacktestReport.created_at.desc())
+        select(
+            BacktestReport.id,
+            BacktestReport.name,
+            BacktestReport.symbol,
+            BacktestReport.strategy_type,
+            BacktestReport.start_date,
+            BacktestReport.end_date,
+            BacktestReport.initial_capital,
+            BacktestReport.total_return_pct,
+            BacktestReport.sharpe_ratio,
+            BacktestReport.max_drawdown_pct,
+            BacktestReport.win_rate_pct,
+            BacktestReport.total_trades,
+            BacktestReport.created_at,
+        )
+        .order_by(BacktestReport.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
     )
-    reports = result.scalars().all()
+    reports = result.all()
     return {
+        "page": page,
+        "page_size": page_size,
+        "total_count": total_count,
+        "has_next": offset + len(reports) < total_count,
+        "has_prev": page > 1,
         "reports": [
             {
                 "id": r.id,
@@ -1192,6 +1361,41 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
     r = await db.get(BacktestReport, report_id)
     if not r:
         raise HTTPException(status_code=404, detail="Report not found.")
+
+    file_data = load_backtest_report(r.id, r.name)
+    result_data = file_data.get("result_data") if file_data else (r.result_data or {})
+    data_warning = None
+
+    # Opportunistic migration: if old DB rows still hold large JSON blobs, offload now.
+    if (not file_data) and r.result_data:
+        payload = {
+            "id": r.id,
+            "name": r.name,
+            "symbol": r.symbol,
+            "strategy_type": r.strategy_type,
+            "start_date": r.start_date,
+            "end_date": r.end_date,
+            "initial_capital": r.initial_capital,
+            "metrics": {
+                "final_value": r.final_value,
+                "total_return_pct": r.total_return_pct,
+                "annualized_return_pct": r.annualized_return_pct,
+                "sharpe_ratio": r.sharpe_ratio,
+                "max_drawdown_pct": r.max_drawdown_pct,
+                "win_rate_pct": r.win_rate_pct,
+                "total_trades": r.total_trades,
+            },
+            "result_data": r.result_data,
+            "script_snapshot": r.script_snapshot,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        await _offload_report_payload(db, r, payload)
+    elif not result_data:
+        data_warning = (
+            "Detailed trade/ohlcv payload is unavailable for this historical report. "
+            "New scripted backtests now persist traceable local logs."
+        )
+
     return {
         "id": r.id,
         "name": r.name,
@@ -1210,7 +1414,9 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
             "win_rate_pct": r.win_rate_pct,
             "total_trades": r.total_trades,
         },
-        "result_data": r.result_data,
+        "result_data": result_data,
+        "data_warning": data_warning,
+        "trace_log": file_data.get("trace_log") if file_data else None,
         "html_report_path": r.html_report_path,
         "script_snapshot": r.script_snapshot,
         "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -1297,7 +1503,11 @@ async def offload_report_to_storage(report_id: int, db: AsyncSession = Depends(g
     r = await db.get(BacktestReport, report_id)
     if not r:
         raise HTTPException(status_code=404, detail="Report not found.")
-    payload = {
+    file_data = load_backtest_report(r.id, r.name)
+    if file_data is not None:
+        payload = file_data
+    elif r.result_data:
+        payload = {
         "id": r.id,
         "name": r.name,
         "symbol": r.symbol,
@@ -1317,11 +1527,96 @@ async def offload_report_to_storage(report_id: int, db: AsyncSession = Depends(g
         "result_data": r.result_data or {},
         "script_snapshot": r.script_snapshot,
         "created_at": r.created_at.isoformat() if r.created_at else None,
-    }
-    saved_path = save_backtest_report(r.id, r.name, payload)
-    r.result_data_path = saved_path
+        }
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="No detailed result payload remains for this report.",
+        )
+    await _offload_report_payload(db, r, payload)
+    return {"status": "saved", "path": r.result_data_path}
+
+
+@router.post("/reports/offload-all")
+async def offload_all_reports_to_storage(
+    offset: int = Query(default=0, ge=0),
+    batch_size: int = Query(default=100, ge=1, le=300),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk migrate report payloads to local PC files in bounded batches."""
+    total = await db.scalar(select(func.count()).select_from(BacktestReport))
+    total_count = int(total or 0)
+    result = await db.execute(
+        select(BacktestReport)
+        .order_by(BacktestReport.id.asc())
+        .offset(offset)
+        .limit(batch_size)
+    )
+    reports = result.scalars().all()
+
+    processed = 0
+    offloaded = 0
+    cleared_db_blobs = 0
+    failed = 0
+    skipped_missing_detail = 0
+
+    for r in reports:
+        processed += 1
+        try:
+            file_data = load_backtest_report(r.id, r.name)
+            if file_data is not None:
+                payload = file_data
+            elif r.result_data:
+                payload = {
+                    "id": r.id,
+                    "name": r.name,
+                    "symbol": r.symbol,
+                    "strategy_type": r.strategy_type,
+                    "start_date": r.start_date,
+                    "end_date": r.end_date,
+                    "initial_capital": r.initial_capital,
+                    "metrics": {
+                        "final_value": r.final_value,
+                        "total_return_pct": r.total_return_pct,
+                        "annualized_return_pct": r.annualized_return_pct,
+                        "sharpe_ratio": r.sharpe_ratio,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "win_rate_pct": r.win_rate_pct,
+                        "total_trades": r.total_trades,
+                    },
+                    "result_data": r.result_data,
+                    "script_snapshot": r.script_snapshot,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+            else:
+                skipped_missing_detail += 1
+                continue
+            saved_path = save_backtest_report(r.id, r.name, payload)
+            if r.result_data is not None:
+                cleared_db_blobs += 1
+            r.result_data_path = saved_path
+            r.result_data = None
+            offloaded += 1
+        except Exception:
+            failed += 1
+            logger.exception("Failed to bulk-offload backtest report %s", r.id)
+
     await db.commit()
-    return {"status": "saved", "path": saved_path}
+    next_offset = offset + processed
+    has_more = next_offset < total_count
+
+    return {
+        "offset": offset,
+        "batch_size": batch_size,
+        "next_offset": next_offset,
+        "has_more": has_more,
+        "total_count": total_count,
+        "processed": processed,
+        "offloaded": offloaded,
+        "cleared_db_blobs": cleared_db_blobs,
+        "skipped_missing_detail": skipped_missing_detail,
+        "failed": failed,
+    }
 
 
 @router.get("/local-storage/files")

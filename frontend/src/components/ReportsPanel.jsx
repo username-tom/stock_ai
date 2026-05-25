@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useLocation } from 'react-router-dom'
-import { getReports, getReport, deleteReport } from '../api/client'
+import { getReports, getReport, deleteReport, offloadAllReports } from '../api/client'
 import EquityChart from './charts/EquityChart'
 import SubplotChart from './charts/SubplotChart'
+import CandlestickChart from './charts/CandlestickChart'
 import SandboxResultsView from './backtest/SandboxResultsView'
 import { getReportFilename } from '../utils/reportPaths'
 import {
@@ -132,22 +132,75 @@ function mergeTradeSignalsIntoOhlcv(ohlcv = [], trades = []) {
   return merged
 }
 
+function findBarIndexForTimestamp(ohlcv = [], timestamp) {
+  const key = normalizeTimestamp(timestamp)
+  if (!key || !Array.isArray(ohlcv) || ohlcv.length === 0) return -1
+
+  let exact = -1
+  for (let i = 0; i < ohlcv.length; i += 1) {
+    if (normalizeTimestamp(ohlcv[i]?.date) === key) {
+      exact = i
+      break
+    }
+  }
+  if (exact >= 0) return exact
+
+  const day = key.slice(0, 10)
+  if (!day) return -1
+  for (let i = 0; i < ohlcv.length; i += 1) {
+    if (normalizeTimestamp(ohlcv[i]?.date).slice(0, 10) === day) {
+      return i
+    }
+  }
+  return -1
+}
+
+function buildTradeContextWindow(ohlcv = [], trade, contextBars = 12) {
+  const entryIdx = findBarIndexForTimestamp(ohlcv, trade?.entry_date)
+  const exitIdx = findBarIndexForTimestamp(ohlcv, trade?.exit_date)
+  const seedIdx = [entryIdx, exitIdx].filter(v => v >= 0)
+  if (!seedIdx.length) return null
+
+  const lo = Math.max(0, Math.min(...seedIdx) - contextBars)
+  const hi = Math.min(ohlcv.length - 1, Math.max(...seedIdx) + contextBars)
+  return {
+    start: lo,
+    end: hi,
+    bars: ohlcv.slice(lo, hi + 1),
+  }
+}
+
 export default function ReportsPanel() {
   const qc = useQueryClient()
-  const { pathname } = useLocation()
   const [selected, setSelected] = useState(null)
   const [scriptOpen, setScriptOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [listCollapsed, setListCollapsed] = useState(false)
+  const [page, setPage] = useState(1)
+  const [offloadMessage, setOffloadMessage] = useState('')
+  const [offloadProgress, setOffloadProgress] = useState(null)
+  const [expandedTrades, setExpandedTrades] = useState({})
+  const pageSize = 50
+
+  const formatDuration = (seconds) => {
+    if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—'
+    const s = Math.round(seconds)
+    const m = Math.floor(s / 60)
+    const rem = s % 60
+    return `${m}:${String(rem).padStart(2, '0')}`
+  }
 
   const {
     data: listData,
     isLoading,
+    isError,
+    error,
     refetch: refetchReports,
   } = useQuery({
-    queryKey: ['reports'],
-    queryFn: getReports,
-    staleTime: 0,
+    queryKey: ['reports', page, pageSize],
+    queryFn: () => getReports({ page, pageSize }),
+    staleTime: 30000,
+    refetchOnWindowFocus: false,
   })
 
   const { data: detail, isLoading: detailLoading } = useQuery({
@@ -157,12 +210,6 @@ export default function ReportsPanel() {
     staleTime: 0,
   })
 
-  useEffect(() => {
-    if (pathname === '/reports') {
-      refetchReports()
-    }
-  }, [pathname, refetchReports])
-
   const deleteMut = useMutation({
     mutationFn: deleteReport,
     onSuccess: () => {
@@ -171,21 +218,130 @@ export default function ReportsPanel() {
     },
   })
 
+  const offloadMut = useMutation({
+    mutationFn: async () => {
+      const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+      const runBatchWithRetry = async (offset, batchSize) => {
+        const maxAttempts = 5
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            return await offloadAllReports({ offset, batchSize })
+          } catch (err) {
+            const status = err?.response?.status
+            const retryable = !status || status >= 500 || status === 429
+            if (!retryable || attempt === maxAttempts) throw err
+            await sleep(300 * attempt)
+          }
+        }
+        throw new Error('Unexpected offload retry state')
+      }
+
+      let offset = 0
+      const batchSize = 40
+      let totalOffloaded = 0
+      let totalCleared = 0
+      let totalFailed = 0
+      let totalSkippedMissing = 0
+      let totalProcessed = 0
+      let totalCount = 0
+      let loops = 0
+      let hasMore = true
+      const startedAt = Date.now()
+
+      setOffloadProgress({
+        running: true,
+        percent: 0,
+        processed: 0,
+        total: 0,
+        elapsedSec: 0,
+        etaSec: null,
+      })
+
+      while (loops < 300 && hasMore) {
+        loops += 1
+        const data = await runBatchWithRetry(offset, batchSize)
+        const batchProcessed = Number(data?.processed ?? 0)
+        totalProcessed += batchProcessed
+        totalCount = Number(data?.total_count ?? totalCount)
+        totalOffloaded += Number(data?.offloaded ?? 0)
+        totalCleared += Number(data?.cleared_db_blobs ?? 0)
+        totalFailed += Number(data?.failed ?? 0)
+        totalSkippedMissing += Number(data?.skipped_missing_detail ?? 0)
+        hasMore = !!data?.has_more
+
+        const elapsedSec = (Date.now() - startedAt) / 1000
+        const rate = totalProcessed > 0 ? (totalProcessed / Math.max(elapsedSec, 0.001)) : 0
+        const remaining = totalCount > 0 ? Math.max(0, totalCount - totalProcessed) : 0
+        const etaSec = rate > 0 ? (remaining / rate) : null
+        const percent = totalCount > 0 ? Math.min(100, (totalProcessed / totalCount) * 100) : 0
+
+        setOffloadProgress({
+          running: true,
+          percent,
+          processed: totalProcessed,
+          total: totalCount,
+          elapsedSec,
+          etaSec,
+        })
+
+        if (!hasMore) break
+        offset = Number(data?.next_offset ?? (offset + batchSize))
+      }
+
+      if (hasMore) {
+        throw new Error('Offload exceeded max batches before completion.')
+      }
+
+      const finalElapsed = (Date.now() - startedAt) / 1000
+      setOffloadProgress({
+        running: false,
+        percent: 100,
+        processed: totalProcessed,
+        total: totalCount,
+        elapsedSec: finalElapsed,
+        etaSec: 0,
+      })
+
+      return {
+        offloaded: totalOffloaded,
+        cleared_db_blobs: totalCleared,
+        skipped_missing_detail: totalSkippedMissing,
+        failed: totalFailed,
+      }
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['reports'] })
+      const msg = `Offload complete: ${data?.offloaded ?? 0} saved, ${data?.cleared_db_blobs ?? 0} DB blobs cleared, ${data?.skipped_missing_detail ?? 0} skipped (missing historical detail), ${data?.failed ?? 0} hard failures.`
+      setOffloadMessage(msg)
+    },
+    onError: (err) => {
+      const detail = err?.response?.data?.detail
+      setOffloadMessage(`Offload failed${detail ? `: ${detail}` : '.'}`)
+      setOffloadProgress(prev => prev ? { ...prev, running: false } : null)
+    },
+  })
+
   const reports = listData?.reports ?? []
-  useEffect(() => {
-    if (selected && !reports.some(r => r.id === selected)) {
-      setSelected(null)
-    }
-  }, [reports, selected])
+  const totalCount = listData?.total_count ?? reports.length
+  const hasNextPage = !!listData?.has_next
+  const hasPrevPage = !!listData?.has_prev
+  const pageStart = totalCount === 0 ? 0 : (page - 1) * pageSize + 1
+  const pageEnd = totalCount === 0 ? 0 : Math.min(page * pageSize, totalCount)
 
   const q = search.trim().toUpperCase()
   const filtered = q
     ? reports.filter(r => r.symbol.includes(q) || r.strategy_type.toUpperCase().includes(q))
     : reports
+  const showingCount = filtered.length
   const reportOhlcvWithSignals = mergeTradeSignalsIntoOhlcv(
     detail?.result_data?.ohlcv ?? [],
     detail?.result_data?.trades ?? [],
   )
+  const groupedTrades = (detail?.result_data?.trades ?? []).map((t, idx) => ({
+    ...t,
+    _id: `${idx}-${t.entry_date ?? ''}-${t.exit_date ?? ''}`,
+    _context: buildTradeContextWindow(detail?.result_data?.ohlcv ?? [], t),
+  }))
   const advancedSettings = extractAdvancedSentimentSettings(detail)
 
   return (
@@ -194,25 +350,65 @@ export default function ReportsPanel() {
         <div>
           <h1 className="text-xl font-bold text-slate-100">Reports</h1>
           <p className="text-xs text-slate-500">Saved backtest reports</p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setListCollapsed(v => !v)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-300 bg-dark-800 hover:bg-dark-700 border border-dark-500 rounded-md transition-colors"
-          title={listCollapsed ? 'Show report list' : 'Hide report list'}
-        >
-          {listCollapsed ? (
-            <>
-              <ChevronRightIcon className="h-3.5 w-3.5" />
-              Show list ({filtered.length})
-            </>
-          ) : (
-            <>
-              <ChevronLeftIcon className="h-3.5 w-3.5" />
-              Hide list
-            </>
+          {offloadMessage && (
+            <p className={`text-xs mt-1 ${offloadMessage.startsWith('Offload failed') ? 'text-red-400' : 'text-emerald-400'}`}>{offloadMessage}</p>
           )}
-        </button>
+          {offloadProgress && (
+            <div className="mt-2 w-full max-w-lg rounded-md border border-dark-600 bg-dark-900/40 p-2">
+              <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1">
+                <span>{offloadProgress.running ? 'Offloading reports…' : 'Offload progress'}</span>
+                <span>{Math.round(offloadProgress.percent ?? 0)}%</span>
+              </div>
+              <div className="h-2 rounded bg-dark-700 overflow-hidden">
+                <div
+                  className={`h-full ${offloadProgress.running ? 'bg-emerald-500' : 'bg-emerald-600'}`}
+                  style={{ width: `${Math.max(0, Math.min(100, offloadProgress.percent ?? 0))}%` }}
+                />
+              </div>
+              <div className="mt-1 text-[11px] text-slate-500">
+                {offloadProgress.processed ?? 0}
+                {offloadProgress.total ? ` / ${offloadProgress.total}` : ''} processed
+                {' · '}elapsed {formatDuration(offloadProgress.elapsedSec)}
+                {' · '}ETA {offloadProgress.running ? formatDuration(offloadProgress.etaSec) : '0:00'}
+              </div>
+            </div>
+          )}
+          {isError && (
+            <p className="text-xs text-red-400 mt-1">Failed to load reports: {error?.message ?? 'Unknown error'}</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setOffloadMessage('')
+              offloadMut.mutate()
+            }}
+            disabled={offloadMut.isPending}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-200 bg-emerald-700/80 hover:bg-emerald-700 border border-emerald-500/50 rounded-md transition-colors disabled:opacity-50"
+            title="Save all reports to local files and clear DB blobs"
+          >
+            {offloadMut.isPending ? 'Offloading…' : 'Offload All To Local'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setListCollapsed(v => !v)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-300 bg-dark-800 hover:bg-dark-700 border border-dark-500 rounded-md transition-colors"
+            title={listCollapsed ? 'Show report list' : 'Hide report list'}
+          >
+            {listCollapsed ? (
+              <>
+                <ChevronRightIcon className="h-3.5 w-3.5" />
+                Show list ({filtered.length})
+              </>
+            ) : (
+              <>
+                <ChevronLeftIcon className="h-3.5 w-3.5" />
+                Hide list
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       <div className={listCollapsed ? 'block' : 'grid grid-cols-1 xl:grid-cols-4 gap-3'}>
@@ -220,7 +416,7 @@ export default function ReportsPanel() {
         {!listCollapsed && (
         <div className="card xl:col-span-1 space-y-2 max-h-[85vh] overflow-y-auto p-3">
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">
-            {filtered.length}{q ? ` of ${reports.length}` : ''} Report{reports.length !== 1 ? 's' : ''}
+            {showingCount}{q ? ` of ${reports.length}` : ''} on page · {totalCount} total
           </h2>
           <div className="relative mb-3">
             <input
@@ -228,6 +424,7 @@ export default function ReportsPanel() {
               placeholder="Search symbol or strategy…"
               value={search}
               onChange={e => setSearch(e.target.value)}
+              disabled={isError}
               spellCheck={false}
             />
             <svg className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500 pointer-events-none" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -251,7 +448,16 @@ export default function ReportsPanel() {
           {!isLoading && filtered.length === 0 && (
             <div className="text-center text-slate-500 text-sm py-12">
               <DocumentChartBarIcon className="h-8 w-8 mx-auto mb-2 text-slate-600" />
-              {reports.length === 0 ? 'No reports yet. Run a backtest first.' : 'No reports match your search.'}
+              {isError
+                ? 'Could not load reports.'
+                : (reports.length === 0 ? 'No reports yet. Run a backtest first.' : 'No reports match your search.')}
+              {isError && (
+                <div className="mt-3">
+                  <button type="button" className="btn-secondary text-xs" onClick={() => refetchReports()}>
+                    Retry
+                  </button>
+                </div>
+              )}
             </div>
           )}
           {filtered.map(r => (
@@ -280,6 +486,30 @@ export default function ReportsPanel() {
               </div>
             </button>
           ))}
+          <div className="mt-2 pt-2 border-t border-dark-600 flex items-center justify-between gap-2 text-xs text-slate-500">
+            <span>
+              Showing {pageStart}-{pageEnd}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="btn-secondary text-xs px-2 py-1 disabled:opacity-40"
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={!hasPrevPage || isLoading}
+              >
+                Prev
+              </button>
+              <span>Page {page}</span>
+              <button
+                type="button"
+                className="btn-secondary text-xs px-2 py-1 disabled:opacity-40"
+                onClick={() => setPage(p => p + 1)}
+                disabled={!hasNextPage || isLoading}
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </div>
         )}
 
@@ -296,6 +526,9 @@ export default function ReportsPanel() {
                         : `${detail.symbol} — ${detail.strategy_type}`}
                     </h2>
                     <p className="text-sm text-slate-400">{detail.start_date} → {detail.end_date}</p>
+                    {detail.data_warning && (
+                      <p className="text-xs text-amber-400 mt-1">{detail.data_warning}</p>
+                    )}
                   </div>
                   <div className="flex gap-2">
                     {detail.html_report_path && (
@@ -449,37 +682,64 @@ export default function ReportsPanel() {
               )}
 
               {/* Trades */}
-              {detail.strategy_type !== 'sandbox_portfolio' && detail.result_data?.trades?.length > 0 && (
+              {detail.strategy_type !== 'sandbox_portfolio' && groupedTrades.length > 0 && (
                 <div className="card">
                   <h3 className="font-medium text-slate-200 mb-3">
-                    Trade Log ({detail.result_data.trades.length} trades)
+                    Trade Log ({groupedTrades.length} grouped buy/sell trades)
                   </h3>
-                  <div className="table-container max-h-72 overflow-y-auto">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Entry</th><th>Exit</th>
-                          <th>Entry $</th><th>Exit $</th>
-                          <th>Qty</th><th>Buy Reason</th><th>Sell Reason</th><th>P&amp;L</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {detail.result_data.trades.map((t, i) => (
-                          <tr key={i}>
-                            <td className="font-mono text-xs">{t.entry_date}</td>
-                            <td className="font-mono text-xs">{t.exit_date}</td>
-                            <td className="font-mono">${t.entry_price}</td>
-                            <td className="font-mono">${t.exit_price}</td>
-                            <td>{t.quantity}</td>
-                            <td><ReasonBadge value={t.entry_reason} /></td>
-                            <td><ReasonBadge value={t.exit_reason} /></td>
-                            <td className={t.pnl >= 0 ? 'pos' : 'neg'}>
-                              {t.pnl >= 0 ? '+' : ''}${t.pnl?.toFixed(2)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
+                    {groupedTrades.map((t, i) => {
+                      const isOpen = !!expandedTrades[t._id]
+                      return (
+                        <div key={t._id} className="border border-dark-600 rounded-lg overflow-hidden bg-dark-900/30">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedTrades(prev => ({ ...prev, [t._id]: !prev[t._id] }))}
+                            className="w-full px-3 py-2 text-left hover:bg-dark-800/50 transition-colors"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-xs text-slate-500">Trade #{i + 1}</div>
+                                <div className="text-sm text-slate-200 truncate font-mono">
+                                  {t.entry_date} → {t.exit_date}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3 text-xs">
+                                <span className="text-slate-400">Qty {Number(t.quantity ?? 0).toFixed(4)}</span>
+                                <span className="text-slate-400 font-mono">${Number(t.entry_price ?? 0).toFixed(4)} → ${Number(t.exit_price ?? 0).toFixed(4)}</span>
+                                <span className={t.pnl >= 0 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
+                                  {t.pnl >= 0 ? '+' : ''}${Number(t.pnl ?? 0).toFixed(2)}
+                                </span>
+                                {isOpen ? <ChevronUpIcon className="h-4 w-4 text-slate-500" /> : <ChevronDownIcon className="h-4 w-4 text-slate-500" />}
+                              </div>
+                            </div>
+                          </button>
+                          {isOpen && (
+                            <div className="px-3 pb-3 space-y-3 border-t border-dark-700/80 bg-dark-900/50">
+                              <div className="flex flex-wrap items-center gap-2 pt-2 text-xs">
+                                <span className="text-slate-400">Buy:</span><ReasonBadge value={t.entry_reason} />
+                                <span className="text-slate-400 ml-3">Sell:</span><ReasonBadge value={t.exit_reason} />
+                              </div>
+                              {t._context?.bars?.length ? (
+                                <div>
+                                  <div className="text-xs text-slate-500 mb-2">
+                                    Candlestick context ({t._context.bars.length} bars around entry/exit)
+                                  </div>
+                                  <CandlestickChart
+                                    data={t._context.bars}
+                                    height={220}
+                                    showFloatingTooltip={true}
+                                    hidePremarketAfterOpen={false}
+                                  />
+                                </div>
+                              ) : (
+                                <div className="text-xs text-slate-500">No nearby OHLC bars found for this trade window.</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}

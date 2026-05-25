@@ -565,6 +565,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_long_sl_pct: Optional[float] = None
     ai_tag_no_loss_sell: Optional[bool] = None
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    pending_cancel_after_bars: Optional[int] = Field(default=None, ge=1, le=120)
     sim_buy_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
 

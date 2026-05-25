@@ -65,14 +65,19 @@ const DEFAULT_TREND_SENTIMENT_STRATEGIES = {
 }
 const DEFAULT_PM_PRESET_DEFS = [
   {
-    key: 'default-baseline-tight',
-    name: 'Baseline Tight - High Return (SL 0.8 / TP 2.5 / No Overnight / Debounce 5)',
+    key: 'default-intraday-strict',
+    name: 'Intraday Strict (SL 0.5 / TP 1.25 / No Overnight / EOD 5m)',
     strategyMap: DEFAULT_SENTIMENT_STRATEGIES,
     overrides: {
-      stop_loss_pct: 0.8,
-      take_profit_pct: 2.5,
+      stop_loss_pct: 0.5,
+      take_profit_pct: 1.25,
       hold_positions_overnight: false,
       sentiment_bucket_persistence: 5,
+      eod_sell_window_minutes: 5,
+      pending_price_drift_cancel_pct: 0.25,
+      pending_cancel_after_bars: 3,
+      auto_trade_buy_price_offset_pct: 0.01,
+      auto_trade_sell_price_offset_pct: 0.01,
       sim_buy_fill_rate_pct: 60,
       sim_sell_fill_rate_pct: 70,
     },
@@ -253,11 +258,11 @@ function buildDraftFromSettings(settings) {
     reallocation_mode: settings.reallocation_mode ?? 'to_stock',
     allow_buy_outside_allocation: settings.allow_buy_outside_allocation ?? false,
     sentiment_strategy_enabled: settings.sentiment_strategy_enabled ?? true,
-    stop_loss_pct: settings.stop_loss_pct ?? 0,
-    take_profit_pct: settings.take_profit_pct ?? 0,
-    hold_positions_overnight: settings.hold_positions_overnight ?? true,
+    stop_loss_pct: settings.stop_loss_pct ?? 0.5,
+    take_profit_pct: settings.take_profit_pct ?? 1.25,
+    hold_positions_overnight: settings.hold_positions_overnight ?? false,
     eod_engine_shutoff_minutes_before_sell: settings.eod_engine_shutoff_minutes_before_sell ?? 120,
-    eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 30,
+    eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 5,
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
     sentiment_data_points: Math.max(MIN_SENTIMENT_DATA_POINTS, Number(settings.sentiment_data_points ?? MIN_SENTIMENT_DATA_POINTS)),
     sentiment_interval: settings.sentiment_interval ?? '1m',
@@ -277,11 +282,12 @@ function buildDraftFromSettings(settings) {
     pm_hold_duration_days: settings.pm_hold_duration_days ?? 1,
     pm_hold_extended_multiplier: settings.pm_hold_extended_multiplier ?? 2.0,
     pm_hold_trailing_pct: settings.pm_hold_trailing_pct ?? 3.0,
-    pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.75,
+    pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.25,
+    pending_cancel_after_bars: settings.pending_cancel_after_bars ?? 3,
     sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 60,
     sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 70,
-    auto_trade_buy_price_offset_pct: settings.auto_trade_buy_price_offset_pct ?? 0.1,
-    auto_trade_sell_price_offset_pct: settings.auto_trade_sell_price_offset_pct ?? 0.1,
+    auto_trade_buy_price_offset_pct: settings.auto_trade_buy_price_offset_pct ?? 0.01,
+    auto_trade_sell_price_offset_pct: settings.auto_trade_sell_price_offset_pct ?? 0.01,
     sentiment_matrix_strategies: (() => {
       const base = buildDefaultSentimentMatrix({
         ...DEFAULT_SENTIMENT_STRATEGIES,
@@ -960,6 +966,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       pm_hold_extended_multiplier: Math.max(0, Number(draft.pm_hold_extended_multiplier ?? 2.0) || 0),
       pm_hold_trailing_pct: Math.max(0, Number(draft.pm_hold_trailing_pct ?? 3.0) || 0),
       pending_price_drift_cancel_pct: Number(draft.pending_price_drift_cancel_pct),
+      pending_cancel_after_bars: Math.max(1, Math.floor(Number(draft.pending_cancel_after_bars ?? 3) || 3)),
       sim_buy_fill_rate_pct: Number(draft.sim_buy_fill_rate_pct),
       sim_sell_fill_rate_pct: Number(draft.sim_sell_fill_rate_pct),
       auto_trade_buy_price_offset_pct: Number(draft.auto_trade_buy_price_offset_pct),
@@ -1332,14 +1339,20 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
-          Risk exits: SL {Number(settings.stop_loss_pct ?? 0).toFixed(1)}% | TP {Number(settings.take_profit_pct ?? 0).toFixed(1)}%
+          Risk exits: SL {Number(settings.stop_loss_pct ?? 0.5).toFixed(1)}% | TP {Number(settings.take_profit_pct ?? 1.25).toFixed(1)}%
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
-          Auto pricing: BUY +{Number(settings.auto_trade_buy_price_offset_pct ?? 0.1).toFixed(2)}%
+          Auto pricing: BUY +{Number(settings.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}%
           {' / '}
-          SELL -{Number(settings.auto_trade_sell_price_offset_pct ?? 0.1).toFixed(2)}%
+          SELL -{Number(settings.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%
           {' (prev OHLC mid)'}
+        </span>
+        <span className="flex items-center gap-1">
+          <ChartBarIcon className="h-3.5 w-3.5" />
+          Pending cancel: drift {Number(settings.pending_price_drift_cancel_pct ?? 0.25).toFixed(2)}%
+          {' · timeout '}
+          {Math.max(1, Number(settings.pending_cancel_after_bars ?? 3))} bars
         </span>
         <span className={`flex items-center gap-1 ${settings.hold_positions_overnight ? 'text-slate-600' : 'text-orange-400'}`}>
           <ClockIcon className="h-3.5 w-3.5" />
@@ -2003,6 +2016,22 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   </SettingRow>
 
                   <SettingRow
+                    label="Pending Cancel Timeout (bars)"
+                    hint="Cancel pending orders that remain unfilled after this many bars in the selected sentiment interval."
+                  >
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={1} max={120} step={1}
+                        disabled={!editSettings}
+                        value={draft.pending_cancel_after_bars}
+                        onChange={e => updateDraft(d => ({ ...d, pending_cancel_after_bars: e.target.value }))}
+                        className="input w-28 text-sm py-1.5"
+                      />
+                      <span className="text-slate-400 text-sm">bars</span>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
                     label="Sim BUY Fill Rate %"
                     hint="For simulated/backtest pending BUY orders: when price is still within drift range, this is the per-bar probability of filling. 100 = always fill, 0 = never fill."
                   >
@@ -2156,31 +2185,31 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
               <SettingRow
                 label="Automated BUY Price Offset %"
-                hint="Automated trades only: BUY limit uses previous OHLC midpoint plus this percentage (default 0.10%)."
+                hint="Automated trades only: BUY limit uses previous OHLC midpoint plus this percentage (default 0.01%)."
               >
                 <div className="flex items-center gap-3">
                   <input
                     type="range" min={0} max={2} step={0.01}
-                    value={Number(draft.auto_trade_buy_price_offset_pct ?? 0.1)}
+                    value={Number(draft.auto_trade_buy_price_offset_pct ?? 0.01)}
                     onChange={e => updateDraft(d => ({ ...d, auto_trade_buy_price_offset_pct: Number(e.target.value) }))}
                     className="flex-1 accent-violet-500"
                   />
-                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_buy_price_offset_pct ?? 0.1).toFixed(2)}%</span>
+                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}%</span>
                 </div>
               </SettingRow>
 
               <SettingRow
                 label="Automated SELL Price Offset %"
-                hint="Automated trades only: SELL limit uses previous OHLC midpoint minus this percentage (default 0.10%)."
+                hint="Automated trades only: SELL limit uses previous OHLC midpoint minus this percentage (default 0.01%)."
               >
                 <div className="flex items-center gap-3">
                   <input
                     type="range" min={0} max={2} step={0.01}
-                    value={Number(draft.auto_trade_sell_price_offset_pct ?? 0.1)}
+                    value={Number(draft.auto_trade_sell_price_offset_pct ?? 0.01)}
                     onChange={e => updateDraft(d => ({ ...d, auto_trade_sell_price_offset_pct: Number(e.target.value) }))}
                     className="flex-1 accent-violet-500"
                   />
-                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_sell_price_offset_pct ?? 0.1).toFixed(2)}%</span>
+                  <span className="w-16 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%</span>
                 </div>
               </SettingRow>
 

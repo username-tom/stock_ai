@@ -161,8 +161,8 @@ export default function BacktestPanel() {
     initial_capital: 10000,
     commission: 0.005,
     day_trade: true,
-    hold_positions_overnight: true,
-    eod_sell_window_minutes: 30,
+    hold_positions_overnight: false,
+    eod_sell_window_minutes: 5,
   })
   const [commissionPreset, setCommissionPreset] = useState('0.005')
   const [stratParams, setStratParams] = useState({ fast_period: 10, slow_period: 30, ma_type: 'SMA' })
@@ -196,8 +196,8 @@ export default function BacktestPanel() {
     sentiment_warmup: 35,
     stop_loss_pct: 0,
     take_profit_pct: 0,
-    hold_positions_overnight: true,
-    eod_sell_window_minutes: 30,
+    hold_positions_overnight: false,
+    eod_sell_window_minutes: 5,
   })
   const [sentResult, setSentResult] = useState(null)
   const [sentActiveTab, setSentActiveTab] = useState('equity')
@@ -1661,7 +1661,15 @@ export default function BacktestPanel() {
                     <span>Hold Overnight</span>
                     <span className="font-mono text-slate-200">{pmSettings.hold_positions_overnight ? 'Yes' : 'No'}</span>
                     <span>EOD Window</span>
-                    <span className="font-mono text-slate-200">{pmSettings.eod_sell_window_minutes ?? 30}m</span>
+                    <span className="font-mono text-slate-200">{pmSettings.eod_sell_window_minutes ?? 5}m</span>
+                    <span>Drift Cancel</span>
+                    <span className="font-mono text-slate-200">{Number(pmSettings.pending_price_drift_cancel_pct ?? 0.25).toFixed(2)}%</span>
+                    <span>Pending Timeout</span>
+                    <span className="font-mono text-slate-200">{Math.max(1, Number(pmSettings.pending_cancel_after_bars ?? 3))} bars</span>
+                    <span>Auto Offsets</span>
+                    <span className="font-mono text-slate-200">
+                      B+{Number(pmSettings.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}% / S-{Number(pmSettings.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%
+                    </span>
                     <span>Sentiment Warmup</span>
                     <span className="font-mono text-slate-200">{pmSettings.sentiment_data_points ?? 35}</span>
                   </div>

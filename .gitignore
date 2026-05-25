@@ -52,3 +52,6 @@ launcher/**/obj/
 # Installer artifacts
 dist/installer/
 installer/Output/
+
+# test scripts and data
+tmp/

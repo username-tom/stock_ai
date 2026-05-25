@@ -1067,10 +1067,12 @@ def run_sandbox_portfolio_backtest(
             "trades": [],
             "strategy_switches": [],
             "max_shares": 0.0,
-            # Cumulative cost basis used across all opens (for return %).
+            # Cumulative turnover across all BUY fills (informational only).
             "cost_basis_total": 0.0,
-            # Per-symbol equity curve: list of (timestamp, base + cum_realized + unrealized).
-            "curve": [],
+            # Per-symbol realized+unrealized PnL curve: list of (timestamp, pnl).
+            "pnl_curve": [],
+            # Peak gross exposure held by this symbol at any point (shares * avg_cost).
+            "max_gross_exposure": 0.0,
             "realized_pnl_total": 0.0,
             "pending_order": None,
         }
@@ -1205,6 +1207,9 @@ def run_sandbox_portfolio_backtest(
             st["entry_strategy"] = order.get("entry_strategy")
             st["entry_bucket"] = order.get("entry_bucket")
             st["cost_basis_total"] += qty * requested_price
+            gross_exposure = float(st["shares"]) * float(st["avg_cost"])
+            if gross_exposure > st["max_gross_exposure"]:
+                st["max_gross_exposure"] = gross_exposure
             if qty > st["max_shares"]:
                 st["max_shares"] = qty
             st["pending_order"] = None
@@ -1347,10 +1352,9 @@ def run_sandbox_portfolio_backtest(
             mv = st["shares"] * lp
             pending_reserved = _pending_buy_reserved(st)
             port_val += st["allocated_funds"] + mv + pending_reserved
-            # Per-symbol equity = display base + realized + unrealized P&L.
+            # Per-symbol curve stores realized+unrealized PnL only.
             unrealized = (st["shares"] * (lp - (st["entry_price"] or 0.0))) if st["shares"] > 0 and st["entry_price"] is not None else 0.0
-            base = max(st["min_alloc"], st["cost_basis_total"])
-            st["curve"].append((ts, base + st["realized_pnl_total"] + unrealized + pending_reserved))
+            st["pnl_curve"].append((ts, st["realized_pnl_total"] + unrealized))
         portfolio_curve.append((ts, port_val))
 
     # Final liquidation valuation (mark-to-market at last seen price).
@@ -1362,8 +1366,6 @@ def run_sandbox_portfolio_backtest(
     )
 
     # Build per-symbol summaries.
-    intervals = [p["interval"] for p in prepared]
-    bars_per_year = _INTERVAL_BARS.get(intervals[0], 252) if intervals else 252
     MAX_OHLCV_POINTS = 800
     per_symbol: list[dict[str, Any]] = []
     total_trades = 0
@@ -1377,24 +1379,25 @@ def run_sandbox_portfolio_backtest(
         lp = st["last_price"] if not math.isnan(st["last_price"]) else 0.0
         market_val = st["shares"] * lp
         unrealized = (st["shares"] * (lp - (st["entry_price"] or 0.0))) if st["shares"] > 0 and st["entry_price"] is not None else 0.0
-        # Display capital basis for return %: max(min_alloc, peak cost basis).
-        display_capital = max(st["min_alloc"], st["cost_basis_total"])
-        display_final = display_capital + st["realized_pnl_total"] + unrealized
+        pending_reserved = _pending_buy_reserved(st)
+        # Capital basis for per-symbol return: use peak concurrent exposure, not turnover.
+        display_capital = max(float(st["min_alloc"]), float(st["max_gross_exposure"]))
+        display_final = display_capital + st["realized_pnl_total"] + unrealized + pending_reserved
         total_return_pct = (
             round(((display_final - display_capital) / display_capital) * 100.0, 4)
             if display_capital > 0 else 0.0
         )
 
         # Per-symbol equity curve + risk metrics.
-        curve_pts = st["curve"]
+        curve_pts = st["pnl_curve"]
         equity_curve_sym = [
-            {"date": _fmt_ts(d), "value": round(float(v), 2)}
-            for d, v in curve_pts
+            {"date": _fmt_ts(d), "value": round(float(display_capital + pnl_v), 2)}
+            for d, pnl_v in curve_pts
         ]
         sharpe_sym = None
         max_dd_sym = None
-        if len(curve_pts) > 1:
-            vals = [float(v) for _, v in curve_pts]
+        if len(equity_curve_sym) > 1:
+            vals = [float(pt["value"]) for pt in equity_curve_sym]
             rets = [
                 (vals[i] - vals[i - 1]) / vals[i - 1]
                 for i in range(1, len(vals))
@@ -1404,7 +1407,8 @@ def run_sandbox_portfolio_backtest(
                 mean_r = sum(rets) / len(rets)
                 var_r = sum((x - mean_r) ** 2 for x in rets) / (len(rets) - 1)
                 std_r = math.sqrt(var_r)
-                sharpe_sym = round((mean_r / std_r) * math.sqrt(bars_per_year), 2) if std_r > 0 else 0.0
+                bars_per_year_sym = float(_INTERVAL_BARS.get(str(p.get("interval", "1d")), 252))
+                sharpe_sym = round((mean_r / std_r) * math.sqrt(bars_per_year_sym), 2) if std_r > 0 else 0.0
             peak = vals[0]
             worst = 0.0
             for v in vals:
@@ -1445,11 +1449,15 @@ def run_sandbox_portfolio_backtest(
         per_symbol.append({
             "symbol": sym,
             "initial_capital": round(display_capital, 2),
+            "equity_start": round(display_capital, 2),
+            "equity_end": round(display_final, 2),
+            "turnover_cost_basis_total": round(float(st["cost_basis_total"]), 2),
             "max_alloc": None if st["max_alloc"] == float("inf") else st["max_alloc"],
             "min_alloc": st["min_alloc"],
             "final_value": round(display_final, 2),
             "market_value": round(market_val, 2),
             "allocated_funds": round(st["allocated_funds"], 2),
+            "pending_buy_reserved": round(pending_reserved, 2),
             "realized_pnl": round(symbol_pnl, 2),
             "unrealized_pnl": round(unrealized, 2),
             "total_return_pct": total_return_pct,
@@ -1481,7 +1489,17 @@ def run_sandbox_portfolio_backtest(
     equity_index = [t[0] for t in portfolio_curve]
     equity_values = [t[1] for t in portfolio_curve]
     equity_series = pd.Series(equity_values, index=pd.Index(equity_index))
-    metrics = _calculate_metrics(equity_series, [t for st in state.values() for t in st["trades"]], initial_capital, bars_per_year)
+    portfolio_interval = next(
+        (str(p.get("interval", "1d")) for p in prepared if p.get("interval")),
+        "1d",
+    )
+    portfolio_bars_per_year = float(_INTERVAL_BARS.get(portfolio_interval, 252))
+    metrics = _calculate_metrics(
+        equity_series,
+        [t for st in state.values() for t in st["trades"]],
+        initial_capital,
+        portfolio_bars_per_year,
+    )
     # Override aggregate count/winrate to match per-symbol totals.
     metrics["total_trades"] = total_trades
     metrics["win_rate_pct"] = round((wins / closed * 100.0) if closed else 0.0, 2)

@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
+from sqlalchemy.exc import OperationalError
 
 from app.database import AsyncSessionLocal
 from app.models.sandbox import SandboxPosition, SandboxTrade
@@ -161,11 +162,12 @@ _settings: dict[str, Any] = {
     "ai_tag_long_tp_pct": 0.0,            # take profit % for long-hold positions (0 = disabled)
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
-    "pending_price_drift_cancel_pct": 0.75,  # cancel pending BUY when market drifts >= this % from pending fill/limit
+    "pending_price_drift_cancel_pct": 0.25,  # cancel pending BUY when market drifts >= this % from pending fill/limit
+    "pending_cancel_after_bars": 3,       # cancel pending orders after N sentiment bars even without price drift
     "sim_buy_fill_rate_pct": 100.0,       # simulated BUY pending-fill probability (%), evaluated each bar when in price range
     "sim_sell_fill_rate_pct": 100.0,      # simulated SELL pending-fill probability (%), evaluated each bar when in price range
-    "auto_trade_buy_price_offset_pct": 0.1,   # BUY price = prev OHLC midpoint + this % (IB automated orders)
-    "auto_trade_sell_price_offset_pct": 0.1,  # SELL price = prev OHLC midpoint - this % (IB automated orders)
+    "auto_trade_buy_price_offset_pct": 0.01,    # BUY price = prev OHLC midpoint + this % (IB automated orders)
+    "auto_trade_sell_price_offset_pct": 0.01,   # SELL price = prev OHLC midpoint - this % (IB automated orders)
     # 5×5 matrix: keys are PM sentiment bucket → AI tag → strategy name
     "sentiment_matrix_strategies": _clone_matrix(_DEFAULT_SENTIMENT_MATRIX_STRATEGIES),
     # 5×5 matrix: keys are PM sentiment bucket → AI tag → action
@@ -177,11 +179,11 @@ _settings: dict[str, Any] = {
     # Advanced Hold tuning
     "pm_hold_extended_multiplier": 2.0,  # used by `advanced_hold:extended` cells (typically STRONG LONG)
     "pm_hold_trailing_pct": 3.0,         # trailing stop % for `advanced_hold:trailing` cells
-    "stop_loss_pct": 0.0,
-    "take_profit_pct": 0.0,
-    "hold_positions_overnight": True,     # whether to hold positions between days
+    "stop_loss_pct": 0.5,
+    "take_profit_pct": 1.25,
+    "hold_positions_overnight": False,    # strict day-trade default: flatten before close
     "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
-    "eod_sell_window_minutes": 30,        # minutes before market close to start sell-only mode
+    "eod_sell_window_minutes": 5,         # minutes before market close to start sell-only mode
     "sentiment_lookback_days": 5,         # days of historical data for sentiment calc
     "sentiment_data_points": _MIN_SENTIMENT_DATA_POINTS,  # number of recent bars used for sentiment calc
     "sentiment_interval": "1m",           # interval: 1m, 5m, 15m, 1h, daily, etc.
@@ -205,6 +207,21 @@ _state: dict[str, Any] = {
     # Per-key hysteresis state to avoid one-bar sentiment flapping.
     "bucket_debounce": {},  # { key: {active, candidate, count} }
 }
+
+
+def _interval_to_minutes(interval: str) -> float:
+    """Map PM sentiment interval strings to approximate bar duration in minutes."""
+    value = (interval or "1m").strip().lower()
+    mapping: dict[str, float] = {
+        "5s": 5.0 / 60.0,
+        "1m": 1.0,
+        "5m": 5.0,
+        "15m": 15.0,
+        "30m": 30.0,
+        "1h": 60.0,
+        "daily": 390.0,
+    }
+    return float(mapping.get(value, 1.0))
 
 # Prevent repeated IB profit-take submissions every PM loop tick.
 _ib_profit_take_last_attempt: dict[str, datetime] = {}
@@ -299,11 +316,11 @@ async def _load_settings_from_db() -> None:
                 _settings["symbol_sentiment_strategies"],
             )
             _settings["sentiment_strategy_enabled"] = bool(getattr(row, "sentiment_strategy_enabled", True))
-            _settings["stop_loss_pct"] = float(getattr(row, "stop_loss_pct", 0.0) or 0.0)
-            _settings["take_profit_pct"] = float(getattr(row, "take_profit_pct", 0.0) or 0.0)
-            _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", True))
+            _settings["stop_loss_pct"] = float(getattr(row, "stop_loss_pct", 0.5) or 0.5)
+            _settings["take_profit_pct"] = float(getattr(row, "take_profit_pct", 1.25) or 1.25)
+            _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", False))
             _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
-            _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 30) or 30)
+            _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 5) or 5)
             _settings["sentiment_lookback_days"] = int(getattr(row, "sentiment_lookback_days", 5) or 5)
             _settings["sentiment_data_points"] = max(
                 _MIN_SENTIMENT_DATA_POINTS,
@@ -328,13 +345,14 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_long_tp_pct"] = float(getattr(row, "ai_tag_long_tp_pct", 0.0) or 0.0)
             _settings["ai_tag_long_sl_pct"] = float(getattr(row, "ai_tag_long_sl_pct", 0.0) or 0.0)
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
-            _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.75) or 0.75)
+            _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.25) or 0.25)
+            _settings["pending_cancel_after_bars"] = int(max(1, getattr(row, "pending_cancel_after_bars", 3) or 3))
             _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 100.0) or 0.0)))
             _settings["sim_sell_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_sell_fill_rate_pct", 100.0) or 0.0)))
             _buy_offset = getattr(row, "auto_trade_buy_price_offset_pct", None)
             _sell_offset = getattr(row, "auto_trade_sell_price_offset_pct", None)
-            _settings["auto_trade_buy_price_offset_pct"] = 0.1 if _buy_offset is None else float(_buy_offset)
-            _settings["auto_trade_sell_price_offset_pct"] = 0.1 if _sell_offset is None else float(_sell_offset)
+            _settings["auto_trade_buy_price_offset_pct"] = 0.145 if _buy_offset is None else float(_buy_offset)
+            _settings["auto_trade_sell_price_offset_pct"] = 0.185 if _sell_offset is None else float(_sell_offset)
             # 5×5 matrices – overlay any stored cells on top of the curated
             # defaults so an empty DB row still produces the same matrix the
             # PM UI displays out-of-the-box.
@@ -402,11 +420,11 @@ async def _save_settings_to_db() -> None:
         row.market_sentiment_strategies = json.dumps(_settings.get("market_sentiment_strategies", {}), sort_keys=True)
         row.symbol_sentiment_strategies = json.dumps(_settings.get("symbol_sentiment_strategies", {}), sort_keys=True)
         row.sentiment_strategy_enabled = _settings.get("sentiment_strategy_enabled", True)
-        row.stop_loss_pct = float(_settings.get("stop_loss_pct", 0.0) or 0.0)
-        row.take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
-        row.hold_positions_overnight = _settings.get("hold_positions_overnight", True)
+        row.stop_loss_pct = float(_settings.get("stop_loss_pct", 0.5) or 0.5)
+        row.take_profit_pct = float(_settings.get("take_profit_pct", 1.25) or 1.25)
+        row.hold_positions_overnight = _settings.get("hold_positions_overnight", False)
         row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
-        row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+        row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 5) or 5)
         row.sentiment_lookback_days = int(_settings.get("sentiment_lookback_days", 5) or 5)
         row.sentiment_data_points = int(
             max(
@@ -429,11 +447,12 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_long_tp_pct = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
         row.ai_tag_long_sl_pct = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
-        row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.75)
+        row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.25)
+        row.pending_cancel_after_bars = int(max(1, _settings.get("pending_cancel_after_bars", 3) or 3))
         row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 60.0) or 0.0)))
         row.sim_sell_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_sell_fill_rate_pct", 70.0) or 0.0)))
-        row.auto_trade_buy_price_offset_pct = float(_settings.get("auto_trade_buy_price_offset_pct", 0.1))
-        row.auto_trade_sell_price_offset_pct = float(_settings.get("auto_trade_sell_price_offset_pct", 0.1))
+        row.auto_trade_buy_price_offset_pct = float(_settings.get("auto_trade_buy_price_offset_pct", 0.01))
+        row.auto_trade_sell_price_offset_pct = float(_settings.get("auto_trade_sell_price_offset_pct", 0.01))
         row.sentiment_matrix_strategies = json.dumps(_settings.get("sentiment_matrix_strategies", {}), sort_keys=True)
         row.sentiment_matrix_actions = json.dumps(_settings.get("sentiment_matrix_actions", {}), sort_keys=True)
         row.pm_hold_duration_days = max(0, int(_settings.get("pm_hold_duration_days", 1) or 0))
@@ -455,6 +474,7 @@ def update_manager_settings(new: dict) -> dict:
               "ai_tag_action_mode", "ai_external_sentiment_weight",
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
               "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
+              "pending_cancel_after_bars",
               "sim_buy_fill_rate_pct", "sim_sell_fill_rate_pct",
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct",
               "sentiment_matrix_strategies", "sentiment_matrix_actions",
@@ -1282,7 +1302,7 @@ async def _apply_ai_tag_strategies() -> None:
                             hold_modes[pos.symbol] = True
 
         if db_changed:
-            await db.commit()
+            await _commit_with_retry(db, operation="ai_tag_strategy_apply")
             if strategy_changes:
                 _log_activity(f"AI tag strategy: {', '.join(strategy_changes)}")
             if engine_changes:
@@ -1320,6 +1340,40 @@ def _log_activity(msg: str) -> None:
     _state["last_activity"].insert(0, entry)
     _state["last_activity"] = _state["last_activity"][:20]
     logger.info("PortfolioManager: %s", msg)
+
+
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    msg = str(getattr(exc, "orig", exc)).lower()
+    return "database is locked" in msg or "database table is locked" in msg
+
+
+async def _commit_with_retry(
+    db,
+    *,
+    operation: str,
+    retries: int = 5,
+    base_delay_s: float = 0.2,
+) -> None:
+    for attempt in range(retries + 1):
+        try:
+            await db.commit()
+            return
+        except OperationalError as exc:
+            if (not _is_sqlite_lock_error(exc)) or attempt >= retries:
+                raise
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            delay = base_delay_s * (attempt + 1)
+            logger.warning(
+                "PM commit lock during %s; retry %d/%d in %.2fs",
+                operation,
+                attempt + 1,
+                retries,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
 
 def _pick_deploy_target(
@@ -1938,7 +1992,11 @@ async def _cancel_bearish_pending_orders() -> None:
 
         market_score = float(_compute_market_classification().get("score", 0.0))
         ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
-        drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
+        drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.0))
+        pending_cancel_after_bars = max(1, int(_settings.get("pending_cancel_after_bars", 3) or 3))
+        bar_minutes = _interval_to_minutes(str(_settings.get("sentiment_interval", "1m") or "1m"))
+        pending_cancel_after_minutes = pending_cancel_after_bars * bar_minutes
+        now_utc = datetime.now(timezone.utc)
 
         # Fetch current prices for all pending symbols (to check price vs fill price).
         symbols = [p.symbol for p in positions]
@@ -1970,6 +2028,19 @@ async def _cancel_bearish_pending_orders() -> None:
                 and (abs(cp - fill_price) / fill_price * 100.0) >= drift_threshold_pct
             )
 
+            # ── 2b. Pending order has timed out in bar-equivalent minutes ──
+            pending_expired = False
+            pending_since = getattr(pos, "pending_since", None)
+            if pending_since is not None and pending_cancel_after_minutes > 0:
+                try:
+                    pending_ts = pending_since
+                    if pending_ts.tzinfo is None:
+                        pending_ts = pending_ts.replace(tzinfo=timezone.utc)
+                    elapsed_min = (now_utc - pending_ts).total_seconds() / 60.0
+                    pending_expired = elapsed_min >= pending_cancel_after_minutes
+                except Exception:
+                    pending_expired = False
+
             # ── 3. AI tag is SHORT or STRONG SHORT ────────────────────────
             ai_tag = (
                 _state.get("ai_tags", {}).get(pos.symbol, {}).get("learner_tag") or ""
@@ -1980,7 +2051,7 @@ async def _cancel_bearish_pending_orders() -> None:
             # EOD policy: cancel all pending orders unless AI tag is LONG/STRONG LONG.
             cancel_for_eod = in_eod_window and not ai_long
 
-            if not bearish_sentiment and not price_drifted and not ai_short and not cancel_for_eod:
+            if not bearish_sentiment and not price_drifted and not pending_expired and not ai_short and not cancel_for_eod:
                 continue
 
             # ── Build cancel reason ───────────────────────────────────────
@@ -1990,6 +2061,8 @@ async def _cancel_bearish_pending_orders() -> None:
             if price_drifted:
                 drift_pct = abs(cp - fill_price) / fill_price * 100.0 if cp > 0 and fill_price > 0 else 0.0
                 reasons.append(f"price drift {drift_pct:.2f}% (${cp:.2f} vs fill ${fill_price:.2f})")
+            if pending_expired:
+                reasons.append(f"pending timeout {pending_cancel_after_bars} bars")
             if ai_short:
                 reasons.append(f"ai_tag {ai_tag}")
             if cancel_for_eod:
@@ -2118,8 +2191,8 @@ async def _process_ib_engine_signals() -> None:
         and float(o.get("remaining") or 0.0) > 0
     }
 
-    stop_loss_pct = float(_settings.get("stop_loss_pct", 0.0) or 0.0)
-    take_profit_pct = float(_settings.get("take_profit_pct", 0.0) or 0.0)
+    stop_loss_pct = float(_settings.get("stop_loss_pct", 0.8) or 0.8)
+    take_profit_pct = float(_settings.get("take_profit_pct", 2.5) or 2.5)
     ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
 
     order_candidates: list[dict[str, Any]] = []
@@ -2134,9 +2207,9 @@ async def _process_ib_engine_signals() -> None:
             return 0.0
         side_u = str(side or "").upper()
         if side_u == "BUY":
-            offset = max(0.0, float(_settings.get("auto_trade_buy_price_offset_pct", 0.1) or 0.0))
+            offset = max(0.0, float(_settings.get("auto_trade_buy_price_offset_pct", 0.145) or 0.0))
             return round(reference_price * (1.0 + offset / 100.0), 4)
-        offset = max(0.0, float(_settings.get("auto_trade_sell_price_offset_pct", 0.1) or 0.0))
+        offset = max(0.0, float(_settings.get("auto_trade_sell_price_offset_pct", 0.185) or 0.0))
         return round(reference_price * (1.0 - offset / 100.0), 4)
 
     async def _fetch_prev_ohlc_mid_map(symbols: set[str]) -> dict[str, float]:
@@ -2421,7 +2494,10 @@ async def run_portfolio_manager() -> None:
     """Long-running coroutine – start as an asyncio task from app lifespan."""
     _state["running"] = True
     await _load_settings_from_db()
-    await refresh_sentiment_routing()
+    try:
+        await refresh_sentiment_routing()
+    except Exception as exc:
+        logger.warning("PM startup routing refresh error: %s", exc)
     logger.info("Portfolio Manager task started (enabled=%s).", _settings["enabled"])
 
     # Score immediately on startup when PM is enabled but scores are cold
