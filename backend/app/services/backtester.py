@@ -1287,20 +1287,25 @@ def run_sandbox_portfolio_backtest(
                 if price <= 0:
                     continue
 
-            # Pending orders reroll once each bar when still in acceptance range.
-            if _try_fill_pending(sym, price, ts, ts_idx):
-                continue
-
             session = str(row.get("session", "regular")) if day_trade else "regular"
             is_regular = session == "regular"
             bucket = str(p["buckets"].loc[ts]) if ts in p["buckets"].index else "neutral"
             active_strat = str(p["active_strategy"].loc[ts]) if ts in p["active_strategy"].index else "sma_crossover"
 
+            # EOD liquidation should be deterministic: force-close immediately
+            # instead of queuing a probabilistic pending SELL that may remain open.
+            if day_trade and not hold_positions_overnight and ts in p["eod_sell_bars"] and st["shares"] > 0:
+                if st.get("pending_order") and str((st.get("pending_order") or {}).get("side") or "").upper() == "SELL":
+                    st["pending_order"] = None
+                _close_position(sym, price, ts, "eod_liquidation", bucket, active_strat)
+                continue
+
+            # Pending orders reroll once each bar when still in acceptance range.
+            if _try_fill_pending(sym, price, ts, ts_idx):
+                continue
+
             # 1. End-of-day liquidation / last-bar close.
             if day_trade:
-                if not hold_positions_overnight and ts in p["eod_sell_bars"] and st["shares"] > 0:
-                    _try_queue_sell(sym, price, ts_idx, "eod_liquidation")
-                    continue
                 if hold_positions_overnight and ts in p["last_regular_bar"] and st["shares"] > 0:
                     _try_queue_sell(sym, price, ts_idx, "eod_close")
                     continue

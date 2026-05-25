@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
 
-from app.services.backtester import _calculate_metrics, run_backtest
+from app.services.backtester import (
+    _calculate_metrics,
+    run_backtest,
+    run_sandbox_portfolio_backtest,
+)
 
 
 def _make_ohlcv(n=300, seed=7) -> pd.DataFrame:
@@ -489,3 +493,64 @@ class TestDayTradeSessionGating:
         # Entry must be at 09:30 (first regular bar)
         entry = result["trades"][0]["entry_date"]
         assert "09:30" in entry
+
+
+class TestSandboxPortfolioEodLiquidation:
+    def test_eod_liquidation_is_forced_even_with_zero_sell_fill_rate(self):
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2024-01-15 15:59:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-15 16:00:00", tz="America/New_York"),
+        ])
+        df = pd.DataFrame(
+            {
+                "Open": [100.0, 101.0],
+                "High": [100.5, 101.5],
+                "Low": [99.5, 100.5],
+                "Close": [100.0, 101.0],
+                "Volume": [1000, 1000],
+                "session": ["regular", "regular"],
+            },
+            index=idx,
+        )
+        df.attrs["interval"] = "1m"
+        prepared_symbol = {
+            "symbol": "TXN",
+            "df": df,
+            "interval": "1m",
+            "buckets": pd.Series(["neutral", "neutral"], index=idx),
+            "active_strategy": pd.Series(["sma_crossover", "sma_crossover"], index=idx),
+            "signals_by_strat": {
+                "sma_crossover": pd.Series([1.0, 0.0], index=idx),
+            },
+            "eod_sell_bars": {idx[1]},
+            "last_regular_bar": {idx[1]},
+        }
+
+        with patch("app.services.backtester._prepare_symbol_for_portfolio", return_value=prepared_symbol):
+            result = run_sandbox_portfolio_backtest(
+                symbol_specs=[
+                    {
+                        "symbol": "TXN",
+                        "routing": "fixed",
+                        "fixed_strategy": "sma_crossover",
+                        "min_alloc": 10_000.0,
+                        "max_alloc": 10_000.0,
+                    }
+                ],
+                start_date="2024-01-15",
+                end_date="2024-01-15",
+                initial_capital=10_000.0,
+                commission=0.0,
+                day_trade=True,
+                hold_positions_overnight=False,
+                eod_sell_window_minutes=1,
+                sim_buy_fill_rate_pct=100.0,
+                sim_sell_fill_rate_pct=0.0,
+                sim_pending_duration_bars=1,
+            )
+
+        symbol_row = result["per_symbol"][0]
+        assert symbol_row["total_trades"] == 1
+        assert symbol_row["market_value"] == 0.0
+        assert symbol_row["unrealized_pnl"] == 0.0
+        assert symbol_row["trades"][0]["exit_reason"] == "eod_liquidation"

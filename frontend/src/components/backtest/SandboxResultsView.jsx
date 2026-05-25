@@ -17,6 +17,34 @@ export default function SandboxResultsView({ result, metrics }) {
   const r = result ?? {}
   const m = metrics ?? {}
 
+  const portfolioBreakdown = useMemo(() => {
+    const rows = Array.isArray(r.per_symbol) ? r.per_symbol : []
+    const initialCapital = Number(r.initial_capital ?? 0) || 0
+    const finalValue = Number(m.final_value ?? initialCapital) || initialCapital
+    let realizedPnl = 0
+    let unrealizedPnl = 0
+    for (const row of rows) {
+      realizedPnl += Number(row?.realized_pnl ?? 0) || 0
+      unrealizedPnl += Number(row?.unrealized_pnl ?? 0) || 0
+    }
+    const totalPnl = finalValue - initialCapital
+    const reconciliationDelta = totalPnl - realizedPnl - unrealizedPnl
+    const totalReturnPct = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0
+    const realizedReturnPct = initialCapital > 0 ? (realizedPnl / initialCapital) * 100 : 0
+    const unrealizedReturnPct = initialCapital > 0 ? (unrealizedPnl / initialCapital) * 100 : 0
+    return {
+      initialCapital,
+      finalValue,
+      totalPnl,
+      realizedPnl,
+      unrealizedPnl,
+      reconciliationDelta,
+      totalReturnPct,
+      realizedReturnPct,
+      unrealizedReturnPct,
+    }
+  }, [r.per_symbol, r.initial_capital, m.final_value])
+
   // Trade-level analytics derived from the SELL events in the activity log.
   const tradeStats = useMemo(() => {
     const sells = (r.activity_log ?? []).filter(e => e.side === 'SELL' && e.pnl != null)
@@ -79,6 +107,7 @@ export default function SandboxResultsView({ result, metrics }) {
     if (a >= 1_000) return `${n < 0 ? '-' : ''}$${(a / 1_000).toFixed(1)}k`
     return `${n < 0 ? '-' : ''}$${a.toFixed(0)}`
   }
+  const fmtPct = (v) => `${v >= 0 ? '+' : ''}${Number(v || 0).toFixed(2)}%`
 
   return (
     <div className="space-y-3 pb-12 px-3">
@@ -93,9 +122,16 @@ export default function SandboxResultsView({ result, metrics }) {
             <div className={`text-sm font-medium mt-0.5 ${(m.total_return_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
               {(m.total_return_pct ?? 0) >= 0 ? '+' : ''}{Number(m.total_return_pct ?? 0).toFixed(2)}%
               {' '}from ${Number(r.initial_capital ?? 0).toLocaleString()}
-              <span className="text-slate-500 ml-2">
-                ({tradeStats.netPnl >= 0 ? '+' : ''}{fmtMoneyShort(tradeStats.netPnl)} realized)
+              <span className="text-slate-500 ml-2 whitespace-nowrap">
+                ({portfolioBreakdown.realizedPnl >= 0 ? '+' : ''}{fmtMoneyShort(portfolioBreakdown.realizedPnl)} realized,
+                {' '}{portfolioBreakdown.unrealizedPnl >= 0 ? '+' : ''}{fmtMoneyShort(portfolioBreakdown.unrealizedPnl)} unrealized)
               </span>
+            </div>
+            <div className="text-xs text-slate-500 mt-1">
+              Reconciliation: {fmtPct(portfolioBreakdown.totalReturnPct)} total = {fmtPct(portfolioBreakdown.realizedReturnPct)} realized + {fmtPct(portfolioBreakdown.unrealizedReturnPct)} unrealized
+              {Math.abs(portfolioBreakdown.reconciliationDelta) >= 0.01 && (
+                <span className="ml-2">(delta {portfolioBreakdown.reconciliationDelta >= 0 ? '+' : ''}{fmtMoney(portfolioBreakdown.reconciliationDelta)})</span>
+              )}
             </div>
           </div>
           <div className="text-xs text-slate-500 text-right space-y-0.5">
@@ -319,6 +355,8 @@ export default function SandboxResultsView({ result, metrics }) {
                 <th>Start Equity</th>
                 <th>End Equity</th>
                 <th>Return %</th>
+                <th>Realized P&amp;L</th>
+                <th>Unrealized P&amp;L</th>
                 <th>Sharpe</th>
                 <th>Max DD %</th>
                 <th>Trades</th>
@@ -336,6 +374,12 @@ export default function SandboxResultsView({ result, metrics }) {
                   <td className="font-mono">${Number(row.equity_end ?? row.final_value ?? 0).toFixed(2)}</td>
                   <td className={(row.total_return_pct ?? 0) >= 0 ? 'pos' : 'neg'}>
                     {(row.total_return_pct ?? 0) >= 0 ? '+' : ''}{Number(row.total_return_pct ?? 0).toFixed(2)}%
+                  </td>
+                  <td className={(row.realized_pnl ?? 0) >= 0 ? 'pos font-mono' : 'neg font-mono'}>
+                    {(row.realized_pnl ?? 0) >= 0 ? '+' : ''}{fmtMoney(row.realized_pnl ?? 0)}
+                  </td>
+                  <td className={(row.unrealized_pnl ?? 0) >= 0 ? 'pos font-mono' : 'neg font-mono'}>
+                    {(row.unrealized_pnl ?? 0) >= 0 ? '+' : ''}{fmtMoney(row.unrealized_pnl ?? 0)}
                   </td>
                   <td className="font-mono">{row.sharpe_ratio != null ? Number(row.sharpe_ratio).toFixed(2) : '—'}</td>
                   <td className="font-mono">{row.max_drawdown_pct != null ? Number(row.max_drawdown_pct).toFixed(2) : '—'}</td>
@@ -477,6 +521,10 @@ export default function SandboxResultsView({ result, metrics }) {
                 }
 
                 const ret = Number(p.total_return_pct ?? 0)
+                const startEq = Number(p.equity_start ?? p.initial_capital ?? 0)
+                const realizedPnl = Number(p.realized_pnl ?? 0)
+                const unrealizedPnl = Number(p.unrealized_pnl ?? 0)
+                const realizedPct = startEq > 0 ? (realizedPnl / startEq) * 100 : 0
                 const tradeCount = (p.trades?.length ?? 0)
                 return (
                   <div key={p.symbol} className="bg-dark-900/40 border border-dark-600 rounded-lg p-3">
@@ -490,6 +538,14 @@ export default function SandboxResultsView({ result, metrics }) {
                           {ret >= 0 ? '+' : ''}{ret.toFixed(2)}%
                         </span>
                         <span className="text-slate-500 ml-2">{tradeCount} trades</span>
+                        <span className={`ml-2 ${realizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {realizedPct >= 0 ? '+' : ''}{realizedPct.toFixed(2)}% realized
+                        </span>
+                        {Math.abs(unrealizedPnl) > 0.005 && (
+                          <span className={`ml-2 ${unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {unrealizedPnl >= 0 ? '+' : ''}{fmtMoneyShort(unrealizedPnl)} open
+                          </span>
+                        )}
                       </div>
                     </div>
                     <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto block">
@@ -811,6 +867,8 @@ function ActivityLog({ events }) {
   const sellCount = filtered.filter(e => e.side === 'SELL').length
   const winCount = filtered.filter(e => e.pnl != null && e.pnl > 0).length
   const lossCount = filtered.filter(e => e.pnl != null && e.pnl < 0).length
+  const filteredSells = filtered.filter(e => e.side === 'SELL' && e.pnl != null)
+  const filteredNetPnl = filteredSells.reduce((acc, e) => acc + (Number(e.pnl) || 0), 0)
 
   const selectCls = 'bg-dark-800 border border-dark-500 rounded px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-indigo-500'
 
@@ -823,7 +881,10 @@ function ActivityLog({ events }) {
           <span className="text-emerald-400">{buyCount} buys</span> ·{' '}
           <span className="text-red-400">{sellCount} sells</span> ·{' '}
           <span className="text-emerald-400">{winCount} wins</span> ·{' '}
-          <span className="text-red-400">{lossCount} losses</span>
+          <span className="text-red-400">{lossCount} losses</span> ·{' '}
+          <span className={filteredNetPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+            net closed P&amp;L {filteredNetPnl >= 0 ? '+' : ''}${Math.abs(filteredNetPnl).toFixed(2)}
+          </span>
         </div>
       </div>
 

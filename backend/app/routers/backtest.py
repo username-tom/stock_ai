@@ -53,6 +53,57 @@ def _bars_per_year_from_interval(interval: str | None) -> float:
     return float(interval_bars.get(interval_key, 252.0))
 
 
+def _summarize_report_symbols(symbols: list[str], max_len: int = 20) -> str:
+    """Build a compact report symbol label that fits DB storage limits.
+
+    The output never ends with a dangling delimiter. When the full list does
+    not fit, append a compact "+N" remainder count.
+    """
+    cleaned: list[str] = []
+    for raw in symbols:
+        sym = str(raw or "").strip().upper()
+        if not sym:
+            continue
+        if sym not in cleaned:
+            cleaned.append(sym)
+
+    if not cleaned:
+        return "SANDBOX"
+
+    full = ",".join(cleaned)
+    if len(full) <= max_len:
+        return full
+
+    # Keep as many leading symbols as possible and annotate omitted count.
+    for keep in range(len(cleaned), 0, -1):
+        base = ",".join(cleaned[:keep])
+        remaining = len(cleaned) - keep
+        suffix = f"+{remaining}" if remaining > 0 else ""
+        candidate = f"{base}{suffix}"
+        if len(candidate) <= max_len:
+            return candidate
+
+    return cleaned[0][:max_len]
+
+
+def _flatten_per_symbol_trades(per_symbol: list[dict]) -> list[dict]:
+    """Aggregate per-symbol trades into a stable, chronologically sorted list."""
+    combined: list[dict] = []
+    for entry in per_symbol:
+        sym = str(entry.get("symbol") or "").upper()
+        for trade in entry.get("trades") or []:
+            row = dict(trade)
+            if sym and "symbol" not in row:
+                row["symbol"] = sym
+            combined.append(row)
+    combined.sort(key=lambda t: (
+        str(t.get("exit_date") or ""),
+        str(t.get("entry_date") or ""),
+        str(t.get("symbol") or ""),
+    ))
+    return combined
+
+
 class BacktestRequest(BaseModel):
     symbol: str = Field(..., example="AAPL")
     strategy_type: str = Field(default="sma_crossover", example="sma_crossover")
@@ -904,6 +955,8 @@ async def run_sandbox_backtest_endpoint(
             "symbols_run": metrics_co["symbols_run"],
             "symbols_failed": metrics_co["symbols_failed"],
         }
+        report_symbol = _summarize_report_symbols(symbols)
+        aggregated_trades = _flatten_per_symbol_trades(per_symbol_summary)
 
         name = (
             f"SANDBOX_pool_{'sentiment' if req.use_sentiment_routing else 'positions'}"
@@ -922,7 +975,7 @@ async def run_sandbox_backtest_endpoint(
         }
         result_data_payload = {
             "equity_curve": equity_curve,
-            "trades": [],
+            "trades": aggregated_trades,
             "ohlcv": [],
             "per_symbol": per_symbol_summary,
             "activity_log": _build_sandbox_activity_log(per_symbol_summary),
@@ -937,7 +990,7 @@ async def run_sandbox_backtest_endpoint(
         }
         report = BacktestReport(
             name=name,
-            symbol=",".join(symbols)[:20] or "SANDBOX",
+            symbol=report_symbol,
             strategy_type="sandbox_portfolio",
             parameters=parameters_payload,
             start_date=req.start_date,
@@ -1222,6 +1275,8 @@ async def run_sandbox_backtest_endpoint(
         "symbols_run": sum(1 for r in per_results if not r.get("error") and not r.get("skipped")),
         "symbols_failed": sum(1 for r in per_results if r.get("error")),
     }
+    report_symbol = _summarize_report_symbols(symbols)
+    aggregated_trades = _flatten_per_symbol_trades(per_symbol_summary)
 
     # Persist a summary report.
     name = (
@@ -1237,7 +1292,7 @@ async def run_sandbox_backtest_endpoint(
     }
     result_data_payload = {
         "equity_curve": equity_curve,
-        "trades": [],
+        "trades": aggregated_trades,
         "ohlcv": [],
         "per_symbol": per_symbol_summary,
         "activity_log": _build_sandbox_activity_log(per_symbol_summary),
@@ -1248,7 +1303,7 @@ async def run_sandbox_backtest_endpoint(
     }
     report = BacktestReport(
         name=name,
-        symbol=",".join(symbols)[:20] or "SANDBOX",
+        symbol=report_symbol,
         strategy_type="sandbox_portfolio",
         parameters=parameters_payload,
         start_date=req.start_date,
