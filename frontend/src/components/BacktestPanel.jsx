@@ -5,6 +5,8 @@ import {
   runBacktest,
   runSentimentBacktest,
   runSandboxBacktest,
+  warmIntradayCache,
+  getIntradayCacheCoverage,
   getScripts,
   getBuiltinTemplates,
   getSandboxPositions,
@@ -273,6 +275,18 @@ export default function BacktestPanel() {
   const [sandboxResult, setSandboxResult] = useState(null)
   const [sandboxProgress, setSandboxProgress] = useState(0)
   const sandboxProgressRef = useRef(null)
+  const [cacheWarmForm, setCacheWarmForm] = useState({
+    symbol: 'AAPL',
+    lookback_days: 365,
+    data_source: 'auto',
+    chunk_days: 20,
+    prefer_ib: true,
+    ib_use_rth: false,
+    ib_what_to_show: 'TRADES',
+    ib_max_retries: 2,
+    ib_pause_ms: 150,
+  })
+  const [cacheWarmResult, setCacheWarmResult] = useState(null)
 
   const { data: sandboxPositionsData, isLoading: sandboxPositionsLoading } = useQuery({
     queryKey: ['sandbox-positions'],
@@ -282,6 +296,12 @@ export default function BacktestPanel() {
   const { data: pmData } = useQuery({
     queryKey: ['pm-state'],
     queryFn: getPortfolioManagerState,
+    refetchOnWindowFocus: false,
+  })
+  const { data: intradayCoverage, refetch: refetchCoverage } = useQuery({
+    queryKey: ['intraday-cache-coverage', cacheWarmForm.symbol, cacheWarmForm.data_source],
+    queryFn: () => getIntradayCacheCoverage(cacheWarmForm.symbol, cacheWarmForm.data_source),
+    enabled: Boolean(cacheWarmForm.symbol),
     refetchOnWindowFocus: false,
   })
 
@@ -297,6 +317,14 @@ export default function BacktestPanel() {
     onError: () => {
       clearInterval(sandboxProgressRef.current)
       setSandboxProgress(0)
+    },
+  })
+
+  const warmCacheMutation = useMutation({
+    mutationFn: (payload) => warmIntradayCache(payload),
+    onSuccess: (data) => {
+      setCacheWarmResult(data)
+      void refetchCoverage()
     },
   })
 
@@ -1673,6 +1701,151 @@ export default function BacktestPanel() {
                     <span>Sentiment Warmup</span>
                     <span className="font-mono text-slate-200">{pmSettings.sentiment_data_points ?? 35}</span>
                   </div>
+                </div>
+
+                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-2">
+                  <div className="text-xs text-slate-500 uppercase tracking-wider">Intraday Cache Warm-Up</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div>
+                      <label className="label">Symbol</label>
+                      <input
+                        className="input"
+                        type="text"
+                        value={cacheWarmForm.symbol}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, symbol: e.target.value.toUpperCase().trim() }))}
+                        placeholder="AAPL"
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Lookback Days</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        max={730}
+                        value={cacheWarmForm.lookback_days}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, lookback_days: Math.max(1, Math.min(730, Number(e.target.value) || 365)) }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="label">Data Source</label>
+                      <select
+                        className="input"
+                        value={cacheWarmForm.data_source}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, data_source: e.target.value }))}
+                      >
+                        <option value="auto">auto</option>
+                        <option value="ib">ib</option>
+                        <option value="yfinance">yfinance</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="label">Chunk Days</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        max={90}
+                        value={cacheWarmForm.chunk_days}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, chunk_days: Math.max(1, Math.min(90, Number(e.target.value) || 20)) }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-slate-300">
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={cacheWarmForm.prefer_ib}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, prefer_ib: e.target.checked }))}
+                      />
+                      Prefer IB when connected
+                    </label>
+                    <label className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={cacheWarmForm.ib_use_rth}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_use_rth: e.target.checked }))}
+                      />
+                      IB RTH only
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="label">IB whatToShow</label>
+                      <select
+                        className="input"
+                        value={cacheWarmForm.ib_what_to_show}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_what_to_show: e.target.value }))}
+                      >
+                        <option value="TRADES">TRADES</option>
+                        <option value="MIDPOINT">MIDPOINT</option>
+                        <option value="BID">BID</option>
+                        <option value="ASK">ASK</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="label">IB retries / chunk</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={cacheWarmForm.ib_max_retries}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_max_retries: Math.max(0, Math.min(10, Number(e.target.value) || 0)) }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="label">IB pause ms</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        max={5000}
+                        value={cacheWarmForm.ib_pause_ms}
+                        onChange={e => setCacheWarmForm(f => ({ ...f, ib_pause_ms: Math.max(0, Math.min(5000, Number(e.target.value) || 0)) }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={warmCacheMutation.isPending || !cacheWarmForm.symbol}
+                      onClick={() => warmCacheMutation.mutate({ ...cacheWarmForm })}
+                    >
+                      {warmCacheMutation.isPending ? 'Warming 1m Cache…' : 'Warm 1m Cache'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => refetchCoverage()}
+                    >
+                      Refresh Coverage
+                    </button>
+                  </div>
+
+                  {(intradayCoverage || cacheWarmResult) && (
+                    <div className="text-xs text-slate-400 border-t border-dark-700/60 pt-2">
+                      <div>
+                        Coverage: {(intradayCoverage?.rows ?? cacheWarmResult?.rows_cached ?? 0)} rows
+                        {' · '}oldest {(intradayCoverage?.oldest ?? cacheWarmResult?.cache_oldest ?? '—')}
+                        {' · '}newest {(intradayCoverage?.newest ?? cacheWarmResult?.cache_newest ?? '—')}
+                      </div>
+                      {cacheWarmResult && (
+                        <div className="mt-1">
+                          Last warm: source {cacheWarmResult.source}
+                          {' · '}chunks {cacheWarmResult.chunks_attempted}
+                          {' · '}failed {cacheWarmResult.chunks_failed ?? 0}
+                          {' · '}requests {cacheWarmResult.requests_made ?? 0}
+                          {' · '}fetched {cacheWarmResult.rows_fetched ?? 0}
+                          {cacheWarmResult.error ? ` · error: ${cacheWarmResult.error}` : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Allocation preview */}

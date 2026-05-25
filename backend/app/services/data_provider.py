@@ -17,8 +17,12 @@ Usage
 from __future__ import annotations
 
 import io
+import json
 import logging
-from datetime import date, datetime
+import time
+import asyncio
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -27,6 +31,7 @@ import pandas as pd
 import yfinance as yf
 
 from app.services.ib_service import IB_AVAILABLE, ib_service
+from app.services.market_calendar import is_nyse_trading_day
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +71,348 @@ def _tag_market_session(df: pd.DataFrame) -> pd.DataFrame:
 DataSource = Literal["auto", "yfinance", "stooq", "ib"]
 
 _FREE_SOURCES: tuple[str, ...] = ("yfinance", "stooq")
+
+_HIST_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "historical_cache"
+_DAILY_CACHE_LIMIT = 20_000
+_INTRADAY_CACHE_LIMIT = 300_000
+_INTRADAY_CACHE_RETENTION_DAYS = 370
+
+_IB_IP_CONFLICT_PATTERNS: tuple[str, ...] = (
+    "connected from a different ip address",
+    "historical market data service error message",
+)
+
+
+def _is_ib_ip_conflict_error(message: str | None) -> bool:
+    text = str(message or "").strip().lower()
+    return bool(text) and any(p in text for p in _IB_IP_CONFLICT_PATTERNS)
+
+
+def _is_closed_day_now_et() -> bool:
+    now_et = datetime.now(_ET)
+    return not is_nyse_trading_day(now_et.date())
+
+
+def _cache_path(symbol: str, source: str, intraday: bool) -> Path:
+    safe_symbol = symbol.upper().replace("/", "_")
+    kind = "intraday" if intraday else "daily"
+    return _HIST_CACHE_DIR / f"{safe_symbol}__{source}__{kind}.json"
+
+
+def _ensure_et_index(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    idx = pd.to_datetime(out.index, errors="coerce")
+    if getattr(idx, "tz", None) is None:
+        out.index = idx.tz_localize(_ET)
+    else:
+        out.index = idx.tz_convert(_ET)
+    return out
+
+
+def _slice_cached_range(df: pd.DataFrame, start: str, end: str, intraday: bool) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if intraday:
+        scoped = _ensure_et_index(df)
+        start_ts = pd.Timestamp(start).tz_localize(_ET)
+        end_ts = (pd.Timestamp(end) + pd.Timedelta(days=1)).tz_localize(_ET)
+        return scoped[(scoped.index >= start_ts) & (scoped.index < end_ts)]
+
+    idx = pd.to_datetime(df.index, errors="coerce")
+    scoped = df.copy()
+    scoped.index = idx
+    start_d = pd.Timestamp(start).date()
+    end_d = pd.Timestamp(end).date()
+    mask = (scoped.index.date >= start_d) & (scoped.index.date <= end_d)
+    return scoped[mask]
+
+
+def _load_cached_df(symbol: str, source: str, start: str, end: str, intraday: bool) -> pd.DataFrame | None:
+    path = _cache_path(symbol, source, intraday)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rows = payload.get("rows") or []
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        if "ts" not in df.columns:
+            return None
+        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+        df = df.dropna(subset=["ts"]).set_index("ts").sort_index()
+        keep_cols = [c for c in ["Open", "High", "Low", "Close", "Volume", "session"] if c in df.columns]
+        df = df[keep_cols]
+        scoped = _slice_cached_range(df, start, end, intraday)
+        if scoped.empty:
+            return None
+        interval = payload.get("interval")
+        if isinstance(interval, str) and interval:
+            scoped.attrs["interval"] = interval
+        return scoped
+    except Exception as exc:
+        logger.debug("Failed loading historical cache for %s (%s): %s", symbol, source, exc)
+        return None
+
+
+def _save_cached_df(symbol: str, source: str, intraday: bool, df: pd.DataFrame) -> None:
+    if df.empty:
+        return
+    try:
+        _HIST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _cache_path(symbol, source, intraday)
+        existing = _load_cached_df(symbol, source, "1900-01-01", "2100-01-01", intraday)
+        merged = pd.concat([existing, df]) if existing is not None else df.copy()
+        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        if intraday and not merged.empty:
+            scoped = _ensure_et_index(merged)
+            cutoff = datetime.now(_ET) - timedelta(days=_INTRADAY_CACHE_RETENTION_DAYS)
+            merged = scoped[scoped.index >= cutoff]
+        max_rows = _INTRADAY_CACHE_LIMIT if intraday else _DAILY_CACHE_LIMIT
+        if len(merged) > max_rows:
+            merged = merged.iloc[-max_rows:]
+        out = merged.copy()
+        out = out[[c for c in ["Open", "High", "Low", "Close", "Volume", "session"] if c in out.columns]]
+        out = out.reset_index().rename(columns={out.index.name or "index": "ts"})
+        out["ts"] = out["ts"].astype(str)
+        payload = {
+            "symbol": symbol.upper(),
+            "source": source,
+            "intraday": intraday,
+            "interval": df.attrs.get("interval"),
+            "rows": out.to_dict(orient="records"),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Failed writing historical cache for %s (%s): %s", symbol, source, exc)
+
+
+def get_intraday_cache_coverage(symbol: str, source: DataSource = "auto") -> dict[str, str | int | None]:
+    """Return basic coverage metadata for a symbol's intraday local cache."""
+    resolved = _resolve_source(source)
+    cached = _load_cached_df(symbol, resolved, "1900-01-01", "2100-01-01", intraday=True)
+    if cached is None or cached.empty:
+        return {
+            "symbol": symbol.upper(),
+            "source": resolved,
+            "rows": 0,
+            "oldest": None,
+            "newest": None,
+        }
+    return {
+        "symbol": symbol.upper(),
+        "source": resolved,
+        "rows": int(len(cached)),
+        "oldest": str(cached.index.min()),
+        "newest": str(cached.index.max()),
+    }
+
+
+def warm_intraday_cache(
+    symbol: str,
+    *,
+    lookback_days: int = 365,
+    source: DataSource = "auto",
+    chunk_days: int = 20,
+    prefer_ib: bool = True,
+    ib_use_rth: bool = False,
+    ib_what_to_show: str = "TRADES",
+    ib_max_retries: int = 2,
+    ib_pause_ms: int = 150,
+) -> dict[str, str | int | bool | None]:
+    """Warm local 1-minute intraday cache over a lookback window.
+
+    Notes
+    -----
+    - For IB, fetches in chunks and appends into the persistent local cache.
+    - For Yahoo, 1m history is provider-limited (typically recent ~7 days).
+      This helper still writes whatever is available so the cache can grow over
+      time with periodic runs.
+    """
+    if lookback_days < 1:
+        lookback_days = 1
+    if chunk_days < 1:
+        chunk_days = 1
+
+    resolved = _resolve_source(source)
+    if prefer_ib and _ib_is_connected():
+        resolved = "ib"
+    sym = symbol.upper()
+    end_dt = datetime.now(_ET).date()
+    start_dt = end_dt - timedelta(days=int(lookback_days))
+
+    fetched_chunks = 0
+    failed_chunks = 0
+    fetched_rows = 0
+    requests_made = 0
+    last_error: str | None = None
+    warning: str | None = None
+    ib_ip_conflict_detected = False
+
+    if resolved == "ib":
+        what_to_show = str(ib_what_to_show or "TRADES").strip().upper() or "TRADES"
+        retries = max(0, min(10, int(ib_max_retries)))
+        pause_s = max(0.0, min(5.0, float(ib_pause_ms) / 1000.0))
+
+        def _run_async(coro):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        fut = executor.submit(asyncio.run, coro)
+                        return fut.result(timeout=120)
+            except RuntimeError:
+                pass
+            return asyncio.run(coro)
+
+        def _fetch_ib_1m_chunk(chunk_start: date, chunk_end: date) -> pd.DataFrame:
+            duration_days = max((chunk_end - chunk_start).days + 1, 1)
+            end_datetime = f"{chunk_end.strftime('%Y%m%d')} 23:59:59"
+            meta = _run_async(
+                ib_service.get_historical_bars_request_meta(
+                    symbol=sym,
+                    end_datetime=end_datetime,
+                    duration=f"{duration_days} D",
+                    bar_size="1 min",
+                    what_to_show=what_to_show,
+                    use_rth=bool(ib_use_rth),
+                )
+            )
+            bars = list(meta.get("bars") or [])
+            if not bars:
+                err = meta.get("error")
+                raise ValueError(str(err or "IB returned no bars"))
+
+            rows: list[dict[str, float | int | pd.Timestamp]] = []
+            for b in bars:
+                try:
+                    ts = _parse_ib_bar_datetime(str(b.get("date")))
+                except Exception:
+                    continue
+                if ts.date() < chunk_start or ts.date() > chunk_end:
+                    continue
+                rows.append(
+                    {
+                        "Date": ts,
+                        "Open": float(b.get("open")),
+                        "High": float(b.get("high")),
+                        "Low": float(b.get("low")),
+                        "Close": float(b.get("close")),
+                        "Volume": int(b.get("volume") or 0),
+                    }
+                )
+
+            if not rows:
+                raise ValueError("IB chunk returned bars outside requested date window")
+
+            df_chunk = pd.DataFrame(rows).set_index("Date").sort_index()
+            df_chunk = _tag_market_session(df_chunk)
+            df_chunk.attrs["interval"] = "1m"
+            return df_chunk
+
+        cursor = start_dt
+        while cursor <= end_dt:
+            chunk_end = min(end_dt, cursor + timedelta(days=int(chunk_days) - 1))
+            chunk_ok = False
+            for attempt in range(retries + 1):
+                requests_made += 1
+                try:
+                    df = _fetch_ib_1m_chunk(cursor, chunk_end)
+                    if not df.empty:
+                        _save_cached_df(sym, resolved, intraday=True, df=df)
+                        fetched_rows += int(len(df))
+                    chunk_ok = True
+                    break
+                except Exception as exc:
+                    last_error = str(exc)
+                    if _is_ib_ip_conflict_error(last_error):
+                        ib_ip_conflict_detected = True
+                    logger.debug(
+                        "Warm intraday cache IB chunk failed for %s (%s→%s, attempt %d/%d): %s",
+                        sym,
+                        cursor,
+                        chunk_end,
+                        attempt + 1,
+                        retries + 1,
+                        exc,
+                    )
+                    if attempt < retries and pause_s > 0:
+                        time.sleep(pause_s)
+
+            if not chunk_ok:
+                failed_chunks += 1
+                if ib_ip_conflict_detected:
+                    break
+            fetched_chunks += 1
+            cursor = chunk_end + timedelta(days=1)
+
+        if ib_ip_conflict_detected and source in ("auto", "yfinance"):
+            # IB may reject historical market data when the trading session is active from another IP.
+            # In auto mode, gracefully degrade to Yahoo so warm-up can still populate recent cache.
+            resolved = "yfinance"
+            warning = (
+                "IB historical data rejected because the trading session appears active from a different IP; "
+                "fell back to Yahoo for warm-up."
+            )
+            logger.warning("%s symbol=%s", warning, sym)
+    else:
+        # Yahoo 1m lookback is short; request recent window and persist if available.
+        # Use last 7 days to avoid guaranteed empty responses for older spans.
+        pass
+
+    if resolved == "yfinance":
+        # Yahoo 1m lookback is short; request recent window and persist if available.
+        # Use last 7 days to avoid guaranteed empty responses for older spans.
+        yf_days = min(int(lookback_days), 7)
+        yf_start = (end_dt - timedelta(days=yf_days)).isoformat()
+        yf_end = end_dt.isoformat()
+        try:
+            ticker = yf.Ticker(sym)
+            df = ticker.history(start=yf_start, end=yf_end, interval="1m", prepost=True)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [col[0] for col in df.columns]
+            if not df.empty:
+                df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+                df.index = pd.to_datetime(df.index)
+                df = _tag_market_session(df)
+                df.attrs["interval"] = "1m"
+                _save_cached_df(sym, resolved, intraday=True, df=df)
+                fetched_rows += int(len(df))
+            if fetched_chunks == 0:
+                fetched_chunks = 1
+            requests_made += 1
+            if failed_chunks > 0 and ib_ip_conflict_detected:
+                failed_chunks = max(0, failed_chunks - 1)
+        except Exception as exc:
+            last_error = str(exc)
+            if fetched_chunks == 0:
+                failed_chunks = 1
+                fetched_chunks = 1
+            requests_made += 1
+
+    coverage = get_intraday_cache_coverage(sym, resolved)
+    oldest = coverage.get("oldest")
+    newest = coverage.get("newest")
+    return {
+        "symbol": sym,
+        "source": resolved,
+        "lookback_days": int(lookback_days),
+        "requested_start": start_dt.isoformat(),
+        "requested_end": end_dt.isoformat(),
+        "chunks_attempted": int(fetched_chunks),
+        "chunks_failed": int(failed_chunks),
+        "requests_made": int(requests_made),
+        "rows_fetched": int(fetched_rows),
+        "rows_cached": int(coverage.get("rows") or 0),
+        "cache_oldest": oldest,
+        "cache_newest": newest,
+        "ib_use_rth": bool(ib_use_rth) if resolved == "ib" else None,
+        "ib_what_to_show": (str(ib_what_to_show or "").upper() if resolved == "ib" else None),
+        "full_lookback_covered": bool(oldest and pd.Timestamp(oldest).date() <= start_dt),
+        "warning": warning,
+        "error": last_error,
+    }
 
 
 def _ib_is_connected() -> bool:
@@ -331,6 +678,7 @@ def fetch_ohlcv_intraday(
     start: str,
     end: str,
     source: DataSource = "auto",
+    allow_remote_pull: bool = True,
 ) -> pd.DataFrame:
     """Fetch intraday OHLCV data using the finest available interval.
 
@@ -358,8 +706,26 @@ def fetch_ohlcv_intraday(
     """
     source = _resolve_source(source)
 
+    cached = _load_cached_df(symbol, source, start, end, intraday=True)
+    if cached is not None:
+        return cached
+
+    if not allow_remote_pull and source != "ib":
+        raise ValueError(
+            f"No cached intraday data for {symbol!r} ({start}→{end}, source={source}). "
+            "Backtest network pulls are disabled; warm cache via data manager workflows first."
+        )
+
+    if source == "yfinance" and _is_closed_day_now_et():
+        raise ValueError(
+            f"Cache miss for {symbol!r} intraday data on a closed market day; "
+            "skip remote Yahoo pulls and use locally cached historical data."
+        )
+
     if source == "ib":
-        return _fetch_ib_intraday(symbol, start, end)
+        df = _fetch_ib_intraday(symbol, start, end)
+        _save_cached_df(symbol, source, intraday=True, df=df)
+        return df
 
     if source != "yfinance":
         logger.warning(
@@ -369,6 +735,7 @@ def fetch_ohlcv_intraday(
         )
         df = fetch_ohlcv(symbol, start, end, source=source)
         df.attrs["interval"] = "1d"
+        _save_cached_df(symbol, source, intraday=False, df=df)
         return df
 
     for interval in ("1m", "2m", "5m"):
@@ -392,6 +759,7 @@ def fetch_ohlcv_intraday(
                 "%d total bars (%d regular-session)",
                 interval, symbol, start, end, len(df), n_regular,
             )
+            _save_cached_df(symbol, source, intraday=True, df=df)
             return df
         except Exception as exc:
             logger.debug("Intraday interval %s failed for %s: %s", interval, symbol, exc)
@@ -408,6 +776,7 @@ def fetch_ohlcv(
     start: str,
     end: str,
     source: DataSource = "auto",
+    allow_remote_pull: bool = True,
 ) -> pd.DataFrame:
     """Fetch OHLCV data for *symbol* between *start* and *end*.
 
@@ -444,6 +813,22 @@ def fetch_ohlcv(
     requested_source = source
     source = _resolve_source(source)
 
+    cached = _load_cached_df(symbol, source, start, end, intraday=False)
+    if cached is not None:
+        return cached
+
+    if not allow_remote_pull and source != "ib":
+        raise ValueError(
+            f"No cached daily data for {symbol!r} ({start}→{end}, source={source}). "
+            "Backtest network pulls are disabled; warm cache via data manager workflows first."
+        )
+
+    if source == "yfinance" and _is_closed_day_now_et():
+        raise ValueError(
+            f"Cache miss for {symbol!r} daily data on a closed market day; "
+            "skip remote Yahoo pulls and use locally cached historical data."
+        )
+
     if source not in fetchers:
         raise ValueError(
             f"Unknown data source {source!r}. Valid options: {list(fetchers)}"
@@ -451,7 +836,9 @@ def fetch_ohlcv(
 
     if source == "ib":
         try:
-            return _fetch_ib(symbol, start, end)
+            df = _fetch_ib(symbol, start, end)
+            _save_cached_df(symbol, source, intraday=False, df=df)
+            return df
         except ValueError as exc:
             logger.warning(
                 "IB data unavailable (%s); falling back to yfinance for %s.", exc, symbol
@@ -460,19 +847,33 @@ def fetch_ohlcv(
 
     if source == "yfinance":
         try:
-            return _fetch_yfinance(symbol, start, end)
+            df = _fetch_yfinance(symbol, start, end)
+            _save_cached_df(symbol, source, intraday=False, df=df)
+            return df
         except ValueError as exc:
             if requested_source in ("auto", "ib"):
                 logger.warning(
                     "yfinance failed (%s); falling back to stooq for %s.", exc, symbol
                 )
-                return _fetch_stooq(symbol, start, end)
+                df = _fetch_stooq(symbol, start, end)
+                _save_cached_df(symbol, "stooq", intraday=False, df=df)
+                return df
             raise
 
-    return fetchers[source](symbol, start, end)
+    df = fetchers[source](symbol, start, end)
+    _save_cached_df(symbol, source, intraday=False, df=df)
+    return df
 
 
-__all__ = ["fetch_ohlcv", "fetch_ohlcv_intraday", "list_data_sources", "DataSource", "_tag_market_session"]
+__all__ = [
+    "fetch_ohlcv",
+    "fetch_ohlcv_intraday",
+    "list_data_sources",
+    "DataSource",
+    "_tag_market_session",
+    "warm_intraday_cache",
+    "get_intraday_cache_coverage",
+]
 
 
 def list_data_sources() -> list[dict]:

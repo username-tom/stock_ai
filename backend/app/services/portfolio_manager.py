@@ -1,8 +1,8 @@
 """Portfolio Manager – automatic fund rebalancing between bearish and bullish positions.
 
 The manager wakes up on a configurable interval, classifies each active sandbox
-position as *bullish* or *bearish* using recent price-action indicators (RSI,
-MACD, SMA trend), then moves a configurable percentage of available funds from
+position as *bullish* or *bearish* using low-lag price/volume state (VWAP,
+ROC velocity, volume impulse), then moves a configurable percentage of available funds from
 bearish positions to bullish ones, subject to per-position minimums.
 
 Settings (persisted in-memory, reset on server restart unless saved to DB):
@@ -33,6 +33,7 @@ from app.models.sandbox import SandboxPosition, SandboxTrade
 logger = logging.getLogger(__name__)
 
 _MIN_SENTIMENT_DATA_POINTS = 35
+_INTRADAY_1M_TEMPLATE = "template:intraday_1m_regime_template.py"
 
 # ── default 5×5 sentiment matrices ───────────────────────────────────────── #
 # These mirror the curated defaults rendered by the PM panel
@@ -41,45 +42,45 @@ _MIN_SENTIMENT_DATA_POINTS = 35
 # used by the engine, even before the user clicks Save.
 _DEFAULT_SENTIMENT_MATRIX_STRATEGIES: dict[str, dict[str, str]] = {
     "crash": {
-        "STRONG LONG": "stoch_rsi",
-        "LONG": "rsi",
-        "NEUTRAL": "williams_r",
-        "SHORT": "stoch_rsi",
-        "STRONG SHORT": "williams_r",
+        "STRONG LONG": _INTRADAY_1M_TEMPLATE,
+        "LONG": _INTRADAY_1M_TEMPLATE,
+        "NEUTRAL": _INTRADAY_1M_TEMPLATE,
+        "SHORT": _INTRADAY_1M_TEMPLATE,
+        "STRONG SHORT": _INTRADAY_1M_TEMPLATE,
     },
     "bearish": {
-        "STRONG LONG": "macd",
-        "LONG": "bollinger_bands",
-        "NEUTRAL": "rsi",
-        "SHORT": "stochastic",
-        "STRONG SHORT": "stoch_rsi",
+        "STRONG LONG": _INTRADAY_1M_TEMPLATE,
+        "LONG": _INTRADAY_1M_TEMPLATE,
+        "NEUTRAL": _INTRADAY_1M_TEMPLATE,
+        "SHORT": _INTRADAY_1M_TEMPLATE,
+        "STRONG SHORT": _INTRADAY_1M_TEMPLATE,
     },
     "neutral": {
-        "STRONG LONG": "sma_crossover",
-        "LONG": "macd",
-        "NEUTRAL": "bollinger_bands",
-        "SHORT": "stochastic",
-        "STRONG SHORT": "cci",
+        "STRONG LONG": _INTRADAY_1M_TEMPLATE,
+        "LONG": _INTRADAY_1M_TEMPLATE,
+        "NEUTRAL": _INTRADAY_1M_TEMPLATE,
+        "SHORT": _INTRADAY_1M_TEMPLATE,
+        "STRONG SHORT": _INTRADAY_1M_TEMPLATE,
     },
     "bullish": {
-        "STRONG LONG": "sma_crossover",
-        "LONG": "macd",
-        "NEUTRAL": "bollinger_bands",
-        "SHORT": "rsi",
-        "STRONG SHORT": "stochastic",
+        "STRONG LONG": _INTRADAY_1M_TEMPLATE,
+        "LONG": _INTRADAY_1M_TEMPLATE,
+        "NEUTRAL": _INTRADAY_1M_TEMPLATE,
+        "SHORT": _INTRADAY_1M_TEMPLATE,
+        "STRONG SHORT": _INTRADAY_1M_TEMPLATE,
     },
     "euphoric": {
-        "STRONG LONG": "cci",
-        "LONG": "macd",
-        "NEUTRAL": "bollinger_bands",
-        "SHORT": "rsi",
-        "STRONG SHORT": "stoch_rsi",
+        "STRONG LONG": _INTRADAY_1M_TEMPLATE,
+        "LONG": _INTRADAY_1M_TEMPLATE,
+        "NEUTRAL": _INTRADAY_1M_TEMPLATE,
+        "SHORT": _INTRADAY_1M_TEMPLATE,
+        "STRONG SHORT": _INTRADAY_1M_TEMPLATE,
     },
 }
 
 _DEFAULT_SENTIMENT_MATRIX_ACTIONS: dict[str, dict[str, str]] = {
-    "crash":    {"STRONG LONG": "hold",     "LONG": "trade", "NEUTRAL": "no_trade", "SHORT": "engine_off", "STRONG SHORT": "engine_off"},
-    "bearish":  {"STRONG LONG": "trade",    "LONG": "trade", "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "engine_off"},
+    "crash":    {"STRONG LONG": "trade",    "LONG": "trade", "NEUTRAL": "trade",    "SHORT": "engine_off", "STRONG SHORT": "engine_off"},
+    "bearish":  {"STRONG LONG": "no_trade", "LONG": "no_trade", "NEUTRAL": "no_trade", "SHORT": "engine_off", "STRONG SHORT": "engine_off"},
     "neutral":  {"STRONG LONG": "trade",    "LONG": "trade", "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "trade"},
     "bullish":  {"STRONG LONG": "hold",     "LONG": "trade", "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "force_sell"},
     "euphoric": {"STRONG LONG": "hold",     "LONG": "hold",  "NEUTRAL": "trade",    "SHORT": "trade",      "STRONG SHORT": "force_sell"},
@@ -132,32 +133,32 @@ _settings: dict[str, Any] = {
     "reallocation_mode": "to_stock",   # to_stock | to_available
     "allow_buy_outside_allocation": False, # allow sandbox buy with funds outside allocation
     "market_sentiment_strategies": {
-        "crash": "rsi",
-        "bearish": "macd",
-        "neutral": "bollinger_bands",
-        "bullish": "sma_crossover",
-        "euphoric": "rsi",
+        "crash": _INTRADAY_1M_TEMPLATE,
+        "bearish": _INTRADAY_1M_TEMPLATE,
+        "neutral": _INTRADAY_1M_TEMPLATE,
+        "bullish": _INTRADAY_1M_TEMPLATE,
+        "euphoric": _INTRADAY_1M_TEMPLATE,
     },
     "symbol_sentiment_strategies": {
-        "crash": "rsi",
-        "bearish": "macd",
-        "neutral": "bollinger_bands",
-        "bullish": "sma_crossover",
-        "euphoric": "rsi",
+        "crash": _INTRADAY_1M_TEMPLATE,
+        "bearish": _INTRADAY_1M_TEMPLATE,
+        "neutral": _INTRADAY_1M_TEMPLATE,
+        "bullish": _INTRADAY_1M_TEMPLATE,
+        "euphoric": _INTRADAY_1M_TEMPLATE,
     },
     "sentiment_strategy_enabled": True,   # auto-change strategy based on sentiment
     "ai_tag_strategy_enabled": False,      # auto-change strategy based on AI learner tag
     "ai_sentiment_change_enabled": True,   # master switch for AI sentiment-driven strategy/trade changes
     "ai_tag_strategies": {
-        "STRONG LONG": "sma_crossover",
-        "LONG": "sma_crossover",
+        "STRONG LONG": _INTRADAY_1M_TEMPLATE,
+        "LONG": _INTRADAY_1M_TEMPLATE,
         "NEUTRAL": "",           # empty = keep current strategy (no override)
-        "SHORT": "rsi",
-        "STRONG SHORT": "rsi",
+        "SHORT": _INTRADAY_1M_TEMPLATE,
+        "STRONG SHORT": _INTRADAY_1M_TEMPLATE,
     },
     "ai_tag_allow_overnight": True,        # LONG/STRONG LONG positions skip EOD liquidation
     "ai_tag_action_mode": "strategy_override",  # strategy_override | direct
-    "ai_external_sentiment_weight": 0.0,   # 0..1 weight blending external news/social sentiment into AI learner score
+    "ai_external_sentiment_weight": 0.35,  # 0..1 weight blending external news/social sentiment into AI learner score
     "ai_tag_long_engine_off": True,        # disable engine after buy for LONG/STRONG LONG (hold mode)
     "ai_tag_long_tp_pct": 0.0,            # take profit % for long-hold positions (0 = disabled)
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
@@ -246,7 +247,10 @@ def get_manager_state() -> dict:
 
 
 # Legacy strategy name aliases – renamed in a previous refactor.
-_LEGACY_STRATEGY_NAMES: dict[str, str] = {"bollinger": "bollinger_bands"}
+_LEGACY_STRATEGY_NAMES: dict[str, str] = {
+    "bollinger": "bollinger_bands",
+    "intraday_1m": _INTRADAY_1M_TEMPLATE,
+}
 
 
 def _load_strategy_map(raw_value: Any, fallback: dict[str, str]) -> dict[str, str]:
@@ -286,8 +290,65 @@ def _load_json_dict(raw_value: Any, fallback: dict) -> dict:
     return dict(fallback)
 
 
+def _is_dynamic_strategy_name(value: str) -> bool:
+    raw = (value or "").strip().lower()
+    return raw.startswith("template:") or raw.startswith("custom:")
+
+
+def _auto_upgrade_intraday_strategy_defaults() -> bool:
+    """Upgrade legacy built-in PM strategy maps to intraday 1m defaults.
+
+    This runs on startup after DB settings are loaded so older persisted maps
+    (e.g. macd/williams_r mixes) don't silently override the current intraday
+    template-first product defaults.
+    """
+    strategy_values: list[str] = []
+
+    for key in ("market_sentiment_strategies", "symbol_sentiment_strategies", "ai_tag_strategies"):
+        d = _settings.get(key)
+        if isinstance(d, dict):
+            strategy_values.extend(str(v) for v in d.values() if isinstance(v, str) and v.strip())
+
+    matrix = _settings.get("sentiment_matrix_strategies")
+    if isinstance(matrix, dict):
+        for row in matrix.values():
+            if isinstance(row, dict):
+                strategy_values.extend(str(v) for v in row.values() if isinstance(v, str) and v.strip())
+
+    if not strategy_values:
+        return False
+
+    has_intraday = any((v or "").strip() == _INTRADAY_1M_TEMPLATE for v in strategy_values)
+    has_dynamic = any(_is_dynamic_strategy_name(v) for v in strategy_values)
+    if has_intraday or has_dynamic:
+        return False
+
+    # Legacy-only config detected -> upgrade to current intraday defaults.
+    intraday_bucket_map = {
+        "crash": _INTRADAY_1M_TEMPLATE,
+        "bearish": _INTRADAY_1M_TEMPLATE,
+        "neutral": _INTRADAY_1M_TEMPLATE,
+        "bullish": _INTRADAY_1M_TEMPLATE,
+        "euphoric": _INTRADAY_1M_TEMPLATE,
+    }
+    _settings["market_sentiment_strategies"] = dict(intraday_bucket_map)
+    _settings["symbol_sentiment_strategies"] = dict(intraday_bucket_map)
+    _settings["sentiment_matrix_strategies"] = _clone_matrix(_DEFAULT_SENTIMENT_MATRIX_STRATEGIES)
+
+    ai_map = dict(_settings.get("ai_tag_strategies") or {})
+    for tag in ("STRONG LONG", "LONG", "SHORT", "STRONG SHORT"):
+        ai_map[tag] = _INTRADAY_1M_TEMPLATE
+    if "NEUTRAL" not in ai_map:
+        ai_map["NEUTRAL"] = ""
+    _settings["ai_tag_strategies"] = ai_map
+
+    logger.info("PM settings auto-upgraded to intraday 1m strategy defaults from legacy built-in maps")
+    return True
+
+
 async def _load_settings_from_db() -> None:
     """Overwrite in-memory _settings from the DB row on startup."""
+    upgraded_legacy_maps = False
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
         from app.models.sandbox import PortfolioManagerSettings
@@ -376,6 +437,11 @@ async def _load_settings_from_db() -> None:
                         _state["scores"] = loaded
             except Exception:
                 pass
+
+            upgraded_legacy_maps = _auto_upgrade_intraday_strategy_defaults()
+
+    if upgraded_legacy_maps:
+        await _save_settings_to_db()
 
 
 async def _save_scores_to_db() -> None:
@@ -483,7 +549,7 @@ def update_manager_settings(new: dict) -> dict:
         if k in allowed:
             _settings[k] = v
 
-    # Keep enough bars so RSI/MACD/SMA sub-signals can contribute.
+    # Keep enough bars so VWAP/ROC/volume sub-signals are stable.
     if "sentiment_data_points" in new:
         _settings["sentiment_data_points"] = max(
             _MIN_SENTIMENT_DATA_POINTS,
@@ -547,7 +613,7 @@ async def _fetch_bars(symbol: str) -> pd.DataFrame:
     df = await get_intraday_df(symbol, range_=range_str, interval=interval,
                                include_pre_post=False, force_yf=True,
                                cache_ttl_override=_PM_SCORE_CACHE_TTL)
-    bars = df[["Close", "Volume"]]
+    bars = df[["Open", "High", "Low", "Close", "Volume"]]
     return bars.tail(data_points)
 
 
@@ -556,41 +622,49 @@ def _score_symbol(df: pd.DataFrame) -> tuple[float, str]:
     Return (score, classification) where score is −1..+1 and classification
     is one of 'crash', 'bearish', 'neutral', 'bullish', 'euphoric'.
 
-    Composite of three sub-signals, each contributing ±1/3:
-      1. RSI  – < 30 crash, < 40 bearish, > 70 euphoric, > 60 bullish
-      2. MACD histogram sign (12/26/9 EMA)
-      3. Close vs 20-bar SMA trend
+        Composite of low-lag intraday sub-signals with explicit volume confirmation:
+            1. Close vs VWAP baseline (trend location)
+            2. 5-bar ROC (velocity)
+            3. 1-bar impulse with volume-ratio confirmation
+            4. Extreme deviation (euphoric/crash) via VWAP z-score + volume spike
     """
-    closes = df["Close"]
-    if closes.empty:
+    closes = df["Close"].astype(float)
+    volumes = df["Volume"].astype(float)
+    if closes.empty or volumes.empty:
         return 0.0, "neutral"
 
-    # Mirror backtest sentiment computation so PM/sandbox execution behavior
-    # aligns with the improved backtest regime-switch logic.
     score_series = pd.Series(0.0, index=closes.index, dtype=float)
 
-    delta = closes.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.where(loss != 0, pd.NA)
-    rsi = (100 - 100 / (1 + rs)).fillna(50)
-    score_series += (rsi < 30).astype(float) * (-2 / 3)
-    score_series += ((rsi >= 30) & (rsi < 40)).astype(float) * (-1 / 3)
-    score_series += (rsi > 70).astype(float) * (2 / 3)
-    score_series += ((rsi > 60) & (rsi <= 70)).astype(float) * (1 / 3)
+    # Session-style cumulative VWAP baseline.
+    vwap = (closes * volumes).cumsum() / volumes.cumsum().replace(0.0, pd.NA)
 
-    ema12 = closes.ewm(span=12, adjust=False).mean()
-    ema26 = closes.ewm(span=26, adjust=False).mean()
-    hist = ((ema12 - ema26) - (ema12 - ema26).ewm(span=9, adjust=False).mean()).fillna(0.0)
-    score_series += (hist > 0).astype(float) * (1 / 3)
-    score_series += (hist < 0).astype(float) * (-1 / 3)
+    roc5 = closes.pct_change(5).fillna(0.0)
+    roc1 = closes.pct_change(1).fillna(0.0)
+    vol_ma10 = volumes.rolling(10).mean().replace(0.0, pd.NA)
+    vol_ratio = (volumes / vol_ma10).fillna(1.0)
 
-    sma20 = closes.rolling(20).mean().fillna(closes)
-    score_series += (closes > sma20).astype(float) * (1 / 3)
-    score_series += (closes < sma20).astype(float) * (-1 / 3)
+    dev = closes - vwap
+    dev_std = dev.rolling(20).std().replace(0.0, pd.NA)
+    vwap_z = (dev / dev_std).fillna(0.0)
+
+    # 1) Structural trend location: price relative to VWAP.
+    score_series += (closes > vwap).astype(float) * 0.25
+    score_series += (closes < vwap).astype(float) * -0.25
+
+    # 2) Velocity (5-bar ROC) for low-lag directional state.
+    score_series += (roc5 >= 0.003).astype(float) * 0.25
+    score_series += (roc5 <= -0.003).astype(float) * -0.25
+
+    # 3) Immediate impulse only when confirmed by elevated volume.
+    score_series += ((roc1 > 0.0) & (vol_ratio >= 1.5)).astype(float) * 0.20
+    score_series += ((roc1 < 0.0) & (vol_ratio >= 1.5)).astype(float) * -0.20
+
+    # 4) Panic/euphoria extremes (large VWAP deviation + volume spike).
+    score_series += ((vwap_z >= 3.0) & (vol_ratio >= 1.8)).astype(float) * 0.30
+    score_series += ((vwap_z <= -3.0) & (vol_ratio >= 1.8)).astype(float) * -0.30
 
     score_series = score_series.clip(-1.0, 1.0)
-    score_series = score_series.ewm(span=5, adjust=False).mean()
+    score_series = score_series.ewm(span=3, adjust=False).mean()
     score = float(score_series.iloc[-1]) if len(score_series) else 0.0
     classification = _score_to_bucket(score)
 

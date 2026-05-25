@@ -11,7 +11,9 @@ import { fmtMoney } from './sandboxHelpers'
 
 const STORAGE_KEY = 'portfolio_manager_savestates_v1'
 const PRESETS_KEY = 'portfolio_manager_presets_v1'
+const PRESET_DEFAULT_SELECTION_KEY = 'portfolio_manager_default_preset_v1'
 const PROFILE_ORDER = ['simulated', 'paper', 'live']
+const INTRADAY_1M_TEMPLATE = 'template:intraday_1m_regime_template.py'
 
 const BULL_COLOR = '#10b981'
 const BEAR_COLOR = '#ef4444'
@@ -43,27 +45,51 @@ const AI_TAG_COLORS = {
   'STRONG SHORT': '#ef4444',
 }
 const DEFAULT_AI_TAG_STRATEGIES = {
-  'STRONG LONG': 'sma_crossover',
-  'LONG': 'sma_crossover',
+  'STRONG LONG': INTRADAY_1M_TEMPLATE,
+  'LONG': INTRADAY_1M_TEMPLATE,
   'NEUTRAL': '',
-  'SHORT': 'rsi',
-  'STRONG SHORT': 'rsi',
+  'SHORT': INTRADAY_1M_TEMPLATE,
+  'STRONG SHORT': INTRADAY_1M_TEMPLATE,
 }
 const DEFAULT_SENTIMENT_STRATEGIES = {
-  crash: 'rsi',
-  bearish: 'macd',
-  neutral: 'bollinger_bands',
-  bullish: 'sma_crossover',
-  euphoric: 'rsi',
+  crash: INTRADAY_1M_TEMPLATE,
+  bearish: INTRADAY_1M_TEMPLATE,
+  neutral: INTRADAY_1M_TEMPLATE,
+  bullish: INTRADAY_1M_TEMPLATE,
+  euphoric: INTRADAY_1M_TEMPLATE,
 }
 const DEFAULT_TREND_SENTIMENT_STRATEGIES = {
-  crash: 'rsi',
-  bearish: 'rsi',
-  neutral: 'macd',
-  bullish: 'sma_crossover',
-  euphoric: 'sma_crossover',
+  crash: INTRADAY_1M_TEMPLATE,
+  bearish: INTRADAY_1M_TEMPLATE,
+  neutral: INTRADAY_1M_TEMPLATE,
+  bullish: INTRADAY_1M_TEMPLATE,
+  euphoric: INTRADAY_1M_TEMPLATE,
 }
 const DEFAULT_PM_PRESET_DEFS = [
+  {
+    key: 'default-intraday-1m-volume-first',
+    name: '1m Intraday Volume-First (ORB/VWAP/VSA + Regime)',
+    strategyMap: DEFAULT_SENTIMENT_STRATEGIES,
+    overrides: {
+      stop_loss_pct: 0.5,
+      take_profit_pct: 1.25,
+      hold_positions_overnight: false,
+      sentiment_interval: '1m',
+      sentiment_lookback_days: 5,
+      sentiment_data_points: 120,
+      sentiment_bucket_persistence: 3,
+      eod_sell_window_minutes: 5,
+      pending_price_drift_cancel_pct: 0.25,
+      pending_cancel_after_bars: 3,
+      ai_tag_strategy_enabled: true,
+      ai_sentiment_change_enabled: true,
+      ai_external_sentiment_weight: 0.35,
+      auto_trade_buy_price_offset_pct: 0.01,
+      auto_trade_sell_price_offset_pct: 0.01,
+      sim_buy_fill_rate_pct: 60,
+      sim_sell_fill_rate_pct: 70,
+    },
+  },
   {
     key: 'default-intraday-strict',
     name: 'Intraday Strict (SL 0.5 / TP 1.25 / No Overnight / EOD 5m)',
@@ -119,39 +145,39 @@ const DEFAULT_PM_PRESET_DEFS = [
 //   Euphoric — momentum peaks; fade overbought conditions for shorts
 const DEFAULT_SENTIMENT_MATRIX = {
   crash: {
-    'STRONG LONG': 'stoch_rsi',    // oversold bounce with high conviction
-    'LONG':        'rsi',           // classic oversold reversal signal
-    'NEUTRAL':     'williams_r',    // %R distance from lows in volatile crash
-    'SHORT':       'stoch_rsi',     // overbought on relief rally → short
-    'STRONG SHORT':'williams_r',    // momentum continuation of crash
+    'STRONG LONG': INTRADAY_1M_TEMPLATE,
+    'LONG':        INTRADAY_1M_TEMPLATE,
+    'NEUTRAL':     INTRADAY_1M_TEMPLATE,
+    'SHORT':       INTRADAY_1M_TEMPLATE,
+    'STRONG SHORT':INTRADAY_1M_TEMPLATE,
   },
   bearish: {
-    'STRONG LONG': 'macd',          // MACD crossover for counter-trend long
-    'LONG':        'bollinger_bands',// mean-reversion to upper band
-    'NEUTRAL':     'rsi',           // RSI divergence / oversold in bearish
-    'SHORT':       'stochastic',    // stochastic confirms bearish momentum
-    'STRONG SHORT':'stoch_rsi',     // combined oscillator for strong short
+    'STRONG LONG': INTRADAY_1M_TEMPLATE,
+    'LONG':        INTRADAY_1M_TEMPLATE,
+    'NEUTRAL':     INTRADAY_1M_TEMPLATE,
+    'SHORT':       INTRADAY_1M_TEMPLATE,
+    'STRONG SHORT':INTRADAY_1M_TEMPLATE,
   },
   neutral: {
-    'STRONG LONG': 'sma_crossover', // SMA breakout when AI says strong long
-    'LONG':        'macd',          // developing trend in neutral market
-    'NEUTRAL':     'bollinger_bands',// ideal for range-bound consolidation
-    'SHORT':       'stochastic',    // stochastic short in ranging market
-    'STRONG SHORT':'cci',           // CCI overbought extreme for strong short
+    'STRONG LONG': INTRADAY_1M_TEMPLATE,
+    'LONG':        INTRADAY_1M_TEMPLATE,
+    'NEUTRAL':     INTRADAY_1M_TEMPLATE,
+    'SHORT':       INTRADAY_1M_TEMPLATE,
+    'STRONG SHORT':INTRADAY_1M_TEMPLATE,
   },
   bullish: {
-    'STRONG LONG': 'sma_crossover', // classic trend-following in bull market
-    'LONG':        'macd',          // MACD momentum confirmation in uptrend
-    'NEUTRAL':     'bollinger_bands',// Bollinger squeeze breakout in bull trend
-    'SHORT':       'rsi',           // RSI pullback signal in bull market
-    'STRONG SHORT':'stochastic',    // stochastic overbought for larger pullbacks
+    'STRONG LONG': INTRADAY_1M_TEMPLATE,
+    'LONG':        INTRADAY_1M_TEMPLATE,
+    'NEUTRAL':     INTRADAY_1M_TEMPLATE,
+    'SHORT':       INTRADAY_1M_TEMPLATE,
+    'STRONG SHORT':INTRADAY_1M_TEMPLATE,
   },
   euphoric: {
-    'STRONG LONG': 'cci',           // CCI momentum for late-stage bull surge
-    'LONG':        'macd',          // MACD for last-leg continuation
-    'NEUTRAL':     'bollinger_bands',// Bollinger squeeze then expansion at peaks
-    'SHORT':       'rsi',           // RSI overbought critical in euphoric markets
-    'STRONG SHORT':'stoch_rsi',     // stoch_rsi identifies major reversal peaks
+    'STRONG LONG': INTRADAY_1M_TEMPLATE,
+    'LONG':        INTRADAY_1M_TEMPLATE,
+    'NEUTRAL':     INTRADAY_1M_TEMPLATE,
+    'SHORT':       INTRADAY_1M_TEMPLATE,
+    'STRONG SHORT':INTRADAY_1M_TEMPLATE,
   },
 }
 // Cell action options for the sentiment matrix
@@ -190,17 +216,17 @@ function splitCellAction(raw) {
 
 const DEFAULT_SENTIMENT_MATRIX_ACTIONS = {
   crash: {
-    'STRONG LONG': 'hold',        // AI detected bottom — buy & hold the recovery
-    'LONG':        'trade',       // cautious long in crash — let engine decide
-    'NEUTRAL':     'no_trade',    // unclear signal during crash — skip cycle
+    'STRONG LONG': 'trade',
+    'LONG':        'trade',
+    'NEUTRAL':     'trade',
     'SHORT':       'engine_off',  // crash + AI short confirmed — pause engine
     'STRONG SHORT':'engine_off',  // strong conviction crash short — full stop
   },
   bearish: {
-    'STRONG LONG': 'trade',
-    'LONG':        'trade',
-    'NEUTRAL':     'trade',
-    'SHORT':       'trade',
+    'STRONG LONG': 'no_trade',
+    'LONG':        'no_trade',
+    'NEUTRAL':     'no_trade',
+    'SHORT':       'engine_off',
     'STRONG SHORT':'engine_off',  // double bear conviction — pause engine
   },
   neutral: {
@@ -350,6 +376,23 @@ function loadPresetStore() {
 function savePresetStore(store) {
   try {
     localStorage.setItem(PRESETS_KEY, JSON.stringify(store))
+  } catch {}
+}
+
+function loadDefaultPresetSelection() {
+  try {
+    const raw = localStorage.getItem(PRESET_DEFAULT_SELECTION_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object') return parsed
+    }
+  } catch {}
+  return {}
+}
+
+function saveDefaultPresetSelection(selection) {
+  try {
+    localStorage.setItem(PRESET_DEFAULT_SELECTION_KEY, JSON.stringify(selection))
   } catch {}
 }
 
@@ -688,6 +731,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [draft, setDraft] = useState(null)
   const [savedStates, setSavedStates] = useState(() => loadSavedStates())
   const [presetStore, setPresetStore] = useState(() => loadPresetStore())
+  const [defaultPresetByProfile, setDefaultPresetByProfile] = useState(() => loadDefaultPresetSelection())
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const [routingGroups, setRoutingGroups] = useState({ manual: [], market: [], symbol: [] })
   const [dragPayload, setDragPayload] = useState(null)
@@ -697,6 +741,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [presetNotice, setPresetNotice] = useState(null)
   const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false })
   const activePresets = presetStore[activeProfile] ?? []
+  const launchDefaultPresetId = defaultPresetByProfile[activeProfile] ?? ''
   const selectedPreset = activePresets.find(p => p.id === selectedPresetId) ?? null
 
   function toggleSection(key) {
@@ -829,10 +874,49 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       if (selectedPresetId) setSelectedPresetId('')
       return
     }
-    if (!activePresets.some(p => p.id === selectedPresetId)) {
-      setSelectedPresetId(activePresets[0].id)
+    const hasLaunchDefault = launchDefaultPresetId && activePresets.some(p => p.id === launchDefaultPresetId)
+    if (!hasLaunchDefault && activePresets.some(p => p.id === 'default-intraday-1m-volume-first')) {
+      const nextSelection = {
+        ...defaultPresetByProfile,
+        [activeProfile]: 'default-intraday-1m-volume-first',
+      }
+      setDefaultPresetByProfile(nextSelection)
+      saveDefaultPresetSelection(nextSelection)
     }
-  }, [activePresets, selectedPresetId])
+    const effectiveDefault = hasLaunchDefault
+      ? launchDefaultPresetId
+      : (activePresets.some(p => p.id === 'default-intraday-1m-volume-first')
+        ? 'default-intraday-1m-volume-first'
+        : activePresets[0].id)
+    if (!selectedPresetId || !activePresets.some(p => p.id === selectedPresetId)) {
+      setSelectedPresetId(effectiveDefault)
+    }
+  }, [activePresets, selectedPresetId, activeProfile, defaultPresetByProfile, launchDefaultPresetId])
+
+  useEffect(() => {
+    if (!selectedPreset?.draft || !draft || editSettings) return
+    const current = savedStates[activeProfile]
+    // Apply launch-default preset once per profile (or when default preset changes).
+    if (current?.bootstrappedPresetId === selectedPreset.id) return
+
+    const seededDraft = cloneJson(selectedPreset.draft)
+    setDraft(seededDraft)
+    setSavedStates(prev => {
+      const next = {
+        ...prev,
+        [activeProfile]: {
+          ...(prev[activeProfile] ?? {}),
+          draft: seededDraft,
+          editSettings: false,
+          bootstrappedPresetId: selectedPreset.id,
+          updatedAt: new Date().toISOString(),
+        },
+      }
+      saveSavedStates(next)
+      return next
+    })
+    setPresetNotice(`Loaded launch default preset: ${selectedPreset.name}. Click Save to apply.`)
+  }, [selectedPreset, activeProfile, savedStates, draft, editSettings])
 
   useEffect(() => {
     if (!managerData) return
@@ -1067,6 +1151,17 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     importPresetInputRef.current?.click()
   }
 
+  function handleSetLaunchDefaultPreset() {
+    if (!selectedPreset) return
+    const nextSelection = {
+      ...defaultPresetByProfile,
+      [activeProfile]: selectedPreset.id,
+    }
+    setDefaultPresetByProfile(nextSelection)
+    saveDefaultPresetSelection(nextSelection)
+    setPresetNotice(`Launch default preset set: ${selectedPreset.name}`)
+  }
+
   async function handleImportPreset(event) {
     const file = event.target.files?.[0]
     if (!file) return
@@ -1222,7 +1317,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           >
             {activePresets.length === 0 && <option value="">No presets</option>}
             {activePresets.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
+              <option key={p.id} value={p.id}>
+                {p.name}{(defaultPresetByProfile[activeProfile] === p.id) ? ' (launch default)' : ''}
+              </option>
             ))}
           </select>
           <button
@@ -1256,6 +1353,14 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             title="Rename selected preset"
           >
             Rename
+          </button>
+          <button
+            onClick={handleSetLaunchDefaultPreset}
+            disabled={!selectedPreset}
+            className="text-xs text-amber-300 hover:text-amber-200 border border-amber-700/50 hover:border-amber-500/70 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+            title="Set selected preset as the default loaded on launch"
+          >
+            Set Launch Default
           </button>
           <button
             onClick={handleExportPreset}

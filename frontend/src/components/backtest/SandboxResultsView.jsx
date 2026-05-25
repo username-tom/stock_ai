@@ -1,5 +1,17 @@
 import { useMemo, useState } from 'react'
 
+function formatStrategyLabel(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const lower = raw.toLowerCase()
+  if (lower === 'template:intraday_1m_regime_template.py') return 'intraday 1M regime'
+  if (lower.startsWith('template:')) {
+    const name = raw.slice('template:'.length).replace(/\.py$/i, '')
+    return name.replace(/[_-]+/g, ' ')
+  }
+  return raw
+}
+
 /**
  * Shared view for sandbox-portfolio backtest results.
  *
@@ -531,7 +543,7 @@ export default function SandboxResultsView({ result, metrics }) {
                     <div className="flex items-baseline justify-between mb-1">
                       <div className="flex items-baseline gap-2">
                         <span className="font-bold text-slate-100">{p.symbol}</span>
-                        <span className="text-xs text-slate-500">{p.strategy ?? '—'}</span>
+                        <span className="text-xs text-slate-500">{formatStrategyLabel(p.strategy) ?? '—'}</span>
                       </div>
                       <div className="text-xs">
                         <span className={ret >= 0 ? 'text-emerald-400' : 'text-red-400'}>
@@ -591,7 +603,7 @@ export default function SandboxResultsView({ result, metrics }) {
                               strokeDasharray="3 3"
                               opacity="0.7"
                             >
-                              <title>BUY {mk.date} @ ${Number(mk.price).toFixed(2)}{mk.strategy ? ` · ${mk.strategy}` : ''}</title>
+                              <title>BUY {mk.date} @ ${Number(mk.price).toFixed(2)}{mk.strategy ? ` · ${formatStrategyLabel(mk.strategy)}` : ''}</title>
                             </line>
                           )
                         }
@@ -965,7 +977,7 @@ function ActivityLog({ events }) {
                 <td className="font-mono">${Number(e.price ?? 0).toFixed(2)}</td>
                 <td className="font-mono">{Number(e.quantity ?? 0).toFixed(2)}</td>
                 <td className="font-mono">${Number(e.value ?? 0).toFixed(2)}</td>
-                <td className="text-xs text-indigo-300">{e.strategy ?? '—'}</td>
+                <td className="text-xs text-indigo-300">{formatStrategyLabel(e.strategy) ?? '—'}</td>
                 <td className={e.pnl == null ? 'text-slate-500' : (e.pnl >= 0 ? 'pos' : 'neg')}>
                   {e.pnl == null ? '—' : `${e.pnl >= 0 ? '+' : ''}$${Number(e.pnl).toFixed(2)}`}
                 </td>

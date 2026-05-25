@@ -23,6 +23,16 @@ def _fmt_ts(ts) -> str:
         return str(ts)
 
 
+def _backtest_allow_remote_pull(data_source: DataSource) -> bool:
+    """Backtests should be cache-first and avoid free-source network pulls.
+
+    Allow remote pulls only for explicit IB requests; all other sources must
+    come from locally cached historical data.
+    """
+    _ = data_source
+    return False
+
+
 def _derive_position(df: pd.DataFrame) -> pd.DataFrame:
     """Add a ``position`` column derived from ``signal`` changes.
 
@@ -132,9 +142,21 @@ def run_backtest(
       - ohlcv (price data for charting)
     """
     if day_trade:
-        df = fetch_ohlcv_intraday(symbol, start_date, end_date, source=data_source)
+        df = fetch_ohlcv_intraday(
+            symbol,
+            start_date,
+            end_date,
+            source=data_source,
+            allow_remote_pull=_backtest_allow_remote_pull(data_source),
+        )
     else:
-        df = fetch_ohlcv(symbol, start_date, end_date, source=data_source)
+        df = fetch_ohlcv(
+            symbol,
+            start_date,
+            end_date,
+            source=data_source,
+            allow_remote_pull=_backtest_allow_remote_pull(data_source),
+        )
 
     # Determine bars-per-year for correct Sharpe / annualisation scaling.
     # For day-trade mode count only regular-session bars so pre/post bars
@@ -573,9 +595,21 @@ def run_sentiment_backtest(
             strat_map.setdefault(bucket, default_strat)
 
     if day_trade:
-        df = fetch_ohlcv_intraday(symbol, start_date, end_date, source=data_source)
+        df = fetch_ohlcv_intraday(
+            symbol,
+            start_date,
+            end_date,
+            source=data_source,
+            allow_remote_pull=_backtest_allow_remote_pull(data_source),
+        )
     else:
-        df = fetch_ohlcv(symbol, start_date, end_date, source=data_source)
+        df = fetch_ohlcv(
+            symbol,
+            start_date,
+            end_date,
+            source=data_source,
+            allow_remote_pull=_backtest_allow_remote_pull(data_source),
+        )
 
     interval = df.attrs.get("interval", "1d")
     _interval_bars: dict[str, float] = {
@@ -878,9 +912,21 @@ def _prepare_symbol_for_portfolio(
 ) -> dict[str, Any]:
     """Build per-bar series for one symbol used by the portfolio coordinator."""
     if day_trade:
-        df = fetch_ohlcv_intraday(symbol, start_date, end_date, source=data_source)
+        df = fetch_ohlcv_intraday(
+            symbol,
+            start_date,
+            end_date,
+            source=data_source,
+            allow_remote_pull=_backtest_allow_remote_pull(data_source),
+        )
     else:
-        df = fetch_ohlcv(symbol, start_date, end_date, source=data_source)
+        df = fetch_ohlcv(
+            symbol,
+            start_date,
+            end_date,
+            source=data_source,
+            allow_remote_pull=_backtest_allow_remote_pull(data_source),
+        )
 
     interval = df.attrs.get("interval", "1d")
 

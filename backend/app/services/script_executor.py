@@ -12,6 +12,7 @@ import statistics
 import types
 import logging
 from typing import Any
+import zoneinfo
 
 import numpy as np
 import pandas as pd
@@ -135,6 +136,7 @@ _ALLOWED_MODULES: dict[str, Any] = {
     "numpy": np,
     "math": math,
     "statistics": statistics,
+    "zoneinfo": zoneinfo,
 }
 if _tmpl_indicators is not None:
     _ALLOWED_MODULES["app"] = type("app", (), {
@@ -156,7 +158,7 @@ def _safe_import(name: str, globs: dict, locs: dict, fromlist: tuple, level: int
     # __future__ is a compile-time directive with no runtime side-effects.
     if name == "__future__":
         return __import__(name, globs, locs, fromlist, level)
-    allowed = {"pandas", "numpy", "math", "statistics"}
+    allowed = {"pandas", "numpy", "math", "statistics", "zoneinfo"}
     # app.templates._indicators is an internal, side-effect-free helper module
     # that all built-in strategy templates rely on.  Whitelist it explicitly so
     # templates that import from it work when executed through the sandbox engine.

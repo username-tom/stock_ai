@@ -17,7 +17,12 @@ from app.database import get_db
 from app.models.custom_script import CustomScript
 from app.models.report import BacktestReport
 from app.services.backtester import run_backtest
-from app.services.data_provider import DataSource, list_data_sources
+from app.services.data_provider import (
+    DataSource,
+    get_intraday_cache_coverage,
+    list_data_sources,
+    warm_intraday_cache,
+)
 from app.services.local_storage import (
     _safe_filename,
     list_backtest_report_files,
@@ -34,6 +39,62 @@ from app.services.strategies import list_strategies
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+
+_SENTIMENT_BUCKETS = ("crash", "bearish", "neutral", "bullish", "euphoric")
+_MATRIX_FALLBACK_AI_ORDER = ("NEUTRAL", "LONG", "STRONG LONG", "SHORT", "STRONG SHORT")
+
+
+def _normalize_strategy_name(name: str, default: str) -> str:
+    """Normalize aliases used in PM settings to executable strategy identifiers."""
+    raw = (name or "").strip()
+    if not raw:
+        return default
+    aliases = {
+        "bollinger": "bollinger_bands",
+        "intraday_1m": "template:intraday_1m_regime_template.py",
+    }
+    return aliases.get(raw, raw)
+
+
+def _resolve_backtest_sentiment_strategies(pm_settings: dict) -> tuple[dict[str, str], str]:
+    """Resolve the effective PM sentiment strategy map used by backtests.
+
+    Preference order:
+      1) sentiment_matrix_strategies row using AI `NEUTRAL` column
+      2) first non-empty matrix cell in fallback AI order
+      3) market_sentiment_strategies bucket mapping
+      4) hardcoded defaults
+    """
+    defaults: dict[str, str] = {
+        "crash": "rsi",
+        "bearish": "macd",
+        "neutral": "bollinger_bands",
+        "bullish": "sma_crossover",
+        "euphoric": "rsi",
+    }
+    market_map_raw = pm_settings.get("market_sentiment_strategies") or {}
+    matrix_raw = pm_settings.get("sentiment_matrix_strategies") or {}
+
+    resolved: dict[str, str] = {}
+    used_matrix = False
+    for bucket in _SENTIMENT_BUCKETS:
+        fallback = _normalize_strategy_name(str(market_map_raw.get(bucket) or ""), defaults[bucket])
+        strat = fallback
+        row = matrix_raw.get(bucket) if isinstance(matrix_raw, dict) else None
+        if isinstance(row, dict) and row:
+            candidate = ""
+            for ai_col in _MATRIX_FALLBACK_AI_ORDER:
+                cell = row.get(ai_col)
+                if isinstance(cell, str) and cell.strip():
+                    candidate = cell.strip()
+                    break
+            if candidate:
+                strat = _normalize_strategy_name(candidate, fallback)
+                used_matrix = True
+        resolved[bucket] = strat
+
+    source = "sentiment_matrix_strategies" if used_matrix else "market_sentiment_strategies"
+    return resolved, source
 
 
 def _bars_per_year_from_interval(interval: str | None) -> float:
@@ -124,17 +185,16 @@ class BacktestRequest(BaseModel):
         default="auto",
         description=(
             "Historical data source for the backtest. "
-            "Options: 'auto' (IB when connected, otherwise Yahoo Finance), "
-            "'yfinance' (forced Yahoo), 'stooq' (Stooq.com), 'ib' (forced IB)."
+            "Backtests are cache-first: non-IB sources use locally cached history and do not "
+            "pull free-source data on demand. Options: 'auto', 'yfinance', 'stooq', 'ib'."
         ),
         example="auto",
     )
     day_trade: bool = Field(
         default=True,
         description=(
-            "When True, fetches intraday data (IB: 5s when available; Yahoo: 1m → 2m → 5m) "
-            "and scales performance metrics accordingly. "
-            "Note: Yahoo Finance limits 1m data to the last 7 days."
+            "When True, uses intraday bars and scales performance metrics accordingly. "
+            "Backtests read from local cache for non-IB sources."
         ),
     )
     hold_positions_overnight: bool = Field(
@@ -159,6 +219,59 @@ async def get_strategies():
 async def get_data_sources():
     """List all supported data sources and their availability."""
     return {"data_sources": list_data_sources()}
+
+
+class IntradayCacheWarmRequest(BaseModel):
+    symbol: str = Field(..., example="AAPL")
+    lookback_days: int = Field(default=365, ge=1, le=730)
+    data_source: DataSource = Field(default="auto")
+    chunk_days: int = Field(
+        default=20,
+        ge=1,
+        le=90,
+        description="Chunk size per pull when backfilling IB intraday bars.",
+    )
+    prefer_ib: bool = Field(
+        default=True,
+        description="When enabled and IB is connected, force IB-based backfill even if data_source is auto/yfinance.",
+    )
+    ib_use_rth: bool = Field(
+        default=False,
+        description="Request regular-trading-hours only from IB (True) or include extended session (False).",
+    )
+    ib_what_to_show: str = Field(
+        default="TRADES",
+        description="IB whatToShow field for historical pulls (e.g. TRADES, MIDPOINT).",
+    )
+    ib_max_retries: int = Field(default=2, ge=0, le=10)
+    ib_pause_ms: int = Field(default=150, ge=0, le=5000)
+
+
+@router.post("/cache/warm-intraday")
+async def warm_intraday_history_cache(req: IntradayCacheWarmRequest):
+    """Warm local 1-minute intraday cache used by cache-first backtests."""
+    result = await asyncio.to_thread(
+        warm_intraday_cache,
+        req.symbol,
+        lookback_days=req.lookback_days,
+        source=req.data_source,
+        chunk_days=req.chunk_days,
+        prefer_ib=req.prefer_ib,
+        ib_use_rth=req.ib_use_rth,
+        ib_what_to_show=req.ib_what_to_show,
+        ib_max_retries=req.ib_max_retries,
+        ib_pause_ms=req.ib_pause_ms,
+    )
+    return result
+
+
+@router.get("/cache/intraday-coverage")
+async def intraday_history_cache_coverage(
+    symbol: str = Query(..., description="Ticker symbol (e.g. AAPL)"),
+    data_source: DataSource = Query(default="auto"),
+):
+    """Inspect local intraday cache coverage for a symbol/source."""
+    return get_intraday_cache_coverage(symbol, data_source)
 
 
 class SentimentBacktestRequest(BaseModel):
@@ -715,10 +828,7 @@ async def run_sandbox_backtest_endpoint(
         )
 
     pm = get_manager_settings()
-    sentiment_strategies = dict(pm.get("market_sentiment_strategies") or {
-        "crash": "rsi", "bearish": "macd", "neutral": "bollinger_bands",
-        "bullish": "sma_crossover", "euphoric": "rsi",
-    })
+    sentiment_strategies, sentiment_strategy_source = _resolve_backtest_sentiment_strategies(pm)
     stop_loss_pct = float(pm.get("stop_loss_pct") or 0.0)
     take_profit_pct = float(pm.get("take_profit_pct") or 0.0)
     hold_overnight = bool(pm.get("hold_positions_overnight", True))
@@ -734,6 +844,8 @@ async def run_sandbox_backtest_endpoint(
         sim_sell_fill_rate = float(req.sim_sell_fill_rate_pct)
 
     pm_settings_snapshot = _build_pm_settings_snapshot({
+        "sentiment_strategy_source": sentiment_strategy_source,
+        "effective_sentiment_strategies": sentiment_strategies,
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
         "hold_positions_overnight": hold_overnight,
@@ -1123,7 +1235,11 @@ async def run_sandbox_backtest_endpoint(
                 "total_return_pct": 0.0,
                 "total_trades": 0,
                 "win_rate_pct": 0.0,
-                "strategy": getattr(by_symbol.get(sym), "strategy_name", None),
+                "strategy": (
+                    "sentiment_switching"
+                    if req.use_sentiment_routing
+                    else getattr(by_symbol.get(sym), "strategy_name", None)
+                ),
                 "error": entry.get("error") or entry.get("reason"),
             })
             aggregate_initial_remaining += cap
