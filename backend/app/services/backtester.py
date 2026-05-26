@@ -8,6 +8,7 @@ import pandas as pd
 from typing import Any
 
 from app.services.data_provider import DataSource, fetch_ohlcv, fetch_ohlcv_intraday
+from app.services.pending_fill import assess_pending_fill
 from app.services.strategies import get_strategy
 
 
@@ -1233,12 +1234,6 @@ def run_sandbox_portfolio_backtest(
         pool += float(order.get("reserved_from_pool") or 0.0)
         st["pending_order"] = None
 
-    def _price_within_pending_range(current_price: float, pending_price: float) -> bool:
-        if current_price <= 0 or pending_price <= 0:
-            return False
-        drift_pct = abs(current_price - pending_price) / pending_price * 100.0
-        return drift_pct <= drift_threshold_pct
-
     def _try_buy(sym: str, price: float, date, reason: str, bucket: str, active_strat: str, ts_idx: int):
         nonlocal pool
         st = state[sym]
@@ -1293,7 +1288,7 @@ def run_sandbox_portfolio_backtest(
             "reason": reason,
         }
 
-    def _try_fill_pending(sym: str, price: float, ts, ts_idx: int) -> bool:
+    def _try_fill_pending(sym: str, price: float, ts, ts_idx: int, row: pd.Series) -> bool:
         st = state[sym]
         order = st.get("pending_order")
         if not order:
@@ -1303,10 +1298,23 @@ def run_sandbox_portfolio_backtest(
             return True
 
         requested_price = float(order.get("requested_price") or 0.0)
-        if not _price_within_pending_range(price, requested_price):
+        range_check = assess_pending_fill(
+            reference_price=requested_price,
+            quantity=order.get("quantity"),
+            low=row.get("Low"),
+            high=row.get("High"),
+            volume=row.get("Volume"),
+            drift_threshold_pct=drift_threshold_pct,
+        )
+        if not range_check["within_drift_range"]:
             # Drifted too far from requested fill price: cancel and release reserved cash.
             if str(order.get("side") or "").upper() == "BUY":
                 _refund_pending_buy(sym)
+            else:
+                st["pending_order"] = None
+            return True
+
+        if not range_check["eligible_to_attempt"]:
             return True
 
         side = str(order.get("side") or "").upper()
@@ -1418,7 +1426,7 @@ def run_sandbox_portfolio_backtest(
                 continue
 
             # Pending orders reroll once each bar when still in acceptance range.
-            if _try_fill_pending(sym, price, ts, ts_idx):
+            if _try_fill_pending(sym, price, ts, ts_idx, row):
                 continue
 
             # 1. End-of-day liquidation / last-bar close.

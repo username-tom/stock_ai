@@ -498,17 +498,18 @@ class TestDayTradeSessionGating:
 class TestSandboxPortfolioEodLiquidation:
     def test_eod_liquidation_is_forced_even_with_zero_sell_fill_rate(self):
         idx = pd.DatetimeIndex([
+            pd.Timestamp("2024-01-15 15:58:00", tz="America/New_York"),
             pd.Timestamp("2024-01-15 15:59:00", tz="America/New_York"),
             pd.Timestamp("2024-01-15 16:00:00", tz="America/New_York"),
         ])
         df = pd.DataFrame(
             {
-                "Open": [100.0, 101.0],
-                "High": [100.5, 101.5],
-                "Low": [99.5, 100.5],
-                "Close": [100.0, 101.0],
-                "Volume": [1000, 1000],
-                "session": ["regular", "regular"],
+                "Open": [100.0, 100.2, 101.0],
+                "High": [100.5, 100.7, 101.5],
+                "Low": [99.5, 99.8, 100.5],
+                "Close": [100.0, 100.2, 101.0],
+                "Volume": [1000, 1000, 1000],
+                "session": ["regular", "regular", "regular"],
             },
             index=idx,
         )
@@ -517,13 +518,13 @@ class TestSandboxPortfolioEodLiquidation:
             "symbol": "TXN",
             "df": df,
             "interval": "1m",
-            "buckets": pd.Series(["neutral", "neutral"], index=idx),
-            "active_strategy": pd.Series(["sma_crossover", "sma_crossover"], index=idx),
+            "buckets": pd.Series(["neutral", "neutral", "neutral"], index=idx),
+            "active_strategy": pd.Series(["sma_crossover", "sma_crossover", "sma_crossover"], index=idx),
             "signals_by_strat": {
-                "sma_crossover": pd.Series([1.0, 0.0], index=idx),
+                "sma_crossover": pd.Series([1.0, 0.0, 0.0], index=idx),
             },
-            "eod_sell_bars": {idx[1]},
-            "last_regular_bar": {idx[1]},
+            "eod_sell_bars": {idx[2]},
+            "last_regular_bar": {idx[2]},
         }
 
         with patch("app.services.backtester._prepare_symbol_for_portfolio", return_value=prepared_symbol):
@@ -554,3 +555,183 @@ class TestSandboxPortfolioEodLiquidation:
         assert symbol_row["market_value"] == 0.0
         assert symbol_row["unrealized_pnl"] == 0.0
         assert symbol_row["trades"][0]["exit_reason"] == "eod_liquidation"
+
+
+class TestSandboxPortfolioPendingFills:
+    def test_pending_buy_only_fills_when_requested_price_is_inside_bar_range(self):
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2024-01-15 09:30:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-15 09:31:00", tz="America/New_York"),
+        ])
+        df = pd.DataFrame(
+            {
+                "Open": [100.0, 102.0],
+                "High": [100.5, 102.5],
+                "Low": [99.5, 101.5],
+                "Close": [100.0, 102.0],
+                "Volume": [10_000, 10_000],
+                "session": ["regular", "regular"],
+            },
+            index=idx,
+        )
+        df.attrs["interval"] = "1m"
+        prepared_symbol = {
+            "symbol": "TXN",
+            "df": df,
+            "interval": "1m",
+            "buckets": pd.Series(["neutral", "neutral"], index=idx),
+            "active_strategy": pd.Series(["sma_crossover", "sma_crossover"], index=idx),
+            "signals_by_strat": {
+                "sma_crossover": pd.Series([1.0, 0.0], index=idx),
+            },
+            "eod_sell_bars": set(),
+            "last_regular_bar": {idx[1]},
+        }
+
+        with patch("app.services.backtester._prepare_symbol_for_portfolio", return_value=prepared_symbol):
+            result = run_sandbox_portfolio_backtest(
+                symbol_specs=[
+                    {
+                        "symbol": "TXN",
+                        "routing": "fixed",
+                        "fixed_strategy": "sma_crossover",
+                        "min_alloc": 10_000.0,
+                        "max_alloc": 10_000.0,
+                    }
+                ],
+                start_date="2024-01-15",
+                end_date="2024-01-15",
+                initial_capital=10_000.0,
+                commission=0.0,
+                day_trade=True,
+                hold_positions_overnight=True,
+                sim_buy_fill_rate_pct=100.0,
+                sim_sell_fill_rate_pct=100.0,
+                sim_pending_duration_bars=1,
+                pending_price_drift_cancel_pct=200.0,
+            )
+
+        symbol_row = result["per_symbol"][0]
+        assert symbol_row["total_trades"] == 0
+        assert symbol_row["market_value"] == 0.0
+        assert symbol_row["unrealized_pnl"] == 0.0
+        assert symbol_row["pending_buy_reserved"] > 0.0
+
+    def test_pending_buy_requires_sufficient_bar_volume(self):
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2024-01-15 09:30:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-15 09:31:00", tz="America/New_York"),
+        ])
+        df = pd.DataFrame(
+            {
+                "Open": [100.0, 100.0],
+                "High": [100.5, 100.5],
+                "Low": [99.5, 99.5],
+                "Close": [100.0, 100.0],
+                "Volume": [10_000, 50],
+                "session": ["regular", "regular"],
+            },
+            index=idx,
+        )
+        df.attrs["interval"] = "1m"
+        prepared_symbol = {
+            "symbol": "TXN",
+            "df": df,
+            "interval": "1m",
+            "buckets": pd.Series(["neutral", "neutral"], index=idx),
+            "active_strategy": pd.Series(["sma_crossover", "sma_crossover"], index=idx),
+            "signals_by_strat": {
+                "sma_crossover": pd.Series([1.0, 0.0], index=idx),
+            },
+            "eod_sell_bars": set(),
+            "last_regular_bar": {idx[1]},
+        }
+
+        with patch("app.services.backtester._prepare_symbol_for_portfolio", return_value=prepared_symbol):
+            result = run_sandbox_portfolio_backtest(
+                symbol_specs=[
+                    {
+                        "symbol": "TXN",
+                        "routing": "fixed",
+                        "fixed_strategy": "sma_crossover",
+                        "min_alloc": 10_000.0,
+                        "max_alloc": 10_000.0,
+                    }
+                ],
+                start_date="2024-01-15",
+                end_date="2024-01-15",
+                initial_capital=10_000.0,
+                commission=0.0,
+                day_trade=True,
+                hold_positions_overnight=True,
+                sim_buy_fill_rate_pct=100.0,
+                sim_sell_fill_rate_pct=100.0,
+                sim_pending_duration_bars=1,
+                pending_price_drift_cancel_pct=200.0,
+            )
+
+        symbol_row = result["per_symbol"][0]
+        assert symbol_row["total_trades"] == 0
+        assert symbol_row["market_value"] == 0.0
+        assert symbol_row["unrealized_pnl"] == 0.0
+        assert symbol_row["pending_buy_reserved"] > 0.0
+
+    def test_pending_buy_cancels_when_requested_price_leaves_high_low_drift_band(self):
+        idx = pd.DatetimeIndex([
+            pd.Timestamp("2024-01-15 09:30:00", tz="America/New_York"),
+            pd.Timestamp("2024-01-15 09:31:00", tz="America/New_York"),
+        ])
+        df = pd.DataFrame(
+            {
+                "Open": [100.0, 101.5],
+                "High": [100.5, 101.8],
+                "Low": [99.5, 101.2],
+                "Close": [100.0, 101.5],
+                "Volume": [10_000, 10_000],
+                "session": ["regular", "regular"],
+            },
+            index=idx,
+        )
+        df.attrs["interval"] = "1m"
+        prepared_symbol = {
+            "symbol": "TXN",
+            "df": df,
+            "interval": "1m",
+            "buckets": pd.Series(["neutral", "neutral"], index=idx),
+            "active_strategy": pd.Series(["sma_crossover", "sma_crossover"], index=idx),
+            "signals_by_strat": {
+                "sma_crossover": pd.Series([1.0, 0.0], index=idx),
+            },
+            "eod_sell_bars": set(),
+            "last_regular_bar": {idx[1]},
+        }
+
+        with patch("app.services.backtester._prepare_symbol_for_portfolio", return_value=prepared_symbol):
+            result = run_sandbox_portfolio_backtest(
+                symbol_specs=[
+                    {
+                        "symbol": "TXN",
+                        "routing": "fixed",
+                        "fixed_strategy": "sma_crossover",
+                        "min_alloc": 10_000.0,
+                        "max_alloc": 10_000.0,
+                    }
+                ],
+                start_date="2024-01-15",
+                end_date="2024-01-15",
+                initial_capital=10_000.0,
+                commission=0.0,
+                day_trade=True,
+                hold_positions_overnight=True,
+                sim_buy_fill_rate_pct=100.0,
+                sim_sell_fill_rate_pct=100.0,
+                sim_pending_duration_bars=1,
+                pending_price_drift_cancel_pct=10.0,
+            )
+
+        symbol_row = result["per_symbol"][0]
+        assert symbol_row["total_trades"] == 0
+        assert symbol_row["market_value"] == 0.0
+        assert symbol_row["unrealized_pnl"] == 0.0
+        assert symbol_row["pending_buy_reserved"] == 0.0
+        assert symbol_row["final_value"] == pytest.approx(10_000.0)

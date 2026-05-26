@@ -69,6 +69,15 @@ def _load_sandbox_engine_module():
     app_services_script_executor.execute_script = lambda code, df: df
     sys.modules.setdefault("app.services.script_executor", app_services_script_executor)
 
+    app_services_pending_fill = types.ModuleType("app.services.pending_fill")
+    app_services_pending_fill.assess_pending_fill = lambda **kwargs: {
+        "within_fill_range": True,
+        "within_drift_range": True,
+        "sufficient_volume": True,
+        "eligible_to_attempt": True,
+    }
+    sys.modules.setdefault("app.services.pending_fill", app_services_pending_fill)
+
     module_name = "sandbox_engine_under_test"
     module_path = Path(__file__).resolve().parents[1] / "app" / "services" / "sandbox_engine.py"
     spec = importlib.util.spec_from_file_location(module_name, module_path)

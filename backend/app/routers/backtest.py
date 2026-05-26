@@ -797,7 +797,10 @@ class SandboxBacktestRequest(BaseModel):
     initial_capital: float = Field(default=10000.0, ge=1000)
     commission: float = Field(default=0.001, ge=0, le=0.05)
     data_source: DataSource = Field(default="auto")
-    day_trade: bool = Field(default=True)
+    day_trade: bool = Field(
+        default=True,
+        description="Deprecated override; sandbox PM backtests always run in day-trade mode.",
+    )
     symbols: list[str] | None = Field(
         default=None,
         description="Override watchlist; if omitted, uses all sandbox watchlist symbols.",
@@ -805,13 +808,11 @@ class SandboxBacktestRequest(BaseModel):
     use_sentiment_routing: bool = Field(
         default=True,
         description=(
-            "When True, run each symbol with sentiment-driven strategy switching using PM's "
-            "market_sentiment_strategies map. When False, use the strategy_name assigned to "
-            "each sandbox position (falling back to sma_crossover)."
+            "Deprecated override; sandbox PM backtests always use PM sentiment strategy routing."
         ),
     )
     allocation_mode: str = Field(
-        default="proportional",
+        default="equal",
         description="'proportional' splits capital by allocated_funds; 'equal' splits evenly.",
     )
     use_shared_pool: bool = Field(
@@ -824,17 +825,17 @@ class SandboxBacktestRequest(BaseModel):
         ),
     )
     per_position_min_pct: float = Field(
-        default=0.0,
+        default=5.0,
         ge=0.0,
         le=100.0,
         description=(
             "Lower bound of equity earmarked per position, as a percentage of "
-            "initial_capital. Default 0 means everything starts in the shared pool. "
+            "initial_capital. Default 5 means each position gets a small baseline earmark. "
             "Only used when use_shared_pool=True."
         ),
     )
     per_position_max_pct: float = Field(
-        default=100.0,
+        default=15.0,
         ge=0.0,
         le=200.0,
         description=(
@@ -924,6 +925,10 @@ async def run_sandbox_backtest_endpoint(
         run_sentiment_backtest as _run_sent,
         run_sandbox_portfolio_backtest,
     )
+
+    # Sandbox PM backtests are fixed to PM sentiment routing + day-trade mode.
+    # Keep request fields for backwards compatibility with older frontend payloads.
+    req = req.model_copy(update={"day_trade": True, "use_sentiment_routing": True})
 
     if req.allocation_mode not in ("proportional", "equal"):
         raise HTTPException(status_code=400, detail="allocation_mode must be 'proportional' or 'equal'.")

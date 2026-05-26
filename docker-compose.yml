@@ -13,10 +13,12 @@ services:
       - DATABASE_URL=sqlite+aiosqlite:////app/data/stock_ai.db
       - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:80
       - REPORTS_DIR=/app/reports_output
+      - LOCAL_STORAGE_DIR=/app/local_storage
       # Required by SEC EDGAR fair-access policy; override with your own contact email.
       - SEC_CONTACT_EMAIL=tomwu3797@gmail.com
     volumes:
       - backend_data:/app/reports_output
+      - backend_local_storage:/app/local_storage
       - db_data:/app/data
     restart: unless-stopped
 
@@ -32,4 +34,5 @@ services:
 
 volumes:
   backend_data:
+  backend_local_storage:
   db_data:

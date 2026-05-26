@@ -1,5 +1,9 @@
 """Unit tests for sandbox report helper utilities."""
-from app.routers.backtest import _flatten_per_symbol_trades, _summarize_report_symbols
+from app.routers.backtest import (
+    SandboxBacktestRequest,
+    _flatten_per_symbol_trades,
+    _summarize_report_symbols,
+)
 
 
 def test_summarize_report_symbols_compacts_without_trailing_comma():
@@ -37,3 +41,13 @@ def test_flatten_per_symbol_trades_adds_symbol_and_sorts():
     assert len(trades) == 2
     assert trades[0]["symbol"] == "AAPL"
     assert trades[1]["symbol"] == "MSFT"
+
+
+def test_sandbox_backtest_request_defaults_use_pm_fixed_modes():
+    req = SandboxBacktestRequest(start_date="2026-04-01", end_date="2026-05-01")
+
+    assert req.day_trade is True
+    assert req.use_sentiment_routing is True
+    assert req.allocation_mode == "equal"
+    assert req.per_position_min_pct == 5.0
+    assert req.per_position_max_pct == 15.0

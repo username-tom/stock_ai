@@ -269,12 +269,10 @@ export default function BacktestPanel() {
     end_date: defaultEndDate,
     initial_capital: 10000,
     commission: 0.005,
-    day_trade: true,
-    use_sentiment_routing: true,
-    allocation_mode: 'proportional',
+    allocation_mode: 'equal',
     use_shared_pool: true,
-    per_position_min_pct: 0,
-    per_position_max_pct: 25,
+    per_position_min_pct: 5,
+    per_position_max_pct: 15,
     symbols_override: '', // optional comma-separated override
   })
   const [sandboxResult, setSandboxResult] = useState(null)
@@ -332,8 +330,6 @@ export default function BacktestPanel() {
       end_date: sandboxForm.end_date,
       initial_capital: sandboxForm.initial_capital,
       commission: sandboxForm.commission,
-      day_trade: sandboxForm.day_trade,
-      use_sentiment_routing: sandboxForm.use_sentiment_routing,
       allocation_mode: sandboxForm.allocation_mode,
       use_shared_pool: sandboxForm.use_shared_pool,
       per_position_min_pct: sandboxForm.per_position_min_pct,
@@ -1502,8 +1498,8 @@ export default function BacktestPanel() {
                 </h2>
                 <p className="text-xs text-slate-500 -mt-2">
                   Runs a backtest for every symbol in the current sandbox watchlist using PM
-                  settings (stop-loss, take-profit, EOD, sentiment routing). Capital is split
-                  per the chosen allocation mode and results are aggregated.
+                  settings (stop-loss, take-profit, EOD, strategy routing). Capital is split
+                  per allocation mode and results are aggregated.
                 </p>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -1640,46 +1636,11 @@ export default function BacktestPanel() {
                   )}
                 </div>
 
-                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30 space-y-3">
-                  <label className="flex items-center gap-3 cursor-pointer select-none">
-                    <div className="relative">
-                      <input
-                        type="checkbox"
-                        className="sr-only peer"
-                        checked={sandboxForm.use_sentiment_routing}
-                        onChange={e => setSandboxForm(f => ({ ...f, use_sentiment_routing: e.target.checked }))}
-                      />
-                      <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-amber-500 transition-colors" />
-                      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-medium text-slate-200">
-                        {sandboxForm.use_sentiment_routing ? 'Sentiment-Routed Strategies' : 'Per-Position Strategy'}
-                      </div>
-                      <div className="text-xs text-slate-500">
-                        {sandboxForm.use_sentiment_routing
-                          ? "Use PM's market sentiment strategy map (5 buckets)"
-                          : 'Use each sandbox position\'s assigned strategy_name'}
-                      </div>
-                    </div>
-                  </label>
-
-                  <label className="flex items-center gap-3 cursor-pointer select-none">
-                    <div className="relative">
-                      <input
-                        type="checkbox"
-                        className="sr-only peer"
-                        checked={sandboxForm.day_trade}
-                        onChange={e => setSandboxForm(f => ({ ...f, day_trade: e.target.checked }))}
-                      />
-                      <div className="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-amber-500 transition-colors" />
-                      <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform peer-checked:translate-x-4" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-medium text-slate-200">Day Trade Mode</div>
-                      <div className="text-xs text-slate-500">Use intraday data when available</div>
-                    </div>
-                  </label>
+                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30">
+                  <div className="text-sm font-medium text-slate-200">Execution Mode</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    Uses PM sentiment strategy routing and always runs in day-trade mode.
+                  </div>
                 </div>
 
                 <div>

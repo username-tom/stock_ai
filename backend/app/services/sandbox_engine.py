@@ -47,6 +47,7 @@ import numpy as np
 
 from app.database import AsyncSessionLocal
 from app.models.sandbox import SandboxPosition, SandboxTrade
+from app.services.pending_fill import assess_pending_fill
 from app.services.strategies import get_strategy, STRATEGY_MAP
 from app.services.script_executor import execute_script
 
@@ -984,14 +985,14 @@ async def _settle_pending_shares() -> None:
         symbols.update(str(v.get("symbol") or "") for v in sell_orders.values())
         symbols = {s for s in symbols if s}
 
-        price_map: dict[str, float] = {}
+        quote_map: dict[str, dict[str, Any]] = {}
         if symbols:
             try:
                 quotes = await get_bulk_quotes(sorted(symbols))
-                price_map = {
-                    sym: float(q.get("last_price") or 0.0)
+                quote_map = {
+                    sym: dict(q)
                     for sym, q in quotes.items()
-                    if q is not None
+                    if isinstance(q, dict)
                 }
             except Exception as exc:
                 logger.warning("Engine pending settlement quote fetch failed: %s", exc)
@@ -1018,15 +1019,34 @@ async def _settle_pending_shares() -> None:
                 )
                 continue  # not yet time to settle
 
-            current_price = float(price_map.get(position.symbol, 0.0) or 0.0)
+            quote = quote_map.get(position.symbol, {})
+            current_price = float(quote.get("last_price") or 0.0)
             pending_price = float(position.pending_avg_cost or 0.0)
-            if not _is_within_range(current_price, pending_price):
+            range_check = assess_pending_fill(
+                reference_price=pending_price,
+                quantity=position.pending_shares,
+                low=quote.get("day_low"),
+                high=quote.get("day_high"),
+                volume=quote.get("volume"),
+                drift_threshold_pct=drift_threshold_pct,
+            )
+            if not range_check["within_drift_range"]:
                 _mark_pending_reroll_state(
                     position.symbol,
                     side="BUY",
                     active=True,
                     in_range=False,
                     result="out_of_range",
+                )
+                continue
+
+            if not range_check["eligible_to_attempt"]:
+                _mark_pending_reroll_state(
+                    position.symbol,
+                    side="BUY",
+                    active=True,
+                    in_range=bool(range_check["within_fill_range"]),
+                    result="waiting_range_or_volume",
                 )
                 continue
 
@@ -1094,15 +1114,34 @@ async def _settle_pending_shares() -> None:
                 )
                 continue
 
-            current_price = float(price_map.get(symbol, 0.0) or 0.0)
+            quote = quote_map.get(symbol, {})
+            current_price = float(quote.get("last_price") or 0.0)
             pending_price = float(order.get("requested_price") or 0.0)
-            if not _is_within_range(current_price, pending_price):
+            range_check = assess_pending_fill(
+                reference_price=pending_price,
+                quantity=order.get("quantity"),
+                low=quote.get("day_low"),
+                high=quote.get("day_high"),
+                volume=quote.get("volume"),
+                drift_threshold_pct=drift_threshold_pct,
+            )
+            if not range_check["within_drift_range"]:
                 _mark_pending_reroll_state(
                     symbol,
                     side="SELL",
                     active=True,
                     in_range=False,
                     result="out_of_range",
+                )
+                continue
+
+            if not range_check["eligible_to_attempt"]:
+                _mark_pending_reroll_state(
+                    symbol,
+                    side="SELL",
+                    active=True,
+                    in_range=bool(range_check["within_fill_range"]),
+                    result="waiting_range_or_volume",
                 )
                 continue
 
