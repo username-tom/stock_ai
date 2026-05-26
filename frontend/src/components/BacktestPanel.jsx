@@ -1688,6 +1688,8 @@ export default function BacktestPanel() {
                         const pendingBars = Number(pmSettings.pending_cancel_after_bars ?? 0)
                         const buyFill = Number(pmSettings.sim_buy_fill_rate_pct ?? 0)
                         const sellFill = Number(pmSettings.sim_sell_fill_rate_pct ?? 0)
+                        const buyOffsetMode = String(pmSettings.auto_trade_buy_price_offset_mode ?? 'percent')
+                        const sellOffsetMode = String(pmSettings.auto_trade_sell_price_offset_mode ?? 'percent')
                         const buyOffset = Number(pmSettings.auto_trade_buy_price_offset_pct ?? 0)
                         const sellOffset = Number(pmSettings.auto_trade_sell_price_offset_pct ?? 0)
                         const extWeight = Number(pmSettings.ai_external_sentiment_weight ?? 0)
@@ -1708,7 +1710,11 @@ export default function BacktestPanel() {
                         add('Pending Timeout', `${Math.max(1, pendingBars)} bars`, pendingBars > 0)
                         add('Buy Fill Rate', `${buyFill.toFixed(0)}%`, buyFill > 0)
                         add('Sell Fill Rate', `${sellFill.toFixed(0)}%`, sellFill > 0)
-                        add('Auto Offsets', `B+${buyOffset.toFixed(2)}% / S-${sellOffset.toFixed(2)}%`, buyOffset > 0 || sellOffset > 0)
+                        add(
+                          'Auto Offsets',
+                          `${buyOffsetMode === 'dollar' ? 'B$+' : 'B+'}${buyOffset.toFixed(2)}${buyOffsetMode === 'dollar' ? '' : '%'} / ${sellOffsetMode === 'dollar' ? 'S$-' : 'S-'}${sellOffset.toFixed(2)}${sellOffsetMode === 'dollar' ? '' : '%'}`,
+                          buyOffset > 0 || sellOffset > 0,
+                        )
                         add('Sentiment Lookback', `${Number(pmSettings.sentiment_lookback_days ?? 5)}d`)
                         add('Sentiment Interval', String(pmSettings.sentiment_interval ?? '1m'))
                         add('Sentiment Warmup', `${Number(pmSettings.sentiment_data_points ?? 35)} bars`, Number(pmSettings.sentiment_data_points ?? 0) > 0)

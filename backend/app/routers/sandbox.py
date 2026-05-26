@@ -568,6 +568,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     pending_cancel_after_bars: Optional[int] = Field(default=None, ge=1, le=120)
     sim_buy_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    auto_trade_buy_price_offset_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
+    auto_trade_sell_price_offset_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
 
 
 @router.get("/manager/state")

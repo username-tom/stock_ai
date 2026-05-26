@@ -129,7 +129,8 @@ export default function ActivityLog({ activities }) {
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-xs text-slate-300 leading-snug truncate">{a.label}</p>
-                    {a.sub && <p className="text-[10px] text-slate-600 truncate mt-0.5">{a.sub}</p>}
+                    {a.notes && <p className="text-[10px] text-amber-300 truncate mt-0.5">{a.notes}</p>}
+                    {!a.notes && a.sub && <p className="text-[10px] text-slate-600 truncate mt-0.5">{a.sub}</p>}
                   </div>
                   <span className="text-[10px] text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">{formatActivityTimestamp(a)}</span>
                 </div>

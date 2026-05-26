@@ -9,6 +9,11 @@ from typing import Any
 
 from app.services.data_provider import DataSource, fetch_ohlcv, fetch_ohlcv_intraday
 from app.services.pending_fill import assess_pending_fill
+from app.services.top_of_book import (
+    estimate_fill_probability_pct,
+    market_fill_price,
+    simulate_top_of_book_from_bar,
+)
 from app.services.strategies import get_strategy
 
 
@@ -250,6 +255,7 @@ def run_backtest(
     cash = initial_capital
     shares = 0.0
     trades: list[dict] = []
+    signal_events: list[dict] = []
     equity_values: list[float] = []
     entry_price: float | None = None
     entry_date: str | None = None
@@ -397,6 +403,22 @@ def run_backtest(
 
         if position_change > 0 and shares == 0:
             # BUY signal
+            buy_signal_reason = str(row.get("signal_source", "")) or "signal"
+            signal_events.append({
+                "timestamp": _fmt_ts(date),
+                "symbol": symbol,
+                "side": "BUY",
+                "price": round(price, 4),
+                "quantity": 0.0,
+                "value": 0.0,
+                "strategy": strategy_type,
+                "pnl": None,
+                "exit_reason": None,
+                "commission": 0.0,
+                "event_type": "BUY_SIGNAL",
+                "signal_reason": buy_signal_reason,
+                "status": "filled" if is_regular else "queued",
+            })
             if is_regular:
                 # Execute immediately during regular session
                 shares_to_buy = math.floor(cash / (price + commission))
@@ -406,16 +428,32 @@ def run_backtest(
                     shares = shares_to_buy
                     entry_price = price
                     entry_date = _fmt_ts(date)
-                    entry_reason = str(row.get("signal_source", "")) or "signal"
+                    entry_reason = buy_signal_reason
             elif day_trade:
                 # Pre/post-market signal: carry it to the next regular open
                 pending_buy_reason = str(row.get("signal_source", "")) or "signal_premarket"
 
         elif position_change < 0 and shares > 0 and is_regular:
             # SELL — only during regular session
+            sell_signal_reason = str(row.get("signal_source", "")) or "strategy_exit"
+            signal_events.append({
+                "timestamp": _fmt_ts(date),
+                "symbol": symbol,
+                "side": "SELL",
+                "price": round(price, 4),
+                "quantity": float(shares),
+                "value": round(float(shares) * price, 4),
+                "strategy": strategy_type,
+                "pnl": None,
+                "exit_reason": None,
+                "commission": float(shares) * commission,
+                "event_type": "SELL_SIGNAL",
+                "signal_reason": sell_signal_reason,
+                "status": "filled",
+            })
             proceeds = shares * price - shares * commission
             pnl = proceeds - (shares * entry_price + shares * commission)
-            exit_reason = str(row.get("signal_source", "")) or "strategy_exit"
+            exit_reason = sell_signal_reason
             trades.append(
                 {
                     "entry_date": entry_date,
@@ -496,6 +534,7 @@ def run_backtest(
         "metrics": metrics,
         "equity_curve": equity_curve,
         "trades": trades,
+        "signal_events": signal_events,
         "ohlcv": ohlcv,
         "final_shares": round(final_shares, 6),
         "final_cash": round(final_cash, 2),
@@ -1191,6 +1230,7 @@ def run_sandbox_portfolio_backtest(
             "max_gross_exposure": 0.0,
             "realized_pnl_total": 0.0,
             "pending_order": None,
+            "signal_events": [],
             "stop_loss_pct": float(spec.get("stop_loss_pct", stop_loss_pct) or 0.0),
             "take_profit_pct": float(spec.get("take_profit_pct", take_profit_pct) or 0.0),
             "stop_loss_value": float(spec.get("stop_loss_value", stop_loss_value) or 0.0),
@@ -1234,21 +1274,21 @@ def run_sandbox_portfolio_backtest(
         pool += float(order.get("reserved_from_pool") or 0.0)
         st["pending_order"] = None
 
-    def _try_buy(sym: str, price: float, date, reason: str, bucket: str, active_strat: str, ts_idx: int):
+    def _try_buy(sym: str, price: float, date, reason: str, bucket: str, active_strat: str, ts_idx: int) -> bool:
         nonlocal pool
         st = state[sym]
         if st["shares"] > 0 or st["pending_order"] is not None or price <= 0:
-            return
+            return False
         committed = float(st["shares"]) * float(st["avg_cost"]) + float(st["allocated_funds"])
         cap_room = max(0.0, st["max_alloc"] - committed) if st["max_alloc"] != float("inf") else float("inf")
         draw_from_pool = min(pool, cap_room) if cap_room != float("inf") else pool
         available = st["allocated_funds"] + draw_from_pool
         per_share_cost = price + commission
         if per_share_cost <= 0 or available < per_share_cost:
-            return
+            return False
         qty = math.floor(available / per_share_cost)
         if qty <= 0:
-            return
+            return False
         cost = qty * price + qty * commission
         # Spend allocated_funds first, then draw the remainder from the pool.
         reserved_from_allocated = 0.0
@@ -1275,11 +1315,12 @@ def run_sandbox_portfolio_backtest(
             "reserved_from_allocated": float(reserved_from_allocated),
             "reserved_from_pool": float(reserved_from_pool),
         }
+        return True
 
-    def _try_queue_sell(sym: str, price: float, ts_idx: int, reason: str):
+    def _try_queue_sell(sym: str, price: float, ts_idx: int, reason: str) -> bool:
         st = state[sym]
         if st["shares"] <= 0 or st["pending_order"] is not None or price <= 0:
-            return
+            return False
         st["pending_order"] = {
             "side": "SELL",
             "quantity": float(st["shares"]),
@@ -1287,8 +1328,9 @@ def run_sandbox_portfolio_backtest(
             "placed_index": int(ts_idx),
             "reason": reason,
         }
+        return True
 
-    def _try_fill_pending(sym: str, price: float, ts, ts_idx: int, row: pd.Series) -> bool:
+    def _try_fill_pending(sym: str, ts, ts_idx: int, row: pd.Series, top_book: dict[str, Any]) -> bool:
         st = state[sym]
         order = st.get("pending_order")
         if not order:
@@ -1298,16 +1340,34 @@ def run_sandbox_portfolio_backtest(
             return True
 
         requested_price = float(order.get("requested_price") or 0.0)
+        book_low = top_book.get("bid")
+        book_high = top_book.get("ask")
         range_check = assess_pending_fill(
             reference_price=requested_price,
             quantity=order.get("quantity"),
-            low=row.get("Low"),
-            high=row.get("High"),
+            low=book_low if book_low is not None else row.get("Low"),
+            high=book_high if book_high is not None else row.get("High"),
             volume=row.get("Volume"),
             drift_threshold_pct=drift_threshold_pct,
         )
         if not range_check["within_drift_range"]:
             # Drifted too far from requested fill price: cancel and release reserved cash.
+            st["signal_events"].append({
+                "timestamp": _fmt_ts(ts),
+                "symbol": sym,
+                "side": str(order.get("side") or "").upper(),
+                "price": requested_price,
+                "quantity": float(order.get("quantity") or 0.0),
+                "value": round(requested_price * float(order.get("quantity") or 0.0), 4),
+                "strategy": order.get("entry_strategy") or "sma_crossover",
+                "pnl": None,
+                "exit_reason": None,
+                "commission": 0.0,
+                "event_type": "FILL_CANCEL",
+                "signal_reason": str(order.get("reason") or "signal"),
+                "status": "cancelled",
+                "notes": f"cancelled: drifted outside fill range (requested={requested_price:.4f})",
+            })
             if str(order.get("side") or "").upper() == "BUY":
                 _refund_pending_buy(sym)
             else:
@@ -1315,23 +1375,62 @@ def run_sandbox_portfolio_backtest(
             return True
 
         if not range_check["eligible_to_attempt"]:
+            st["signal_events"].append({
+                "timestamp": _fmt_ts(ts),
+                "symbol": sym,
+                "side": str(order.get("side") or "").upper(),
+                "price": requested_price,
+                "quantity": float(order.get("quantity") or 0.0),
+                "value": round(requested_price * float(order.get("quantity") or 0.0), 4),
+                "strategy": order.get("entry_strategy") or "sma_crossover",
+                "pnl": None,
+                "exit_reason": None,
+                "commission": 0.0,
+                "event_type": "FILL_WAIT",
+                "signal_reason": str(order.get("reason") or "signal"),
+                "status": "waiting",
+                "notes": "waiting: price within drift range but not yet eligible to fill",
+            })
             return True
 
         side = str(order.get("side") or "").upper()
         if side == "BUY":
-            if random.random() > buy_fill_prob:
+            buy_fill_prob_eff = estimate_fill_probability_pct(
+                side="BUY",
+                quantity=order.get("quantity"),
+                top_of_book=top_book,
+                base_rate_pct=buy_fill_prob * 100.0,
+            ) / 100.0
+            if random.random() > buy_fill_prob_eff:
+                st["signal_events"].append({
+                    "timestamp": _fmt_ts(ts),
+                    "symbol": sym,
+                    "side": "BUY",
+                    "price": requested_price,
+                    "quantity": float(order.get("quantity") or 0.0),
+                    "value": round(requested_price * float(order.get("quantity") or 0.0), 4),
+                    "strategy": order.get("entry_strategy") or "sma_crossover",
+                    "pnl": None,
+                    "exit_reason": None,
+                    "commission": 0.0,
+                    "event_type": "FILL_MISS",
+                    "signal_reason": str(order.get("reason") or "signal"),
+                    "status": "miss",
+                    "notes": f"missed fill: buy fill probability {buy_fill_prob_eff:.2f}%",
+                })
                 return True
             qty = float(order.get("quantity") or 0.0)
             if qty <= 0:
                 _refund_pending_buy(sym)
                 return False
+            fill_price = float(market_fill_price(top_book, "BUY", requested_price) or requested_price)
             st["shares"] = qty
-            st["avg_cost"] = requested_price
-            st["entry_price"] = requested_price
+            st["avg_cost"] = fill_price
+            st["entry_price"] = fill_price
             st["entry_date"] = str(order.get("entry_date") or _fmt_ts(ts))
             st["entry_strategy"] = order.get("entry_strategy")
             st["entry_bucket"] = order.get("entry_bucket")
-            st["cost_basis_total"] += qty * requested_price
+            st["cost_basis_total"] += qty * fill_price
             gross_exposure = float(st["shares"]) * float(st["avg_cost"])
             if gross_exposure > st["max_gross_exposure"]:
                 st["max_gross_exposure"] = gross_exposure
@@ -1341,13 +1440,36 @@ def run_sandbox_portfolio_backtest(
             return True
 
         if side == "SELL":
-            if random.random() > sell_fill_prob:
+            sell_fill_prob_eff = estimate_fill_probability_pct(
+                side="SELL",
+                quantity=order.get("quantity"),
+                top_of_book=top_book,
+                base_rate_pct=sell_fill_prob * 100.0,
+            ) / 100.0
+            if random.random() > sell_fill_prob_eff:
+                st["signal_events"].append({
+                    "timestamp": _fmt_ts(ts),
+                    "symbol": sym,
+                    "side": "SELL",
+                    "price": requested_price,
+                    "quantity": float(order.get("quantity") or 0.0),
+                    "value": round(requested_price * float(order.get("quantity") or 0.0), 4),
+                    "strategy": order.get("entry_strategy") or "sma_crossover",
+                    "pnl": None,
+                    "exit_reason": None,
+                    "commission": 0.0,
+                    "event_type": "FILL_MISS",
+                    "signal_reason": str(order.get("reason") or "strategy_exit"),
+                    "status": "miss",
+                    "notes": f"missed fill: sell fill probability {sell_fill_prob_eff:.2f}%",
+                })
                 return True
             exit_reason = str(order.get("reason") or "strategy_exit")
             st["pending_order"] = None
+            sell_price = float(market_fill_price(top_book, "SELL", requested_price) or requested_price)
             _close_position(
                 sym,
-                price,
+                sell_price,
                 ts,
                 f"{exit_reason} | pending_fill",
                 st.get("entry_bucket") or "neutral",
@@ -1403,14 +1525,33 @@ def run_sandbox_portfolio_backtest(
             row = p["df"].loc[ts]
             raw_price = float(row["Close"])
             if math.isfinite(raw_price) and raw_price > 0:
-                price = raw_price
-                st["last_price"] = price
+                prev_close = st["last_price"] if not math.isnan(st["last_price"]) and st["last_price"] > 0 else raw_price
+                top_book = simulate_top_of_book_from_bar(
+                    symbol=sym,
+                    open_price=row.get("Open"),
+                    high=row.get("High"),
+                    low=row.get("Low"),
+                    close=row.get("Close"),
+                    volume=row.get("Volume"),
+                    previous_close=prev_close,
+                )
+                valuation_price = float(top_book.get("mid") or raw_price)
+                buy_price = float(market_fill_price(top_book, "BUY", raw_price) or raw_price)
+                sell_price = float(market_fill_price(top_book, "SELL", raw_price) or raw_price)
+                st["last_price"] = valuation_price
             else:
                 # Ignore malformed ticks (e.g. 0/negative/NaN close) for
                 # valuation and execution; keep the last known-good price.
-                price = st["last_price"] if not math.isnan(st["last_price"]) else 0.0
-                if price <= 0:
+                valuation_price = st["last_price"] if not math.isnan(st["last_price"]) else 0.0
+                if valuation_price <= 0:
                     continue
+                buy_price = valuation_price
+                sell_price = valuation_price
+                top_book = {
+                    "bid": sell_price,
+                    "ask": buy_price,
+                    "mid": valuation_price,
+                }
 
             session = str(row.get("session", "regular")) if day_trade else "regular"
             is_regular = session == "regular"
@@ -1422,17 +1563,17 @@ def run_sandbox_portfolio_backtest(
             if day_trade and not hold_positions_overnight and ts in p["eod_sell_bars"] and st["shares"] > 0:
                 if st.get("pending_order") and str((st.get("pending_order") or {}).get("side") or "").upper() == "SELL":
                     st["pending_order"] = None
-                _close_position(sym, price, ts, "eod_liquidation", bucket, active_strat)
+                _close_position(sym, sell_price, ts, "eod_liquidation", bucket, active_strat)
                 continue
 
             # Pending orders reroll once each bar when still in acceptance range.
-            if _try_fill_pending(sym, price, ts, ts_idx, row):
+            if _try_fill_pending(sym, ts, ts_idx, row, top_book):
                 continue
 
             # 1. End-of-day liquidation / last-bar close.
             if day_trade:
                 if hold_positions_overnight and ts in p["last_regular_bar"] and st["shares"] > 0:
-                    _try_queue_sell(sym, price, ts_idx, "eod_close")
+                    _try_queue_sell(sym, sell_price, ts_idx, "eod_close")
                     continue
 
             # 2. Stop-loss / take-profit (regular session only when day-trading).
@@ -1447,11 +1588,11 @@ def run_sandbox_portfolio_backtest(
                     tp_targets.append(st["entry_price"] * (1.0 + st["take_profit_pct"] / 100.0))
                 if st["take_profit_value"] > 0:
                     tp_targets.append(st["entry_price"] + st["take_profit_value"])
-                if sl_targets and price <= max(sl_targets):
-                    _try_queue_sell(sym, price, ts_idx, "stop_loss")
+                if sl_targets and valuation_price <= max(sl_targets):
+                    _try_queue_sell(sym, sell_price, ts_idx, "stop_loss")
                     continue
-                if tp_targets and price >= min(tp_targets):
-                    _try_queue_sell(sym, price, ts_idx, "take_profit")
+                if tp_targets and valuation_price >= min(tp_targets):
+                    _try_queue_sell(sym, sell_price, ts_idx, "take_profit")
                     continue
 
             # 3. Strategy switch close (sentiment routing only).
@@ -1471,7 +1612,7 @@ def run_sandbox_portfolio_backtest(
                         else 0.0
                     )
                     if new_pos_change < 0:
-                        _try_queue_sell(sym, price, ts_idx, "strategy_switch")
+                        _try_queue_sell(sym, sell_price, ts_idx, "strategy_switch")
                     else:
                         st["entry_strategy"] = active_strat
                         st["entry_bucket"] = bucket
@@ -1481,9 +1622,41 @@ def run_sandbox_portfolio_backtest(
             sig_series = p["signals_by_strat"].get(active_strat)
             position_change = float(sig_series.loc[ts]) if (sig_series is not None and ts in sig_series.index) else 0.0
             if position_change > 0 and st["shares"] == 0 and (is_regular or not day_trade):
-                _try_buy(sym, price, ts, str(row.get("signal_source", "")) or "signal", bucket, active_strat, ts_idx)
+                sig_reason = str(row.get("signal_source", "")) or "signal"
+                queued = _try_buy(sym, buy_price, ts, sig_reason, bucket, active_strat, ts_idx)
+                st["signal_events"].append({
+                    "timestamp": _fmt_ts(ts),
+                    "symbol": sym,
+                    "side": "BUY",
+                    "price": round(buy_price, 4),
+                    "quantity": 0.0,
+                    "value": 0.0,
+                    "strategy": active_strat,
+                    "pnl": None,
+                    "exit_reason": None,
+                    "commission": 0.0,
+                    "event_type": "BUY_SIGNAL",
+                    "signal_reason": sig_reason,
+                    "status": "queued" if queued else "blocked",
+                })
             elif position_change < 0 and st["shares"] > 0 and (is_regular or not day_trade):
-                _try_queue_sell(sym, price, ts_idx, str(row.get("signal_source", "")) or "strategy_exit")
+                sig_reason = str(row.get("signal_source", "")) or "strategy_exit"
+                queued = _try_queue_sell(sym, sell_price, ts_idx, sig_reason)
+                st["signal_events"].append({
+                    "timestamp": _fmt_ts(ts),
+                    "symbol": sym,
+                    "side": "SELL",
+                    "price": round(sell_price, 4),
+                    "quantity": float(st["shares"]),
+                    "value": round(float(st["shares"]) * float(sell_price), 4),
+                    "strategy": active_strat,
+                    "pnl": None,
+                    "exit_reason": None,
+                    "commission": float(st["shares"]) * commission,
+                    "event_type": "SELL_SIGNAL",
+                    "signal_reason": sig_reason,
+                    "status": "queued" if queued else "blocked",
+                })
 
         # Snapshot portfolio + per-symbol values at this bar.
         port_val = pool
@@ -1605,6 +1778,7 @@ def run_sandbox_portfolio_backtest(
             "max_drawdown_pct": max_dd_sym,
             "win_rate_pct": win_rate_sym,
             "trades": trades,
+            "signal_events": st["signal_events"],
             "total_trades": len(trades),
             "max_shares_held": st["max_shares"],
             "strategy": (

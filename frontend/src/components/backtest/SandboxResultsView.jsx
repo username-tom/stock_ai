@@ -873,6 +873,7 @@ function ActivityLog({ events }) {
     { key: 'strategy',    label: 'Strategy' },
     { key: 'pnl',         label: 'P&L' },
     { key: 'exit_reason', label: 'Reason' },
+    { key: 'notes',       label: 'Notes' },
   ]
 
   const buyCount = filtered.filter(e => e.side === 'BUY').length
@@ -982,6 +983,7 @@ function ActivityLog({ events }) {
                   {e.pnl == null ? '—' : `${e.pnl >= 0 ? '+' : ''}$${Number(e.pnl).toFixed(2)}`}
                 </td>
                 <td className="text-xs text-slate-400">{e.exit_reason || '—'}</td>
+                <td className="text-xs text-slate-500 max-w-[16rem] truncate" title={e.notes || ''}>{e.notes || '—'}</td>
               </tr>
             ))}
             {sorted.length === 0 && (

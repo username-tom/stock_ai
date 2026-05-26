@@ -131,11 +131,13 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_no_loss_sell BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_price_drift_cancel_pct REAL NOT NULL DEFAULT 0.75",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_cancel_after_bars INTEGER NOT NULL DEFAULT 3",
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_buy_fill_rate_pct REAL NOT NULL DEFAULT 60.0",
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_sell_fill_rate_pct REAL NOT NULL DEFAULT 70.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_buy_fill_rate_pct REAL NOT NULL DEFAULT 80.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_sell_fill_rate_pct REAL NOT NULL DEFAULT 90.0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_buy_price_offset_mode VARCHAR(20) NOT NULL DEFAULT 'percent'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_sell_price_offset_mode VARCHAR(20) NOT NULL DEFAULT 'percent'",
         # portfolio_manager_settings automated IB order price offsets (vs previous OHLC midpoint)
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_buy_price_offset_pct REAL NOT NULL DEFAULT 0.145",
-        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_sell_price_offset_pct REAL NOT NULL DEFAULT 0.185",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_buy_price_offset_pct REAL NOT NULL DEFAULT 0.01",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_sell_price_offset_pct REAL NOT NULL DEFAULT 0.01",
         # Rename legacy strategy name 'bollinger' → 'bollinger_bands' on any existing positions
         "UPDATE sandbox_positions SET strategy_name = 'bollinger_bands' WHERE strategy_name = 'bollinger'",
         # Keep enough bars so PM RSI/MACD/SMA sentiment scoring is meaningful.

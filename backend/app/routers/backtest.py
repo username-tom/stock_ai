@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -110,7 +110,16 @@ def _intraday_cache_covers_range(coverage: dict, start_date: str, end_date: str)
         newest_dt = datetime.fromisoformat(str(newest)).date()
     except ValueError:
         return False
-    return oldest_dt <= start_dt and newest_dt >= end_dt
+
+    # Intraday feeds do not emit bars on weekends/holidays, and callers often
+    # use "today" as end_date. Validate against the latest required trading day.
+    required_end = min(end_dt, datetime.now().date())
+    while required_end.weekday() >= 5:
+        required_end -= timedelta(days=1)
+
+    # Allow a small calendar-day tolerance so holiday closures (for example,
+    # Monday market holidays) do not fail otherwise valid Friday-ending caches.
+    return oldest_dt <= start_dt and (newest_dt + timedelta(days=3)) >= required_end
 
 
 def _intraday_cache_covers_range_for_source(
@@ -860,13 +869,30 @@ class SandboxBacktestRequest(BaseModel):
 def _build_sandbox_activity_log(per_symbol: list[dict]) -> list[dict]:
     """Flatten per-symbol trades into a chronological activity log.
 
-    Each completed trade produces a BUY and SELL entry so the log mirrors what
-    a trader would see in an order history view.
+    Each completed trade produces a BUY and SELL entry. Raw signal events are
+    also included so the log shows BUY/SELL signals even when no fill occurs.
     """
     events: list[dict] = []
     for entry in per_symbol:
         sym = entry.get("symbol")
         strat = entry.get("strategy")
+        for ev in entry.get("signal_events") or []:
+            events.append({
+                "timestamp": ev.get("timestamp"),
+                "symbol": sym,
+                "side": ev.get("side"),
+                "price": ev.get("price"),
+                "quantity": ev.get("quantity"),
+                "value": ev.get("value"),
+                "strategy": ev.get("strategy") or strat,
+                "pnl": None,
+                "exit_reason": ev.get("signal_reason"),
+                "commission": ev.get("commission") or 0.0,
+                "event_type": ev.get("event_type") or "SIGNAL",
+                "signal_reason": ev.get("signal_reason"),
+                "status": ev.get("status") or "signal",
+                "notes": ev.get("notes") or ev.get("signal_reason") or ev.get("status") or "",
+            })
         for t in entry.get("trades") or []:
             qty = t.get("quantity")
             entry_date = t.get("entry_date")
@@ -889,6 +915,9 @@ def _build_sandbox_activity_log(per_symbol: list[dict]) -> list[dict]:
                     "pnl": None,
                     "exit_reason": None,
                     "commission": commission,
+                    "event_type": "BUY_FILL",
+                    "status": "filled",
+                    "notes": "filled buy order",
                 })
             if exit_date is not None:
                 events.append({
@@ -902,6 +931,9 @@ def _build_sandbox_activity_log(per_symbol: list[dict]) -> list[dict]:
                     "pnl": pnl,
                     "exit_reason": exit_reason,
                     "commission": commission,
+                    "event_type": "SELL_FILL",
+                    "status": "filled",
+                    "notes": f"filled sell order: {exit_reason}",
                 })
     events.sort(key=lambda e: (str(e.get("timestamp") or ""), e.get("symbol") or ""))
     return events
@@ -961,8 +993,8 @@ async def run_sandbox_backtest_endpoint(
     hold_overnight = bool(pm.get("hold_positions_overnight", True))
     eod_window = int(pm.get("eod_sell_window_minutes") or 30)
     sentiment_warmup = int(pm.get("sentiment_data_points") or 35)
-    sim_buy_fill_rate = float(pm.get("sim_buy_fill_rate_pct", 60.0) or 0.0)
-    sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 70.0) or 0.0)
+    sim_buy_fill_rate = float(pm.get("sim_buy_fill_rate_pct", 80.0) or 0.0)
+    sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 90.0) or 0.0)
     pending_drift_cancel = float(pm.get("pending_price_drift_cancel_pct", 0.75) or 0.0)
     pending_cancel_after_bars = int(max(1, pm.get("pending_cancel_after_bars", 3) or 3))
     default_strategy_name = str(pm.get("default_strategy_name") or "template:intraday_1m_regime_template.py")

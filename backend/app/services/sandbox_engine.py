@@ -34,6 +34,23 @@ def _log_trade_activity(symbol: str, side: str, shares: float, price: float, rea
     logger.info(f"Trade: {side} {symbol} x{shares:.4f} @ ${price:.2f} | {reason}")
 
 
+def _append_signal_note(symbol: str, side: str, shares: float, price: float, reason: str, notes: str) -> None:
+    """Record a non-fill signal/fill-failure note in the recent activity log."""
+    from datetime import datetime, timezone
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "side": side,
+        "shares": round(shares, 4),
+        "price": round(price, 4),
+        "reason": reason,
+        "notes": notes,
+        "status": "failed_fill",
+    }
+    _trade_activity_log.insert(0, entry)
+    del _trade_activity_log[20:]
+
+
 import asyncio
 import logging
 import math
@@ -48,6 +65,12 @@ import numpy as np
 from app.database import AsyncSessionLocal
 from app.models.sandbox import SandboxPosition, SandboxTrade
 from app.services.pending_fill import assess_pending_fill
+from app.services.top_of_book import (
+    estimate_fill_probability_pct,
+    market_fill_price,
+    simulate_top_of_book_from_bar,
+    simulate_top_of_book_from_quote,
+)
 from app.services.strategies import get_strategy, STRATEGY_MAP
 from app.services.script_executor import execute_script
 
@@ -491,6 +514,16 @@ async def _process_symbol(
         # The last bar is the current minute
         last_row = df_sig.iloc[-1]
         current_price = float(last_row["Close"])
+        prev_close = float(df_sig.iloc[-2]["Close"]) if len(df_sig.index) >= 2 else current_price
+        top_book = simulate_top_of_book_from_bar(
+            symbol=symbol,
+            open_price=last_row.get("Open"),
+            high=last_row.get("High"),
+            low=last_row.get("Low"),
+            close=current_price,
+            volume=last_row.get("Volume"),
+            previous_close=prev_close,
+        )
 
         # Global risk exits from portfolio-manager settings (0 = disabled).
         stop_loss_pct = float(manager_settings.get("stop_loss_pct", 0.0) or 0.0)
@@ -678,6 +711,7 @@ async def _process_symbol(
                     current_price,
                     reason,
                     disable_engine_after_sell=disable_engine_after_sell,
+                    top_of_book=top_book,
                 )
             else:
                 logger.debug(
@@ -744,6 +778,7 @@ async def _execute_trade(
     price: float,
     reason: str,
     disable_engine_after_sell: bool = False,
+    top_of_book: dict[str, Any] | None = None,
 ) -> None:
     """Open a fresh DB session and execute the simulated trade."""
     from app.services.ib_service import ib_service
@@ -768,6 +803,9 @@ async def _execute_trade(
             return
 
         pnl = None
+        execution_price = float(market_fill_price(top_of_book, side, price) or price)
+        if execution_price <= 0.0:
+            return
 
         if side == "BUY":
             # Acquire the buy lock so that concurrent ticks cannot both see
@@ -797,7 +835,7 @@ async def _execute_trade(
                 cap_room = max(0.0, max_cap - committed) if max_cap != float("inf") else float("inf")
                 max_extra_from_account = min(account_available, cap_room)
                 available = position.allocated_funds + max_extra_from_account
-                if available < price:
+                if available < execution_price:
                     logger.debug(
                         "Engine BUY skipped for %s — insufficient funds/cap room ($%.2f, room=$%.2f)",
                         pos.symbol,
@@ -805,10 +843,10 @@ async def _execute_trade(
                         cap_room if cap_room != float("inf") else -1.0,
                     )
                     return
-                quantity = math.floor(available / price)
+                quantity = math.floor(available / execution_price)
                 if quantity <= 0:
                     return
-                total = quantity * price
+                total = quantity * execution_price
                 # Draw any shortfall from the unallocated pool into this position
                 extra_needed = max(0.0, total - position.allocated_funds)
                 if extra_needed > 0 and account:
@@ -844,7 +882,7 @@ async def _execute_trade(
                     symbol=position.symbol,
                     side="BUY",
                     quantity=quantity,
-                    price=price,
+                    price=execution_price,
                     total=round(total, 4),
                     strategy_name=position.strategy_name,
                     reason=reason,
@@ -852,7 +890,7 @@ async def _execute_trade(
                 )
                 db.add(trade)
                 await db.commit()
-                _log_trade_activity(pos.symbol, "BUY", quantity, price, reason)
+                _log_trade_activity(pos.symbol, "BUY", quantity, execution_price, reason)
                 if ib_service.is_connected:
                     ib_result = await ib_service.place_order(
                         symbol=position.symbol,
@@ -883,7 +921,7 @@ async def _execute_trade(
                 position.id,
                 symbol=position.symbol,
                 quantity=quantity,
-                requested_price=price,
+                requested_price=execution_price,
                 reason=reason,
                 disable_engine_after_sell=disable_engine_after_sell,
             )
@@ -1020,17 +1058,28 @@ async def _settle_pending_shares() -> None:
                 continue  # not yet time to settle
 
             quote = quote_map.get(position.symbol, {})
-            current_price = float(quote.get("last_price") or 0.0)
+            top_book = simulate_top_of_book_from_quote(position.symbol, quote)
+            current_price = float(market_fill_price(top_book, "BUY", quote.get("last_price") or 0.0) or 0.0)
             pending_price = float(position.pending_avg_cost or 0.0)
+            book_low = top_book.get("bid")
+            book_high = top_book.get("ask")
             range_check = assess_pending_fill(
                 reference_price=pending_price,
                 quantity=position.pending_shares,
-                low=quote.get("day_low"),
-                high=quote.get("day_high"),
+                low=book_low if book_low is not None else quote.get("day_low"),
+                high=book_high if book_high is not None else quote.get("day_high"),
                 volume=quote.get("volume"),
                 drift_threshold_pct=drift_threshold_pct,
             )
             if not range_check["within_drift_range"]:
+                _append_signal_note(
+                    position.symbol,
+                    "BUY",
+                    float(position.pending_shares),
+                    pending_price,
+                    str(position.pending_reason or "signal"),
+                    f"cancelled: drifted outside fill range (requested={pending_price:.4f})",
+                )
                 _mark_pending_reroll_state(
                     position.symbol,
                     side="BUY",
@@ -1041,6 +1090,14 @@ async def _settle_pending_shares() -> None:
                 continue
 
             if not range_check["eligible_to_attempt"]:
+                _append_signal_note(
+                    position.symbol,
+                    "BUY",
+                    float(position.pending_shares),
+                    pending_price,
+                    str(position.pending_reason or "signal"),
+                    "waiting: price within drift range but not yet eligible to fill",
+                )
                 _mark_pending_reroll_state(
                     position.symbol,
                     side="BUY",
@@ -1050,7 +1107,21 @@ async def _settle_pending_shares() -> None:
                 )
                 continue
 
-            if random.random() > (buy_fill_rate / 100.0):
+            buy_fill_rate_eff = estimate_fill_probability_pct(
+                side="BUY",
+                quantity=position.pending_shares,
+                top_of_book=top_book,
+                base_rate_pct=buy_fill_rate,
+            )
+            if random.random() > (buy_fill_rate_eff / 100.0):
+                _append_signal_note(
+                    position.symbol,
+                    "BUY",
+                    float(position.pending_shares),
+                    pending_price,
+                    str(position.pending_reason or "signal"),
+                    f"missed fill: buy fill probability {buy_fill_rate_eff:.2f}%",
+                )
                 _mark_pending_reroll_state(
                     position.symbol,
                     side="BUY",
@@ -1062,13 +1133,16 @@ async def _settle_pending_shares() -> None:
                 logger.debug(
                     "Engine pending BUY reroll miss %s (rate=%.2f%%)",
                     position.symbol,
-                    buy_fill_rate,
+                    buy_fill_rate_eff,
                 )
                 continue
 
             # Settle: merge pending into real shares
             pending_qty = position.pending_shares
-            pending_cost = position.pending_avg_cost
+            fill_price = float(market_fill_price(top_book, "BUY", pending_price) or pending_price)
+            if fill_price <= 0.0:
+                fill_price = pending_price
+            pending_cost = fill_price
 
             new_total_shares = position.shares + pending_qty
             if new_total_shares > 0:
@@ -1077,7 +1151,7 @@ async def _settle_pending_shares() -> None:
                     / new_total_shares
                 )
             position.shares = new_total_shares
-            position.total_invested += pending_cost * pending_qty
+            position.total_invested += fill_price * pending_qty
 
             # Clear pending state
             position.pending_shares = 0.0
@@ -1115,17 +1189,28 @@ async def _settle_pending_shares() -> None:
                 continue
 
             quote = quote_map.get(symbol, {})
-            current_price = float(quote.get("last_price") or 0.0)
+            top_book = simulate_top_of_book_from_quote(symbol, quote)
+            current_price = float(market_fill_price(top_book, "SELL", quote.get("last_price") or 0.0) or 0.0)
             pending_price = float(order.get("requested_price") or 0.0)
+            book_low = top_book.get("bid")
+            book_high = top_book.get("ask")
             range_check = assess_pending_fill(
                 reference_price=pending_price,
                 quantity=order.get("quantity"),
-                low=quote.get("day_low"),
-                high=quote.get("day_high"),
+                low=book_low if book_low is not None else quote.get("day_low"),
+                high=book_high if book_high is not None else quote.get("day_high"),
                 volume=quote.get("volume"),
                 drift_threshold_pct=drift_threshold_pct,
             )
             if not range_check["within_drift_range"]:
+                _append_signal_note(
+                    symbol,
+                    "SELL",
+                    float(order.get("quantity") or 0.0),
+                    pending_price,
+                    str(order.get("reason") or "strategy_exit"),
+                    f"cancelled: drifted outside fill range (requested={pending_price:.4f})",
+                )
                 _mark_pending_reroll_state(
                     symbol,
                     side="SELL",
@@ -1136,6 +1221,14 @@ async def _settle_pending_shares() -> None:
                 continue
 
             if not range_check["eligible_to_attempt"]:
+                _append_signal_note(
+                    symbol,
+                    "SELL",
+                    float(order.get("quantity") or 0.0),
+                    pending_price,
+                    str(order.get("reason") or "strategy_exit"),
+                    "waiting: price within drift range but not yet eligible to fill",
+                )
                 _mark_pending_reroll_state(
                     symbol,
                     side="SELL",
@@ -1145,7 +1238,21 @@ async def _settle_pending_shares() -> None:
                 )
                 continue
 
-            if random.random() > (sell_fill_rate / 100.0):
+            sell_fill_rate_eff = estimate_fill_probability_pct(
+                side="SELL",
+                quantity=order.get("quantity"),
+                top_of_book=top_book,
+                base_rate_pct=sell_fill_rate,
+            )
+            if random.random() > (sell_fill_rate_eff / 100.0):
+                _append_signal_note(
+                    symbol,
+                    "SELL",
+                    float(order.get("quantity") or 0.0),
+                    pending_price,
+                    str(order.get("reason") or "strategy_exit"),
+                    f"missed fill: sell fill probability {sell_fill_rate_eff:.2f}%",
+                )
                 _mark_pending_reroll_state(
                     symbol,
                     side="SELL",
@@ -1157,7 +1264,7 @@ async def _settle_pending_shares() -> None:
                 logger.debug(
                     "Engine pending SELL reroll miss %s (rate=%.2f%%)",
                     symbol,
-                    sell_fill_rate,
+                    sell_fill_rate_eff,
                 )
                 continue
 
@@ -1174,8 +1281,9 @@ async def _settle_pending_shares() -> None:
                 _pop_pending_sell(position_id)
                 continue
 
-            total = quantity * current_price
-            pnl = round((current_price - float(position.avg_cost or 0.0)) * quantity, 4)
+            fill_price = float(market_fill_price(top_book, "SELL", current_price) or current_price)
+            total = quantity * fill_price
+            pnl = round((fill_price - float(position.avg_cost or 0.0)) * quantity, 4)
             position.shares = max(0.0, float(position.shares or 0.0) - quantity)
             if position.shares <= 0:
                 position.shares = 0.0
@@ -1193,7 +1301,7 @@ async def _settle_pending_shares() -> None:
                 symbol=position.symbol,
                 side="SELL",
                 quantity=quantity,
-                price=current_price,
+                price=fill_price,
                 total=round(total, 4),
                 strategy_name=position.strategy_name,
                 reason=f"{order.get('reason') or 'pending_sell'} | pending_fill",
@@ -1215,14 +1323,14 @@ async def _settle_pending_shares() -> None:
                 position.symbol,
                 "SELL",
                 quantity,
-                current_price,
+                fill_price,
                 str(order.get("reason") or "pending_sell"),
             )
             logger.info(
                 "Engine settled pending SELL %s x%.4f @ $%.2f",
                 position.symbol,
                 quantity,
-                current_price,
+                fill_price,
             )
 
         active_pending_symbols = {

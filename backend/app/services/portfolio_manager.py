@@ -168,8 +168,10 @@ _settings: dict[str, Any] = {
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
     "pending_price_drift_cancel_pct": 0.25,  # cancel pending BUY when market drifts >= this % from pending fill/limit
     "pending_cancel_after_bars": 3,       # cancel pending orders after N sentiment bars even without price drift
-    "sim_buy_fill_rate_pct": 100.0,       # simulated BUY pending-fill probability (%), evaluated each bar when in price range
-    "sim_sell_fill_rate_pct": 100.0,      # simulated SELL pending-fill probability (%), evaluated each bar when in price range
+    "sim_buy_fill_rate_pct": 80.0,       # base simulated BUY fill probability (%); adjusted by top-of-book queue size
+    "sim_sell_fill_rate_pct": 90.0,      # base simulated SELL fill probability (%); adjusted by top-of-book queue size
+    "auto_trade_buy_price_offset_mode": "percent",   # percent | dollar
+    "auto_trade_sell_price_offset_mode": "percent",  # percent | dollar
     "auto_trade_buy_price_offset_pct": 0.01,    # BUY price = prev OHLC midpoint + this % (IB automated orders)
     "auto_trade_sell_price_offset_pct": 0.01,   # SELL price = prev OHLC midpoint - this % (IB automated orders)
     "intraday_1m_template_params": {},
@@ -423,12 +425,16 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.25) or 0.25)
             _settings["pending_cancel_after_bars"] = int(max(0, getattr(row, "pending_cancel_after_bars", 3) or 3))
-            _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 100.0) or 0.0)))
-            _settings["sim_sell_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_sell_fill_rate_pct", 100.0) or 0.0)))
+            _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 80.0) or 0.0)))
+            _settings["sim_sell_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_sell_fill_rate_pct", 90.0) or 0.0)))
+            _buy_offset_mode = str(getattr(row, "auto_trade_buy_price_offset_mode", "percent") or "percent").strip().lower()
+            _sell_offset_mode = str(getattr(row, "auto_trade_sell_price_offset_mode", "percent") or "percent").strip().lower()
+            _settings["auto_trade_buy_price_offset_mode"] = _buy_offset_mode if _buy_offset_mode in {"percent", "dollar"} else "percent"
+            _settings["auto_trade_sell_price_offset_mode"] = _sell_offset_mode if _sell_offset_mode in {"percent", "dollar"} else "percent"
             _buy_offset = getattr(row, "auto_trade_buy_price_offset_pct", None)
             _sell_offset = getattr(row, "auto_trade_sell_price_offset_pct", None)
-            _settings["auto_trade_buy_price_offset_pct"] = 0.145 if _buy_offset is None else float(_buy_offset)
-            _settings["auto_trade_sell_price_offset_pct"] = 0.185 if _sell_offset is None else float(_sell_offset)
+            _settings["auto_trade_buy_price_offset_pct"] = 0.01 if _buy_offset is None else float(_buy_offset)
+            _settings["auto_trade_sell_price_offset_pct"] = 0.01 if _sell_offset is None else float(_sell_offset)
             _settings["default_strategy_name"] = str(getattr(row, "default_strategy_name", _INTRADAY_1M_TEMPLATE) or _INTRADAY_1M_TEMPLATE)
             _settings["intraday_1m_template_params"] = _load_json_dict(
                 getattr(row, "intraday_1m_template_params", None),
@@ -553,8 +559,14 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.25)
         row.pending_cancel_after_bars = int(max(0, _settings.get("pending_cancel_after_bars", 3) or 3))
-        row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 60.0) or 0.0)))
-        row.sim_sell_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_sell_fill_rate_pct", 70.0) or 0.0)))
+        row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 80.0) or 0.0)))
+        row.sim_sell_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_sell_fill_rate_pct", 90.0) or 0.0)))
+        row.auto_trade_buy_price_offset_mode = (
+            "dollar" if str(_settings.get("auto_trade_buy_price_offset_mode", "percent")).strip().lower() == "dollar" else "percent"
+        )
+        row.auto_trade_sell_price_offset_mode = (
+            "dollar" if str(_settings.get("auto_trade_sell_price_offset_mode", "percent")).strip().lower() == "dollar" else "percent"
+        )
         row.auto_trade_buy_price_offset_pct = float(_settings.get("auto_trade_buy_price_offset_pct", 0.01))
         row.auto_trade_sell_price_offset_pct = float(_settings.get("auto_trade_sell_price_offset_pct", 0.01))
         row.default_strategy_name = str(_settings.get("default_strategy_name", _INTRADAY_1M_TEMPLATE) or _INTRADAY_1M_TEMPLATE)
@@ -587,6 +599,7 @@ def update_manager_settings(new: dict) -> dict:
               "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
               "pending_cancel_after_bars",
               "sim_buy_fill_rate_pct", "sim_sell_fill_rate_pct",
+              "auto_trade_buy_price_offset_mode", "auto_trade_sell_price_offset_mode",
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct",
               "sentiment_matrix_strategies", "sentiment_matrix_actions",
               "pm_hold_duration_days", "pm_hold_duration_bars", "pm_hold_extended_multiplier", "pm_hold_trailing_pct"}
@@ -625,6 +638,14 @@ def update_manager_settings(new: dict) -> dict:
             _settings["position_overrides"] = {}
     if "pm_hold_duration_bars" in new:
         _settings["pm_hold_duration_bars"] = max(0, int(_settings.get("pm_hold_duration_bars", 20) or 0))
+    if "auto_trade_buy_price_offset_mode" in new:
+        _settings["auto_trade_buy_price_offset_mode"] = (
+            "dollar" if str(_settings.get("auto_trade_buy_price_offset_mode", "percent")).strip().lower() == "dollar" else "percent"
+        )
+    if "auto_trade_sell_price_offset_mode" in new:
+        _settings["auto_trade_sell_price_offset_mode"] = (
+            "dollar" if str(_settings.get("auto_trade_sell_price_offset_mode", "percent")).strip().lower() == "dollar" else "percent"
+        )
 
     try:
         loop = asyncio.get_running_loop()
@@ -2367,38 +2388,16 @@ async def _process_ib_engine_signals() -> None:
             return 0.0
         side_u = str(side or "").upper()
         if side_u == "BUY":
+            mode = str(_settings.get("auto_trade_buy_price_offset_mode", "percent") or "percent").strip().lower()
             offset = max(0.0, float(_settings.get("auto_trade_buy_price_offset_pct", 0.145) or 0.0))
+            if mode == "dollar":
+                return round(reference_price + offset, 4)
             return round(reference_price * (1.0 + offset / 100.0), 4)
+        mode = str(_settings.get("auto_trade_sell_price_offset_mode", "percent") or "percent").strip().lower()
         offset = max(0.0, float(_settings.get("auto_trade_sell_price_offset_pct", 0.185) or 0.0))
+        if mode == "dollar":
+            return round(max(0.01, reference_price - offset), 4)
         return round(reference_price * (1.0 - offset / 100.0), 4)
-
-    async def _fetch_prev_ohlc_mid_map(symbols: set[str]) -> dict[str, float]:
-        if not symbols:
-            return {}
-        from app.services.market_service import get_intraday_df
-
-        async def _one(sym: str) -> tuple[str, float]:
-            try:
-                df = await get_intraday_df(sym, range_="2d", interval="1m", include_pre_post=False)
-                if df is None or df.empty:
-                    return sym, 0.0
-                idx = -2 if len(df.index) >= 2 else -1
-                row = df.iloc[idx]
-                o = float(row.get("Open") or 0.0)
-                h = float(row.get("High") or 0.0)
-                l = float(row.get("Low") or 0.0)
-                c = float(row.get("Close") or 0.0)
-                if c <= 0.0:
-                    return sym, 0.0
-                # Previous OHLC midpoint reference for automated IB limit pricing.
-                ref = (o + h + l + c) / 4.0 if (o > 0 and h > 0 and l > 0 and c > 0) else c
-                return sym, float(ref)
-            except Exception as exc:
-                logger.debug("PM IB prev OHLC midpoint fetch failed for %s: %s", sym, exc)
-                return sym, 0.0
-
-        pairs = await asyncio.gather(*[_one(sym) for sym in sorted(symbols)])
-        return {sym: px for sym, px in pairs if px > 0.0}
 
     for pos in positions:
         symbol = str(pos.symbol or "").upper()
@@ -2470,6 +2469,17 @@ async def _process_ib_engine_signals() -> None:
             ))
 
     quote_symbols = set(buy_symbols_needing_quote) | set(risk_symbols_needing_quote)
+    book_map: dict[str, dict[str, Any]] = {}
+    if quote_symbols:
+        try:
+            from app.services.top_of_book import get_ib_top_of_book
+            books = await asyncio.gather(*[get_ib_top_of_book(sym) for sym in sorted(quote_symbols)])
+            for sym, book in zip(sorted(quote_symbols), books):
+                if isinstance(book, dict):
+                    book_map[sym] = book
+        except Exception as exc:
+            logger.warning("PM IB top-of-book fetch failed: %s", exc)
+
     if quote_symbols:
         price_map: dict[str, float] = {}
         try:
@@ -2485,7 +2495,8 @@ async def _process_ib_engine_signals() -> None:
             logger.warning("PM IB signal quote fetch failed: %s", exc)
 
         for pos, symbol, score, tag, process_key in buy_signal_rows:
-            cp = float(price_map.get(symbol, 0.0))
+            book = book_map.get(symbol, {})
+            cp = float((book.get("ask") if isinstance(book, dict) else 0.0) or price_map.get(symbol, 0.0))
             alloc = float(pos.allocated_funds or 0.0)
             if cp <= 0.0:
                 _log_activity(f"IB signal BUY skipped for {symbol}: no market price")
@@ -2513,12 +2524,15 @@ async def _process_ib_engine_signals() -> None:
                 "quantity": float(qty),
                 "alloc": float(alloc),
                 "price": cp,
+                "reference_price": cp,
+                "top_size": float((book.get("ask_size") if isinstance(book, dict) else 0.0) or 0.0),
                 "reason": f"pm_engine_signal_buy (signal=1, score={score:+.3f}, tag={tag or 'WATCH'})",
                 "processed_key": process_key,
             })
 
         for symbol, qty, avg_cost in risk_rows:
-            cp = float(price_map.get(symbol, 0.0))
+            book = book_map.get(symbol, {})
+            cp = float((book.get("bid") if isinstance(book, dict) else 0.0) or price_map.get(symbol, 0.0))
             if cp <= 0.0 or avg_cost <= 0.0 or qty <= 0.0:
                 continue
 
@@ -2537,14 +2551,13 @@ async def _process_ib_engine_signals() -> None:
                 "side": "SELL",
                 "quantity": float(qty),
                 "price": cp,
+                "reference_price": cp,
+                "top_size": float((book.get("bid_size") if isinstance(book, dict) else 0.0) or 0.0),
                 "reason": reason,
             })
 
     if not order_candidates:
         return
-
-    ref_symbols = {str(o.get("symbol") or "").upper() for o in order_candidates if o.get("symbol")}
-    prev_mid_map = await _fetch_prev_ohlc_mid_map(ref_symbols)
 
     from app.config import settings
     from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
@@ -2561,7 +2574,7 @@ async def _process_ib_engine_signals() -> None:
             order.get("reason", ""),
         )
         reference_price = float(
-            prev_mid_map.get(symbol)
+            order.get("reference_price")
             or quote_price_map.get(symbol)
             or order.get("price")
             or 0.0
@@ -2579,6 +2592,12 @@ async def _process_ib_engine_signals() -> None:
             alloc = float(order.get("alloc") or 0.0)
             if alloc > 0.0:
                 qty_to_submit = float(math.floor(alloc / limit_price))
+        elif side == "SELL":
+            # Match top-of-book quantity on exits so submitted size aligns with
+            # visible touch liquidity and avoids crossing deeper levels.
+            top_size = float(order.get("top_size") or 0.0)
+            if top_size > 0.0:
+                qty_to_submit = min(qty_to_submit, top_size)
         if qty_to_submit <= 0.0:
             _log_activity(f"IB PM {side} skipped for {symbol}: zero quantity at ${limit_price:.4f}")
             processed_key = order.get("processed_key")
@@ -2627,8 +2646,14 @@ async def _process_ib_engine_signals() -> None:
             f"IB PM {side} submitted from engine signal for {symbol} x{qty_to_submit:.4f} @ ${submitted_price:.4f}"
         )
         processed_key = order.get("processed_key")
-        if processed_key:
+        full_qty = float(order.get("quantity") or 0.0)
+        is_partial = side == "SELL" and qty_to_submit + 1e-9 < full_qty
+        if processed_key and not is_partial:
             _ib_signal_last_processed_at[symbol] = str(processed_key)
+        elif processed_key and is_partial:
+            _log_activity(
+                f"IB PM SELL partial for {symbol}: submitted {qty_to_submit:.4f}/{full_qty:.4f} to match top-of-book size"
+            )
 
 
 # ── main loop ─────────────────────────────────────────────────────────────── #

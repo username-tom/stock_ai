@@ -143,12 +143,27 @@ class _IBApiApp(EWrapper, EClient):
                 data["close"] = price
             elif tickType == 14:
                 data["open"] = price
+            # Delayed quote feed equivalents (IB tick IDs 66/67/68).
+            elif tickType == 66 and "bid" not in data:
+                data["bid"] = price
+            elif tickType == 67 and "ask" not in data:
+                data["ask"] = price
+            elif tickType == 68 and "last" not in data:
+                data["last"] = price
 
     def tickSize(self, reqId: TickerId, tickType: int, size: int) -> None:
-        if tickType == 8:
-            with self._lock:
-                data = self.market_data.setdefault(int(reqId), {})
+        with self._lock:
+            data = self.market_data.setdefault(int(reqId), {})
+            if tickType == 0:
+                data["bid_size"] = size
+            elif tickType == 3:
+                data["ask_size"] = size
+            elif tickType == 8:
                 data["volume"] = size
+            elif tickType == 69 and "bid_size" not in data:
+                data["bid_size"] = size
+            elif tickType == 70 and "ask_size" not in data:
+                data["ask_size"] = size
 
     def tickSnapshotEnd(self, reqId: int) -> None:
         evt = self.market_data_events.get(reqId)
@@ -413,6 +428,8 @@ class IBService:
                 "symbol": symbol.upper(),
                 "bid": data.get("bid"),
                 "ask": data.get("ask"),
+                "bid_size": data.get("bid_size"),
+                "ask_size": data.get("ask_size"),
                 "last": data.get("last"),
                 "close": data.get("close"),
                 "volume": data.get("volume"),

@@ -86,8 +86,8 @@ const DEFAULT_PM_PRESET_DEFS = [
       ai_external_sentiment_weight: 0.35,
       auto_trade_buy_price_offset_pct: 0.01,
       auto_trade_sell_price_offset_pct: 0.01,
-      sim_buy_fill_rate_pct: 60,
-      sim_sell_fill_rate_pct: 70,
+      sim_buy_fill_rate_pct: 80,
+      sim_sell_fill_rate_pct: 90,
     },
   },
   {
@@ -104,8 +104,8 @@ const DEFAULT_PM_PRESET_DEFS = [
       pending_cancel_after_bars: 3,
       auto_trade_buy_price_offset_pct: 0.01,
       auto_trade_sell_price_offset_pct: 0.01,
-      sim_buy_fill_rate_pct: 60,
-      sim_sell_fill_rate_pct: 70,
+      sim_buy_fill_rate_pct: 80,
+      sim_sell_fill_rate_pct: 90,
     },
   },
   {
@@ -117,8 +117,8 @@ const DEFAULT_PM_PRESET_DEFS = [
       take_profit_pct: 3.0,
       hold_positions_overnight: false,
       sentiment_bucket_persistence: 3,
-      sim_buy_fill_rate_pct: 60,
-      sim_sell_fill_rate_pct: 70,
+      sim_buy_fill_rate_pct: 80,
+      sim_sell_fill_rate_pct: 90,
     },
   },
   {
@@ -130,8 +130,8 @@ const DEFAULT_PM_PRESET_DEFS = [
       take_profit_pct: 4.0,
       hold_positions_overnight: true,
       sentiment_bucket_persistence: 5,
-      sim_buy_fill_rate_pct: 60,
-      sim_sell_fill_rate_pct: 70,
+      sim_buy_fill_rate_pct: 80,
+      sim_sell_fill_rate_pct: 90,
     },
   },
 ]
@@ -341,8 +341,10 @@ function buildDraftFromSettings(settings) {
     pm_hold_trailing_pct: settings.pm_hold_trailing_pct ?? 3.0,
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.25,
     pending_cancel_after_bars: settings.pending_cancel_after_bars ?? 3,
-    sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 60,
-    sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 70,
+    sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 80,
+    sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 90,
+    auto_trade_buy_price_offset_mode: settings.auto_trade_buy_price_offset_mode ?? 'percent',
+    auto_trade_sell_price_offset_mode: settings.auto_trade_sell_price_offset_mode ?? 'percent',
     auto_trade_buy_price_offset_pct: settings.auto_trade_buy_price_offset_pct ?? 0.01,
     auto_trade_sell_price_offset_pct: settings.auto_trade_sell_price_offset_pct ?? 0.01,
     sentiment_matrix_strategies: (() => {
@@ -840,7 +842,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     if (isLoading || !managerData) return
     setSavedStates(prev => {
       const current = prev[activeProfile]
-      if (current?.draft) {
+      if (current?.draft && current?.editSettings) {
         // Merge with fresh defaults so fields added after the state was saved are populated
         const freshDefaults = buildDraftFromSettings(managerData.settings)
         const mergedDraft = {
@@ -862,16 +864,17 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         setEditSettings(!!current.editSettings)
         return prev
       }
+      const nextDraft = buildDraftFromSettings(managerData.settings)
       const next = {
         ...prev,
         [activeProfile]: {
-          draft: buildDraftFromSettings(managerData.settings),
+          draft: nextDraft,
           editSettings: false,
           updatedAt: new Date().toISOString(),
         },
       }
       saveSavedStates(next)
-      setDraft(next[activeProfile].draft)
+      setDraft(nextDraft)
       setEditSettings(false)
       return next
     })
@@ -921,31 +924,6 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       setSelectedPresetId(effectiveDefault)
     }
   }, [activePresets, selectedPresetId, activeProfile, defaultPresetByProfile, launchDefaultPresetId])
-
-  useEffect(() => {
-    if (!selectedPreset?.draft || !draft || editSettings) return
-    const current = savedStates[activeProfile]
-    // Apply launch-default preset once per profile (or when default preset changes).
-    if (current?.bootstrappedPresetId === selectedPreset.id) return
-
-    const seededDraft = cloneJson(selectedPreset.draft)
-    setDraft(seededDraft)
-    setSavedStates(prev => {
-      const next = {
-        ...prev,
-        [activeProfile]: {
-          ...(prev[activeProfile] ?? {}),
-          draft: seededDraft,
-          editSettings: false,
-          bootstrappedPresetId: selectedPreset.id,
-          updatedAt: new Date().toISOString(),
-        },
-      }
-      saveSavedStates(next)
-      return next
-    })
-    setPresetNotice(`Loaded launch default preset: ${selectedPreset.name}. Click Save to apply.`)
-  }, [selectedPreset, activeProfile, savedStates, draft, editSettings])
 
   useEffect(() => {
     if (!managerData) return
@@ -1098,6 +1076,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       pending_cancel_after_bars: Math.max(1, Math.floor(Number(draft.pending_cancel_after_bars ?? 3) || 3)),
       sim_buy_fill_rate_pct: Number(draft.sim_buy_fill_rate_pct),
       sim_sell_fill_rate_pct: Number(draft.sim_sell_fill_rate_pct),
+      auto_trade_buy_price_offset_mode: (draft.auto_trade_buy_price_offset_mode === 'dollar' ? 'dollar' : 'percent'),
+      auto_trade_sell_price_offset_mode: (draft.auto_trade_sell_price_offset_mode === 'dollar' ? 'dollar' : 'percent'),
       auto_trade_buy_price_offset_pct: Number(draft.auto_trade_buy_price_offset_pct),
       auto_trade_sell_price_offset_pct: Number(draft.auto_trade_sell_price_offset_pct),
       default_strategy_name: draft.default_strategy_name,
@@ -1498,10 +1478,14 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
-          Auto pricing: BUY +{Number(settings.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}%
+          Auto pricing: BUY {((settings.auto_trade_buy_price_offset_mode ?? 'percent') === 'dollar') ? '$+' : '+'}
+          {Number(settings.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}
+          {((settings.auto_trade_buy_price_offset_mode ?? 'percent') === 'dollar') ? '' : '%'}
           {' / '}
-          SELL -{Number(settings.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%
-          {' (prev OHLC mid)'}
+          SELL {((settings.auto_trade_sell_price_offset_mode ?? 'percent') === 'dollar') ? '$-' : '-'}
+          {Number(settings.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}
+          {((settings.auto_trade_sell_price_offset_mode ?? 'percent') === 'dollar') ? '' : '%'}
+          {' (top-of-book touch)'}
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
@@ -2661,28 +2645,60 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
               <SettingRow
                 label="Automated Price Offsets"
-                hint="Offsets from previous OHLC midpoint."
+                hint="Offsets from top-of-book touch price (BUY ask / SELL bid)."
               >
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 w-full">
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-slate-400 w-9">BUY</span>
+                    <select
+                      value={draft.auto_trade_buy_price_offset_mode ?? 'percent'}
+                      onChange={e => updateDraft(d => ({ ...d, auto_trade_buy_price_offset_mode: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    >
+                      <option value="percent">%</option>
+                      <option value="dollar">$</option>
+                    </select>
+                    {(draft.auto_trade_buy_price_offset_mode ?? 'percent') === 'dollar' && (
+                      <span className="text-slate-400 text-sm">$</span>
+                    )}
                     <input
-                      type="range" min={0} max={2} step={0.01}
+                      type="number"
+                      min={0}
+                      max={(draft.auto_trade_buy_price_offset_mode ?? 'percent') === 'dollar' ? 10 : 5}
+                      step={0.01}
                       value={Number(draft.auto_trade_buy_price_offset_pct ?? 0.01)}
                       onChange={e => updateDraft(d => ({ ...d, auto_trade_buy_price_offset_pct: Number(e.target.value) }))}
-                      className="flex-1 accent-violet-500"
+                      className="input w-28 text-sm py-1.5"
                     />
-                    <span className="w-14 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_buy_price_offset_pct ?? 0.01).toFixed(2)}%</span>
+                    {(draft.auto_trade_buy_price_offset_mode ?? 'percent') !== 'dollar' && (
+                      <span className="text-slate-400 text-sm">%</span>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-slate-400 w-9">SELL</span>
+                    <select
+                      value={draft.auto_trade_sell_price_offset_mode ?? 'percent'}
+                      onChange={e => updateDraft(d => ({ ...d, auto_trade_sell_price_offset_mode: e.target.value }))}
+                      className="input w-28 text-sm py-1.5"
+                    >
+                      <option value="percent">%</option>
+                      <option value="dollar">$</option>
+                    </select>
+                    {(draft.auto_trade_sell_price_offset_mode ?? 'percent') === 'dollar' && (
+                      <span className="text-slate-400 text-sm">$</span>
+                    )}
                     <input
-                      type="range" min={0} max={2} step={0.01}
+                      type="number"
+                      min={0}
+                      max={(draft.auto_trade_sell_price_offset_mode ?? 'percent') === 'dollar' ? 10 : 5}
+                      step={0.01}
                       value={Number(draft.auto_trade_sell_price_offset_pct ?? 0.01)}
                       onChange={e => updateDraft(d => ({ ...d, auto_trade_sell_price_offset_pct: Number(e.target.value) }))}
-                      className="flex-1 accent-violet-500"
+                      className="input w-28 text-sm py-1.5"
                     />
-                    <span className="w-14 text-right text-sm font-bold text-slate-200">{Number(draft.auto_trade_sell_price_offset_pct ?? 0.01).toFixed(2)}%</span>
+                    {(draft.auto_trade_sell_price_offset_mode ?? 'percent') !== 'dollar' && (
+                      <span className="text-slate-400 text-sm">%</span>
+                    )}
                   </div>
                 </div>
               </SettingRow>
