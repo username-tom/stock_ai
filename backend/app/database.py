@@ -170,6 +170,10 @@ async def _migrate(conn):
         "ALTER TABLE sandbox_positions ADD COLUMN pm_hold_started_at TIMESTAMP",
         # Track peak price since PM hold entry (for trailing-stop advanced hold)
         "ALTER TABLE sandbox_positions ADD COLUMN pm_hold_peak_price REAL",
+        # Bar predictor gating for PM buy/sell signals
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN bar_predictor_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN bar_predictor_buy_min_bias REAL NOT NULL DEFAULT 0.3",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN bar_predictor_sell_min_bias REAL NOT NULL DEFAULT 0.3",
     ]
     for stmt in migrations:
         try:

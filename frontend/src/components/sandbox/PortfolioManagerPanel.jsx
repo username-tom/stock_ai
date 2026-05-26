@@ -341,6 +341,16 @@ function buildDraftFromSettings(settings) {
     pm_hold_trailing_pct: settings.pm_hold_trailing_pct ?? 3.0,
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.25,
     pending_cancel_after_bars: settings.pending_cancel_after_bars ?? 3,
+    // Anti-churn bypass toggles (UI-only; controls whether bypass values are sent on save)
+    pending_drift_cancel_enabled: settings.pending_drift_cancel_enabled ?? true,
+    pending_cancel_after_bars_enabled: settings.pending_cancel_after_bars_enabled ?? true,
+    eod_engine_shutoff_enabled: (settings.eod_engine_shutoff_minutes_before_sell ?? 120) > 0,
+    sentiment_persistence_enabled: settings.sentiment_persistence_enabled ?? true,
+    hold_duration_enabled: (settings.pm_hold_duration_bars ?? 20) > 0,
+    // Bar predictor momentum gating
+    bar_predictor_enabled: settings.bar_predictor_enabled ?? false,
+    bar_predictor_buy_min_bias: settings.bar_predictor_buy_min_bias ?? 0.3,
+    bar_predictor_sell_min_bias: settings.bar_predictor_sell_min_bias ?? 0.3,
     sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 80,
     sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 90,
     auto_trade_buy_price_offset_mode: settings.auto_trade_buy_price_offset_mode ?? 'percent',
@@ -795,7 +805,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [sentimentError, setSentimentError] = useState(null)
   const [importNotice, setImportNotice] = useState(null)
   const [presetNotice, setPresetNotice] = useState(null)
-  const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false, pmValues: false })
+  const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, barPredictor: false, risk: false, pmValues: false })
   const activePresets = Array.isArray(presetStore) ? presetStore : []
   const selectedPreset = activePresets.find(p => p.id === selectedPresetId) ?? null
 
@@ -1072,12 +1082,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       stop_loss_value: stopLossValue,
       take_profit_value: takeProfitValue,
       hold_positions_overnight: draft.hold_positions_overnight,
-      eod_engine_shutoff_minutes_before_sell: Number(draft.eod_engine_shutoff_minutes_before_sell),
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
       sentiment_lookback_days: Number(draft.sentiment_lookback_days),
       sentiment_data_points: Number(draft.sentiment_data_points),
       sentiment_interval: draft.sentiment_interval,
-      sentiment_bucket_persistence: Number(draft.sentiment_bucket_persistence),
       ai_tag_strategy_enabled: draft.ai_tag_strategy_enabled,
       ai_sentiment_change_enabled: draft.ai_sentiment_change_enabled,
       ai_tag_strategies: draft.ai_tag_strategies,
@@ -1090,11 +1098,17 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       ai_tag_long_sl_value: aiLongSlValue,
       ai_tag_no_loss_sell: draft.ai_tag_no_loss_sell,
       pm_hold_duration_days: Math.max(0, Math.floor(Number(draft.pm_hold_duration_days ?? 1) || 0)),
-      pm_hold_duration_bars: Math.max(0, Math.floor(Number(draft.pm_hold_duration_bars ?? 20) || 0)),
       pm_hold_extended_multiplier: Math.max(0, Number(draft.pm_hold_extended_multiplier ?? 2.0) || 0),
       pm_hold_trailing_pct: Math.max(0, Number(draft.pm_hold_trailing_pct ?? 3.0) || 0),
-      pending_price_drift_cancel_pct: Number(draft.pending_price_drift_cancel_pct),
-      pending_cancel_after_bars: Math.max(1, Math.floor(Number(draft.pending_cancel_after_bars ?? 3) || 3)),
+      // Anti-churn bypass: when toggle is OFF, send the bypass value to the backend
+      pending_price_drift_cancel_pct: draft.pending_drift_cancel_enabled ? Number(draft.pending_price_drift_cancel_pct) : 100,
+      pending_cancel_after_bars: draft.pending_cancel_after_bars_enabled ? Math.max(0, Math.floor(Number(draft.pending_cancel_after_bars ?? 3) || 3)) : 0,
+      eod_engine_shutoff_minutes_before_sell: draft.eod_engine_shutoff_enabled ? Number(draft.eod_engine_shutoff_minutes_before_sell) : 0,
+      sentiment_bucket_persistence: draft.sentiment_persistence_enabled ? Math.max(1, Math.min(20, Number(draft.sentiment_bucket_persistence ?? 3))) : 1,
+      pm_hold_duration_bars: draft.hold_duration_enabled ? Math.max(0, Math.floor(Number(draft.pm_hold_duration_bars ?? 20) || 0)) : 0,
+      bar_predictor_enabled: draft.bar_predictor_enabled,
+      bar_predictor_buy_min_bias: Number(draft.bar_predictor_buy_min_bias ?? 0.3),
+      bar_predictor_sell_min_bias: Number(draft.bar_predictor_sell_min_bias ?? 0.3),
       sim_buy_fill_rate_pct: Number(draft.sim_buy_fill_rate_pct),
       sim_sell_fill_rate_pct: Number(draft.sim_sell_fill_rate_pct),
       auto_trade_buy_price_offset_mode: (draft.auto_trade_buy_price_offset_mode === 'dollar' ? 'dollar' : 'percent'),
@@ -2101,14 +2115,21 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 label="Sentiment Debounce Persistence"
                 hint="Bars required before a proposed sentiment bucket flip is applied. Higher values reduce strategy-switch churn."
               >
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number" min={1} max={20} step={1}
-                    value={draft.sentiment_bucket_persistence}
-                    onChange={e => updateDraft(d => ({ ...d, sentiment_bucket_persistence: e.target.value }))}
-                    className="input w-24 text-sm py-1.5"
-                  />
-                  <span className="text-xs text-slate-500">{draft.sentiment_bucket_persistence} bar(s)</span>
+                <div className="flex items-center gap-3">
+                  <button
+                    title={draft.sentiment_persistence_enabled ? 'Anti-churn active – click to bypass (instant bucket changes)' : 'Bypassed – click to re-enable'}
+                    onClick={() => editSettings && updateDraft(d => ({ ...d, sentiment_persistence_enabled: !d.sentiment_persistence_enabled }))}
+                    className={`shrink-0 px-2 py-0.5 rounded text-xs font-semibold border transition-colors ${draft.sentiment_persistence_enabled ? 'bg-violet-700 text-white border-violet-500' : 'bg-dark-700 text-slate-500 border-dark-600 line-through'}`}
+                  >{draft.sentiment_persistence_enabled ? 'ON' : 'OFF'}</button>
+                  <div className={`flex items-center gap-2 transition-opacity ${draft.sentiment_persistence_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
+                    <input
+                      type="number" min={1} max={20} step={1}
+                      value={draft.sentiment_bucket_persistence}
+                      onChange={e => updateDraft(d => ({ ...d, sentiment_bucket_persistence: e.target.value }))}
+                      className="input w-24 text-sm py-1.5"
+                    />
+                    <span className="text-xs text-slate-500">{draft.sentiment_bucket_persistence} bar(s)</span>
+                  </div>
                 </div>
               </SettingRow>
             </CollapsibleSection>
@@ -2337,28 +2358,36 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     label="Pending Order Controls"
                     hint="Drift threshold and max bars before auto-cancel."
                   >
-                    <div className="flex items-center gap-4 flex-wrap">
-                      <div className="flex items-center gap-1">
-                        <span className="text-xs text-slate-400">Drift</span>
-                        <input
-                          type="number" min={0} max={100} step={0.05}
-                          disabled={!editSettings}
-                          value={draft.pending_price_drift_cancel_pct}
-                          onChange={e => updateDraft(d => ({ ...d, pending_price_drift_cancel_pct: e.target.value }))}
-                          className="input w-24 text-sm py-1.5"
-                        />
-                        <span className="text-slate-400 text-sm">%</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <span className="text-xs text-slate-400">Timeout</span>
-                        <input
-                          type="number" min={1} max={120} step={1}
-                          disabled={!editSettings}
-                          value={draft.pending_cancel_after_bars}
-                          onChange={e => updateDraft(d => ({ ...d, pending_cancel_after_bars: e.target.value }))}
-                          className="input w-24 text-sm py-1.5"
-                        />
-                        <span className="text-slate-400 text-sm">bars</span>
+                    <div className="flex items-center gap-3 flex-wrap">
+                      {/* Anti-churn toggle */}
+                      <button
+                        title={draft.pending_drift_cancel_enabled ? 'Anti-churn active – click to bypass (allow all fills)' : 'Bypassed – click to re-enable'}
+                        onClick={() => editSettings && updateDraft(d => ({ ...d, pending_drift_cancel_enabled: !d.pending_drift_cancel_enabled }))}
+                        className={`shrink-0 px-2 py-0.5 rounded text-xs font-semibold border transition-colors ${draft.pending_drift_cancel_enabled ? 'bg-violet-700 text-white border-violet-500' : 'bg-dark-700 text-slate-500 border-dark-600 line-through'}`}
+                      >{draft.pending_drift_cancel_enabled ? 'ON' : 'OFF'}</button>
+                      <div className={`flex items-center gap-4 flex-wrap transition-opacity ${draft.pending_drift_cancel_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">Drift</span>
+                          <input
+                            type="number" min={0} max={100} step={0.05}
+                            disabled={!editSettings}
+                            value={draft.pending_price_drift_cancel_pct}
+                            onChange={e => updateDraft(d => ({ ...d, pending_price_drift_cancel_pct: e.target.value }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">%</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">Timeout</span>
+                          <input
+                            type="number" min={0} max={120} step={1}
+                            disabled={!editSettings}
+                            value={draft.pending_cancel_after_bars}
+                            onChange={e => updateDraft(d => ({ ...d, pending_cancel_after_bars: e.target.value }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">bars</span>
+                        </div>
                       </div>
                     </div>
                   </SettingRow>
@@ -2415,8 +2444,14 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     label="Advanced Hold Controls"
                     hint="Bars, duration multiplier, and trailing stop."
                   >
-                    <div className="flex items-center gap-4 flex-wrap">
-                      <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-3 flex-wrap">
+                      {/* Anti-churn toggle for hold duration */}
+                      <button
+                        title={draft.hold_duration_enabled ? 'Anti-churn active – click to disable hold duration cap' : 'Hold duration bypassed – click to re-enable'}
+                        onClick={() => editSettings && updateDraft(d => ({ ...d, hold_duration_enabled: !d.hold_duration_enabled }))}
+                        className={`shrink-0 px-2 py-0.5 rounded text-xs font-semibold border transition-colors ${draft.hold_duration_enabled ? 'bg-violet-700 text-white border-violet-500' : 'bg-dark-700 text-slate-500 border-dark-600 line-through'}`}
+                      >{draft.hold_duration_enabled ? 'ON' : 'OFF'}</button>
+                      <div className={`flex items-center gap-1 transition-opacity ${draft.hold_duration_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
                         <span className="text-xs text-slate-400">Bars</span>
                         <input
                           type="number" min={0} max={50000} step={1}
@@ -2577,6 +2612,52 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     </div>
                   </SettingRow>
                 </>
+              )}
+            </CollapsibleSection>
+
+            {/* ── Bar Predictor Momentum Gate ── */}
+            <CollapsibleSection
+              title="Bar Predictor"
+              badge={draft.bar_predictor_enabled ? `Buy≥+${Number(draft.bar_predictor_buy_min_bias ?? 0.3).toFixed(2)} · Sell≤-${Number(draft.bar_predictor_sell_min_bias ?? 0.3).toFixed(2)}` : 'Disabled'}
+              isOpen={openSections.barPredictor}
+              onToggle={() => toggleSection('barPredictor')}
+            >
+              <SettingRow label="Enable Bar Predictor" hint="Gate new BUY signals through a momentum bias computed from Heikin-Ashi, MACD and slope (ports the NextBarPredictor algorithm). Disabled = no gating.">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.bar_predictor_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => { if (!editSettings) return; updateDraft(d => ({ ...d, bar_predictor_enabled: !d.bar_predictor_enabled })) }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.bar_predictor_enabled ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.bar_predictor_enabled ? 'Enabled' : 'Disabled'}</span>
+                </label>
+              </SettingRow>
+              {draft.bar_predictor_enabled && (
+                <SettingRow label="Bias Thresholds" hint="BUY is blocked when bias < −threshold. Scale is −1 (strong bearish) to +1 (strong bullish). 0.3 is a reasonable default for 1m bars.">
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-slate-400">Buy min bias</span>
+                      <input
+                        type="number" min={0} max={1} step={0.05}
+                        disabled={!editSettings}
+                        value={draft.bar_predictor_buy_min_bias ?? 0.3}
+                        onChange={e => updateDraft(d => ({ ...d, bar_predictor_buy_min_bias: Number(e.target.value) }))}
+                        className="input w-20 text-sm py-1.5"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-slate-400">Sell min bias</span>
+                      <input
+                        type="number" min={0} max={1} step={0.05}
+                        disabled={!editSettings}
+                        value={draft.bar_predictor_sell_min_bias ?? 0.3}
+                        onChange={e => updateDraft(d => ({ ...d, bar_predictor_sell_min_bias: Number(e.target.value) }))}
+                        className="input w-20 text-sm py-1.5"
+                      />
+                    </div>
+                  </div>
+                </SettingRow>
               )}
             </CollapsibleSection>
 
@@ -2744,11 +2825,17 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   label="EOD Window Controls"
                   hint="Shutoff blocks new buys; sell window forces exits near close."
                 >
-                  <div className="flex items-center gap-4 flex-wrap">
-                    <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    {/* Anti-churn toggle for EOD shutoff */}
+                    <button
+                      title={draft.eod_engine_shutoff_enabled ? 'Anti-churn active – click to disable EOD buy block' : 'EOD buy block bypassed – click to re-enable'}
+                      onClick={() => editSettings && updateDraft(d => ({ ...d, eod_engine_shutoff_enabled: !d.eod_engine_shutoff_enabled }))}
+                      className={`shrink-0 px-2 py-0.5 rounded text-xs font-semibold border transition-colors ${draft.eod_engine_shutoff_enabled ? 'bg-violet-700 text-white border-violet-500' : 'bg-dark-700 text-slate-500 border-dark-600 line-through'}`}
+                    >{draft.eod_engine_shutoff_enabled ? 'ON' : 'OFF'}</button>
+                    <div className={`flex items-center gap-1 transition-opacity ${draft.eod_engine_shutoff_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
                       <span className="text-xs text-slate-400">Shutoff</span>
                       <input
-                        type="number" min={1} max={480} step={1}
+                        type="number" min={0} max={480} step={1}
                         value={draft.eod_engine_shutoff_minutes_before_sell}
                         onChange={e => updateDraft(d => ({ ...d, eod_engine_shutoff_minutes_before_sell: e.target.value }))}
                         className="input w-24 text-sm py-1.5"

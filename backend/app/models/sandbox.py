@@ -162,4 +162,8 @@ class PortfolioManagerSettings(Base):
     # Trailing stop % used for `advanced_hold:trailing` (exit when price drops this % from peak)
     pm_hold_trailing_pct = Column(Float, default=3.0, nullable=False)
     cached_scores = Column(Text, nullable=False, server_default=text("'{}'"))
+    # Bar predictor gating for PM buy/sell decisions
+    bar_predictor_enabled = Column(Boolean, default=False, nullable=False)
+    bar_predictor_buy_min_bias = Column(Float, default=0.3, nullable=False)
+    bar_predictor_sell_min_bias = Column(Float, default=0.3, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

@@ -1121,6 +1121,7 @@ def _prepare_symbol_for_portfolio(
         "signals_by_strat": signals_by_strat,
         "eod_sell_bars": eod_sell_bars,
         "last_regular_bar": last_regular_bar,
+        "bar_predictor_bias": None,  # populated by run_sandbox_portfolio_backtest when enabled
     }
 
 
@@ -1146,6 +1147,9 @@ def run_sandbox_portfolio_backtest(
     pending_price_drift_cancel_pct: float = 0.75,
     sim_pending_duration_bars: int = 1,
     intraday_1m_template_params: "dict[str, Any] | None" = None,
+    bar_predictor_enabled: bool = False,
+    bar_predictor_buy_min_bias: float = 0.3,
+    bar_predictor_sell_min_bias: float = 0.3,
 ) -> dict[str, Any]:
     """Run a coordinated multi-symbol backtest with a shared cash pool.
 
@@ -1197,6 +1201,15 @@ def run_sandbox_portfolio_backtest(
             "per_symbol": [],
             "errors": errors,
         }
+
+    # Compute bar predictor bias series for each prepared symbol (when enabled).
+    if bar_predictor_enabled:
+        try:
+            from app.services.bar_predictor import compute_bar_predictor_bias_series  # noqa: PLC0415
+            for p in prepared:
+                p["bar_predictor_bias"] = compute_bar_predictor_bias_series(p["df"])
+        except Exception:
+            pass
 
     # Per-symbol state (mirrors sandbox).
     spec_by_sym = {str(s["symbol"]).upper(): s for s in symbol_specs}
@@ -1621,6 +1634,20 @@ def run_sandbox_portfolio_backtest(
             # 4. Signal execution.
             sig_series = p["signals_by_strat"].get(active_strat)
             position_change = float(sig_series.loc[ts]) if (sig_series is not None and ts in sig_series.index) else 0.0
+            if position_change > 0 and st["shares"] == 0 and (is_regular or not day_trade):
+                # Bar predictor momentum gate: block buy when bearish momentum exceeds threshold
+                if bar_predictor_enabled:
+                    bp_series = p.get("bar_predictor_bias")
+                    bp_val = float(bp_series.loc[ts]) if (bp_series is not None and ts in bp_series.index) else 0.0
+                    if bp_val < -bar_predictor_buy_min_bias:
+                        position_change = 0.0  # veto this bar's buy signal
+            elif position_change < 0 and st["shares"] > 0 and (is_regular or not day_trade):
+                # Bar predictor momentum gate: block sell when bullish momentum is still too strong.
+                if bar_predictor_enabled:
+                    bp_series = p.get("bar_predictor_bias")
+                    bp_val = float(bp_series.loc[ts]) if (bp_series is not None and ts in bp_series.index) else 0.0
+                    if bp_val > -bar_predictor_sell_min_bias:
+                        position_change = 0.0  # veto this bar's sell signal
             if position_change > 0 and st["shares"] == 0 and (is_regular or not day_trade):
                 sig_reason = str(row.get("signal_source", "")) or "signal"
                 queued = _try_buy(sym, buy_price, ts, sig_reason, bucket, active_strat, ts_idx)

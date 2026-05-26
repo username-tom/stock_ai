@@ -169,6 +169,10 @@ _settings: dict[str, Any] = {
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
     "pending_price_drift_cancel_pct": 0.25,  # cancel pending BUY when market drifts >= this % from pending fill/limit
     "pending_cancel_after_bars": 3,       # cancel pending orders after N sentiment bars even without price drift
+    # Bar predictor (momentum gating): gate BUY/SELL signals using 1m momentum bias
+    "bar_predictor_enabled": False,
+    "bar_predictor_buy_min_bias": 0.3,   # min bias (>0) required to allow a new buy (-1..+1 scale)
+    "bar_predictor_sell_min_bias": 0.3,  # min |bias| (<0) required to allow a new sell
     "sim_buy_fill_rate_pct": 80.0,       # base simulated BUY fill probability (%); adjusted by top-of-book queue size
     "sim_sell_fill_rate_pct": 90.0,      # base simulated SELL fill probability (%); adjusted by top-of-book queue size
     "auto_trade_buy_price_offset_mode": "percent",   # percent | dollar
@@ -427,6 +431,9 @@ async def _load_settings_from_db() -> None:
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.25) or 0.25)
             _settings["pending_cancel_after_bars"] = int(max(0, getattr(row, "pending_cancel_after_bars", 3) or 3))
             _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 80.0) or 0.0)))
+            _settings["bar_predictor_enabled"] = bool(getattr(row, "bar_predictor_enabled", False))
+            _settings["bar_predictor_buy_min_bias"] = max(0.0, min(1.0, float(getattr(row, "bar_predictor_buy_min_bias", 0.3) or 0.0)))
+            _settings["bar_predictor_sell_min_bias"] = max(0.0, min(1.0, float(getattr(row, "bar_predictor_sell_min_bias", 0.3) or 0.0)))
             _settings["sim_sell_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_sell_fill_rate_pct", 90.0) or 0.0)))
             _buy_offset_mode = str(getattr(row, "auto_trade_buy_price_offset_mode", "percent") or "percent").strip().lower()
             _sell_offset_mode = str(getattr(row, "auto_trade_sell_price_offset_mode", "percent") or "percent").strip().lower()
@@ -561,6 +568,9 @@ async def _save_settings_to_db() -> None:
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.25)
         row.pending_cancel_after_bars = int(max(0, _settings.get("pending_cancel_after_bars", 3) or 3))
         row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 80.0) or 0.0)))
+        row.bar_predictor_enabled = bool(_settings.get("bar_predictor_enabled", False))
+        row.bar_predictor_buy_min_bias = max(0.0, min(1.0, float(_settings.get("bar_predictor_buy_min_bias", 0.3) or 0.0)))
+        row.bar_predictor_sell_min_bias = max(0.0, min(1.0, float(_settings.get("bar_predictor_sell_min_bias", 0.3) or 0.0)))
         row.sim_sell_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_sell_fill_rate_pct", 90.0) or 0.0)))
         row.auto_trade_buy_price_offset_mode = (
             "dollar" if str(_settings.get("auto_trade_buy_price_offset_mode", "percent")).strip().lower() == "dollar" else "percent"
@@ -603,7 +613,8 @@ def update_manager_settings(new: dict) -> dict:
               "auto_trade_buy_price_offset_mode", "auto_trade_sell_price_offset_mode",
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct",
               "sentiment_matrix_strategies", "sentiment_matrix_actions",
-              "pm_hold_duration_days", "pm_hold_duration_bars", "pm_hold_extended_multiplier", "pm_hold_trailing_pct"}
+              "pm_hold_duration_days", "pm_hold_duration_bars", "pm_hold_extended_multiplier", "pm_hold_trailing_pct",
+              "bar_predictor_enabled", "bar_predictor_buy_min_bias", "bar_predictor_sell_min_bias"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -771,6 +782,15 @@ async def _refresh_scores(symbols: list[str]) -> None:
             slot = (_state.get("bucket_debounce") or {}).get(bucket_key, {})
             candidate = slot.get("candidate")
             countdown = max(0, persistence - int(slot.get("count") or 0)) if candidate else 0
+            # Bar predictor bias (momentum confirmation)
+            bp_bias = 0.0
+            if _settings.get("bar_predictor_enabled", False):
+                try:
+                    from app.services.bar_predictor import compute_bar_predictor_bias
+                    bars_list = df.tail(30).rename(columns=str.title).to_dict("records")
+                    bp_bias = compute_bar_predictor_bias(bars_list)
+                except Exception:
+                    pass
             _state["scores"][sym] = {
                 "score": score,
                 "classification": cls,
@@ -779,6 +799,7 @@ async def _refresh_scores(symbols: list[str]) -> None:
                 "debounce_candidate": candidate,
                 "debounce_countdown": countdown,
                 "debounce_persistence": persistence,
+                "bar_predictor_bias": bp_bias,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
         except Exception as exc:
@@ -2180,7 +2201,7 @@ async def _cancel_bearish_pending_orders() -> None:
         market_score = float(_compute_market_classification().get("score", 0.0))
         ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
         drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.0))
-        pending_cancel_after_bars = max(1, int(_settings.get("pending_cancel_after_bars", 3) or 3))
+        pending_cancel_after_bars = max(0, int(_settings.get("pending_cancel_after_bars", 3) or 3))
         bar_minutes = _interval_to_minutes(str(_settings.get("sentiment_interval", "1m") or "1m"))
         pending_cancel_after_minutes = pending_cancel_after_bars * bar_minutes
         now_utc = datetime.now(timezone.utc)
@@ -2480,6 +2501,15 @@ async def _process_ib_engine_signals() -> None:
                 _log_ib_trigger(f"BUY blocked symbol={symbol} reason=score:{score:+.3f}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
+            # Bar predictor momentum gate
+            if _settings.get("bar_predictor_enabled", False):
+                bp_min = float(_settings.get("bar_predictor_buy_min_bias", 0.3))
+                bp_bias = float(_state.get("scores", {}).get(symbol, {}).get("bar_predictor_bias", 0.0))
+                if bp_bias < -bp_min:
+                    _log_activity(f"IB signal BUY blocked for {symbol}: bar_predictor_bias={bp_bias:.3f} < -{bp_min:.3f}")
+                    _log_ib_trigger(f"BUY blocked symbol={symbol} reason=bar_predictor:{bp_bias:.3f}")
+                    _ib_signal_last_processed_at[symbol] = process_key
+                    continue
             if ib_qty > 0 or symbol in pending_buy_symbols:
                 reason = "has_position" if ib_qty > 0 else "pending_buy"
                 _log_ib_trigger(f"BUY skipped symbol={symbol} reason={reason}")
@@ -2490,6 +2520,14 @@ async def _process_ib_engine_signals() -> None:
             _log_ib_trigger(f"BUY candidate queued symbol={symbol}")
 
         elif signal < 0:
+            if _settings.get("bar_predictor_enabled", False):
+                bp_min = float(_settings.get("bar_predictor_sell_min_bias", 0.3))
+                bp_bias = float(_state.get("scores", {}).get(symbol, {}).get("bar_predictor_bias", 0.0))
+                if bp_bias > -bp_min:
+                    _log_activity(f"IB signal SELL blocked for {symbol}: bar_predictor_bias={bp_bias:.3f} > -{bp_min:.3f}")
+                    _log_ib_trigger(f"SELL blocked symbol={symbol} reason=bar_predictor:{bp_bias:.3f}")
+                    _ib_signal_last_processed_at[symbol] = process_key
+                    continue
             if ib_qty <= 0 or symbol in pending_sell_symbols:
                 reason = "no_position" if ib_qty <= 0 else "pending_sell"
                 _log_ib_trigger(f"SELL skipped symbol={symbol} reason={reason}")

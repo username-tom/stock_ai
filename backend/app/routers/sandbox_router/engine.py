@@ -114,7 +114,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     stop_loss_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     take_profit_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     hold_positions_overnight: Optional[bool] = None
-    eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=1, le=480)
+    eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=0, le=480)
     eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=30)
     sentiment_data_points: Optional[int] = Field(default=None, ge=35, le=5000)
@@ -133,7 +133,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_long_sl_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     ai_tag_no_loss_sell: Optional[bool] = None
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
-    pending_cancel_after_bars: Optional[int] = Field(default=None, ge=1, le=120)
+    pending_cancel_after_bars: Optional[int] = Field(default=None, ge=0, le=120)
     sim_buy_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     auto_trade_buy_price_offset_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
@@ -143,6 +143,9 @@ class PortfolioManagerSettingsRequest(BaseModel):
     default_strategy_name: Optional[str] = None
     pm_hold_duration_bars: Optional[int] = Field(default=None, ge=0, le=50000)
     intraday_1m_template_params: Optional[dict[str, Any]] = None
+    bar_predictor_enabled: Optional[bool] = None
+    bar_predictor_buy_min_bias: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    bar_predictor_sell_min_bias: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     position_overrides: Optional[dict[str, dict[str, Any]]] = None
 
 

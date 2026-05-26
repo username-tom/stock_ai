@@ -1140,10 +1140,13 @@ async def run_sandbox_backtest_endpoint(
     sim_buy_fill_rate = float(pm.get("sim_buy_fill_rate_pct", 80.0) or 0.0)
     sim_sell_fill_rate = float(pm.get("sim_sell_fill_rate_pct", 90.0) or 0.0)
     pending_drift_cancel = float(pm.get("pending_price_drift_cancel_pct", 0.75) or 0.0)
-    pending_cancel_after_bars = int(max(1, pm.get("pending_cancel_after_bars", 3) or 3))
+    pending_cancel_after_bars = int(max(0, pm.get("pending_cancel_after_bars", 3) or 3))
     default_strategy_name = str(pm.get("default_strategy_name") or "template:intraday_1m_regime_template.py")
     intraday_1m_template_params = pm.get("intraday_1m_template_params") if isinstance(pm.get("intraday_1m_template_params"), dict) else {}
     position_overrides = pm.get("position_overrides") if isinstance(pm.get("position_overrides"), dict) else {}
+    bar_predictor_enabled = bool(pm.get("bar_predictor_enabled", False))
+    bar_predictor_buy_min_bias = float(pm.get("bar_predictor_buy_min_bias", 0.3) or 0.0)
+    bar_predictor_sell_min_bias = float(pm.get("bar_predictor_sell_min_bias", 0.3) or 0.0)
     if req.sim_buy_fill_rate_pct is not None:
         sim_buy_fill_rate = float(req.sim_buy_fill_rate_pct)
     if req.sim_sell_fill_rate_pct is not None:
@@ -1326,6 +1329,9 @@ async def run_sandbox_backtest_endpoint(
                 pending_price_drift_cancel_pct=pending_drift_cancel,
                 sim_pending_duration_bars=pending_cancel_after_bars,
                 intraday_1m_template_params=intraday_1m_template_params,
+                bar_predictor_enabled=bar_predictor_enabled,
+                bar_predictor_buy_min_bias=bar_predictor_buy_min_bias,
+                bar_predictor_sell_min_bias=bar_predictor_sell_min_bias,
             )
         except Exception as exc:
             logger.exception("Sandbox shared-pool backtest failed")
