@@ -12,6 +12,7 @@ import { getScripts, getHistory, getSandboxFundEvents, getTopOfBook } from '../.
 import { useAppSettings } from '../../hooks/useAppSettings'
 import StrategySelector from './StrategySelector'
 import TradeRow from './TradeRow'
+import NextBarPredictor from './NextBarPredictor'
 import CandlestickChart from '../charts/CandlestickChart'
 import SymbolDetailPanel from '../dashboard/SymbolDetailPanel'
 
@@ -405,6 +406,252 @@ export default function PositionDetail({
 
   const parsedCapValue = maxAllocValue === '' ? 0 : parseFloat(maxAllocValue)
   const capValueInvalid = Number.isNaN(parsedCapValue)
+  const strategyCard = (
+    <div className="card">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Strategy</h3>
+          {selectedPos.strategy_name && (
+            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold ${
+              selectedPos.strategy_enabled
+                ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/40'
+                : 'bg-slate-800 text-slate-500 border border-dark-500'
+            }`}>
+              <BoltIcon className="h-3 w-3" />
+              {selectedPos.strategy_enabled ? 'Engine ON' : 'Engine OFF'}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {selectedPos.strategy_name && (
+            <button
+              className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 font-semibold transition-colors disabled:opacity-50 ${
+                selectedPos.strategy_enabled
+                  ? 'bg-red-900/30 text-red-400 border border-red-700/40 hover:bg-red-900/50'
+                  : 'bg-emerald-900/30 text-emerald-400 border border-emerald-700/40 hover:bg-emerald-900/50'
+              }`}
+              onClick={() => toggleEngineMut.mutate(selectedSymbol)}
+              disabled={toggleEngineMut.isPending}
+            >
+              {selectedPos.strategy_enabled
+                ? <><StopCircleIcon className="h-3.5 w-3.5" />Stop Engine</>
+                : <><PlayIcon className="h-3.5 w-3.5" />Start Engine</>
+              }
+            </button>
+          )}
+          {!editingStrategy ? (
+            <button className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors" onClick={handleEditStratOpen}>
+              <PencilSquareIcon className="h-3.5 w-3.5" />{selectedPos.strategy_name ? 'Change' : 'Assign Strategy'}
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300" onClick={handleEditStratSave}><CheckIcon className="h-3.5 w-3.5" />Save</button>
+              <button className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300" onClick={() => setEditingStrategy(false)}><XMarkIcon className="h-3.5 w-3.5" />Cancel</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {editingStrategy ? (
+        <StrategySelector value={editStratType} scriptId={editScriptId} templateFilename={editTemplateFilename}
+          onStrategyChange={handleEditStratChange} onScriptChange={setEditScriptId}
+          onTemplateChange={setEditTemplateFilename}
+          stratParams={editStratParams}
+          onParamChange={(k, v) => setEditStratParams(p => ({ ...p, [k]: v }))}
+          symbol={selectedPos?.symbol} />
+      ) : (
+        <div className="space-y-3">
+          <div className="text-sm">
+            {selectedPos.strategy_name
+              ? <span className="text-blue-400 font-medium">
+                  {stratLabel(selectedPos.strategy_name.split(':')[0])}
+                  {getScriptName(selectedPos.strategy_name) && (
+                    <span className="text-slate-400 font-normal"> · {getScriptName(selectedPos.strategy_name)}</span>
+                  )}
+                </span>
+              : <span className="text-slate-600 italic">No strategy assigned</span>}
+          </div>
+          {selectedPos.strategy_name && (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                <div className="bg-dark-900/60 rounded-lg p-2.5 border border-dark-600">
+                  <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
+                    <BoltIcon className="h-3 w-3" />Last Signal
+                  </div>
+                  <div className={`text-sm font-bold ${
+                    selectedPos.last_signal === 1 ? 'text-emerald-400'
+                      : selectedPos.last_signal === -1 ? 'text-red-400'
+                      : 'text-slate-500'
+                  }`}>
+                    {selectedPos.last_signal === 1 ? '▲ BUY'
+                      : selectedPos.last_signal === -1 ? '▼ SELL'
+                      : selectedPos.last_signal === 0 ? '— HOLD'
+                      : '— None'}
+                  </div>
+                </div>
+                <div className="bg-dark-900/60 rounded-lg p-2.5 border border-dark-600">
+                  <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
+                    <ClockIcon className="h-3 w-3" />Last Run
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    {selectedPos.last_run_at ? new Date(selectedPos.last_run_at).toLocaleTimeString() : '—'}
+                  </div>
+                </div>
+                <div className="bg-dark-900/60 rounded-lg p-2.5 border border-dark-600">
+                  <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
+                    <SignalIcon className="h-3 w-3" />Engine Tick
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    {engineState?.last_tick ? new Date(engineState.last_tick).toLocaleTimeString() : '—'}
+                  </div>
+                </div>
+              </div>
+              {selectedPos.pending_shares > 0 && (
+                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30">
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs text-amber-400 font-semibold">Pending Order — awaiting fill</span>
+                    <div className="text-xs text-amber-300/70 mt-0.5">
+                      {selectedPos.pending_shares.toFixed(4)} sh @ ${selectedPos.pending_avg_cost?.toFixed(2)} avg cost
+                      {selectedPos.pending_since && (
+                        <span className="text-amber-400/50"> · placed {new Date(selectedPos.pending_since).toLocaleTimeString()}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {!isSimulated && pendingOrdersForSymbol.length > 0 && (
+                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30">
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs text-amber-400 font-semibold">Pending IB Order{pendingOrdersForSymbol.length > 1 ? 's' : ''} — awaiting broker update</span>
+                    <div className="text-xs text-amber-300/70 mt-0.5">
+                      {pendingOrdersForSymbol.length} open/pending snapshot{pendingOrdersForSymbol.length > 1 ? 's' : ''}
+                      {pendingOrdersForSymbol[0]?.limit_price != null
+                        ? ` · ${pendingOrdersForSymbol[0].side} @ $${Number(pendingOrdersForSymbol[0].limit_price).toFixed(2)}`
+                        : ''}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          {selectedPos.engine_error && (
+            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-900/20 border border-amber-700/30 text-xs text-amber-400">
+              <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0 mt-0.5" />
+              <span>{selectedPos.engine_error}</span>
+            </div>
+          )}
+          {selectedPos.strategy_enabled && (
+            <div className="flex items-center gap-2 text-xs">
+              {engineState?.market_active ? (
+                <>
+                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-emerald-400/80">Automated trading active — scans every 60 seconds</span>
+                </>
+              ) : (
+                <>
+                  <span className="inline-block w-2 h-2 rounded-full bg-slate-500" />
+                  <span className="text-slate-500">Engine paused — market closed (active 09:20–16:00 ET, Mon–Fri)</span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+  const topOfBookPanel = (
+    <div className="rounded-2xl border border-dark-600 bg-dark-900/55 p-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+            {ibMode ? 'IB Touch Book' : 'Simulated TOB'}
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">{bookSourceLabel}</div>
+        </div>
+        <div className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+          topOfBook?.source === 'ib_tob'
+            ? (isLiveBook ? 'border-emerald-700/40 text-emerald-300' : 'border-amber-700/40 text-amber-300')
+            : 'border-dark-500 text-slate-400'
+        }`}>
+          {topOfBook?.source === 'ib_tob'
+            ? (bookMarketDataLabel || (isLiveBook ? 'live' : 'ib'))
+            : 'derived'}
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2.5">
+        <div className="rounded-lg border border-emerald-800/30 bg-emerald-900/10 px-2.5 py-2.5">
+          <div className="text-[11px] uppercase tracking-wide text-emerald-300/80">Bid</div>
+          <div className="mt-1 text-lg font-semibold text-emerald-300">{formatBookPrice(bookBid)}</div>
+          <div className="text-[11px] text-emerald-200/60">Size {formatBookSize(bookBidSize)}</div>
+        </div>
+        <div className="rounded-lg border border-red-800/30 bg-red-900/10 px-2.5 py-2.5">
+          <div className="text-[11px] uppercase tracking-wide text-red-300/80">Ask</div>
+          <div className="mt-1 text-lg font-semibold text-red-300">{formatBookPrice(bookAsk)}</div>
+          <div className="text-[11px] text-red-200/60">Size {formatBookSize(bookAskSize)}</div>
+        </div>
+        <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-2.5 py-2.5">
+          <div className="text-[11px] uppercase tracking-wide text-slate-500">Mid</div>
+          <div className="mt-1 text-sm font-semibold text-slate-200">{formatBookPrice(bookMid)}</div>
+          <div className="text-[11px] text-slate-500">Micro {formatBookPrice(bookMicroprice)}</div>
+        </div>
+        <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-2.5 py-2.5">
+          <div className="text-[11px] uppercase tracking-wide text-slate-500">Spread</div>
+          <div className="mt-1 text-sm font-semibold text-slate-200">{Number.isFinite(bookSpread) ? `$${bookSpread.toFixed(4)}` : '—'}</div>
+          <div className="text-[11px] text-slate-500">
+            {Number.isFinite(bookSpreadBps)
+              ? `${bookSpreadBps.toFixed(1)} bps | ${spreadPctOfMid != null ? `${spreadPctOfMid.toFixed(3)}% mid` : '—'}`
+              : (spreadPctOfMid != null ? `${spreadPctOfMid.toFixed(3)}% mid` : '—')}
+          </div>
+        </div>
+      </div>
+      <div className="mt-2.5 grid gap-2.5 sm:grid-cols-2">
+        <div className="rounded-lg border border-sky-800/30 bg-sky-900/10 px-2.5 py-2.5">
+          <div className="text-[11px] uppercase tracking-wide text-sky-300/80">
+            {tradeForm.side === 'BUY' ? 'Buy Touch' : 'Sell Touch'}
+          </div>
+          <div className="mt-1 text-base font-semibold text-sky-200">{formatBookPrice(bookTouchPrice)}</div>
+          <div className="text-[11px] text-sky-200/60">
+            {Number.isFinite(selectedPrice) && Number.isFinite(bookTouchPrice)
+              ? `${tradeForm.side === 'BUY' ? '+' : ''}${(bookTouchPrice - selectedPrice).toFixed(2)} vs last ${formatBookPrice(selectedPrice)}`
+              : 'Touch price unavailable'}
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-sky-100/70">
+            <div>
+              <div className="uppercase tracking-wide text-sky-300/70">Touch bps</div>
+              <div>{Number.isFinite(touchVsSelectedBps) ? `${touchVsSelectedBps >= 0 ? '+' : ''}${touchVsSelectedBps.toFixed(1)} bps` : '—'}</div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wide text-sky-300/70">Order notional</div>
+              <div>{Number.isFinite(touchValue) && touchValue > 0 ? fmtMoney(touchValue) : '—'}</div>
+            </div>
+          </div>
+        </div>
+        <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-2.5 py-2.5">
+          <div className="text-[11px] uppercase tracking-wide text-slate-500">Last / micro drift</div>
+          <div className="mt-1 text-sm font-semibold text-slate-200">{formatBookPrice(bookLastPrice)}</div>
+          <div className="text-[11px] text-slate-500">{Number.isFinite(microVsMidBps) ? `${microVsMidBps >= 0 ? '+' : ''}${microVsMidBps.toFixed(1)} bps micro vs mid` : '—'}</div>
+        </div>
+        <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-2.5 py-2.5 sm:col-span-2">
+          <div className="text-[11px] uppercase tracking-wide text-slate-500">Queue imbalance</div>
+          <div className="mt-1 text-sm font-semibold text-slate-200">{simulatedBookPressure != null ? `${simulatedBookPressure >= 0 ? '+' : ''}${simulatedBookPressure.toFixed(1)}%` : '—'}</div>
+          <div className="text-[11px] text-slate-500">Bid {formatBookSize(bookBidSize)} vs ask {formatBookSize(bookAskSize)}</div>
+        </div>
+      </div>
+      <div className="mt-2.5 grid gap-2 text-[11px] text-slate-500 sm:grid-cols-2">
+        <div className="rounded-md border border-dark-600 bg-dark-900/70 px-2.5 py-1.5">{bookUpdatedLabel}</div>
+        <div className="rounded-md border border-dark-600 bg-dark-900/70 px-2.5 py-1.5 sm:text-right">
+          {topOfBook?.source === 'ib_tob' ? `IB ${bookMarketDataLabel || 'feed'}` : (simulatedBookPressure != null ? `${simulatedBookPressure >= 0 ? '+' : ''}${simulatedBookPressure.toFixed(1)}% bid tilt` : '—')}
+        </div>
+      </div>
+      {!ibMode && quote && (
+        <div className="mt-2 text-[11px] text-slate-600">
+          Derived from last {formatBookPrice(Number(quote.last_price))}, range {formatBookPrice(Number(quote.day_low))} to {formatBookPrice(Number(quote.day_high))}, vol {quote.volume != null ? Number(quote.volume).toLocaleString() : '—'}.
+        </div>
+      )}
+    </div>
+  )
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Top section */}
@@ -542,10 +789,10 @@ export default function PositionDetail({
         </div>
 
         {/* Main content row: SymbolDetailPanel left, rest right */}
-        <div className="flex flex-row gap-6 mt-6 min-h-0">
-          {/* Symbol detail left - fill vertical space */}
-          <div className="w-full max-w-xs flex-shrink-0 flex flex-col min-h-0">
-            <div className="flex-1 min-h-0">
+        <div className="flex flex-row items-start gap-6 mt-6 min-h-0">
+          {/* Symbol detail left */}
+          <div className="w-full max-w-xs flex-shrink-0 space-y-6">
+            <div>
               <SymbolDetailPanel
                 symbol={selectedSymbol}
                 quoteData={quotes[selectedSymbol] ?? null}
@@ -553,6 +800,9 @@ export default function PositionDetail({
                 ownedShares={selectedPos?.shares ?? null}
                 averagePrice={selectedPos?.avg_cost ?? null}
               />
+            </div>
+            <div>
+              {strategyCard}
             </div>
           </div>
           {/* Right side: chart, strategy, trade */}
@@ -582,378 +832,169 @@ export default function PositionDetail({
             </div>
             {/* Trade card */}
             <div className="card">
-        <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">Place Trade</h3>
-        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-          <div className="min-w-0 flex-1">
-            <form onSubmit={handleTrade} className="space-y-3">
-              <div className="flex flex-wrap gap-3 items-end">
+              <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
                 <div>
-                  <label className="label">Side</label>
-                  <div className="flex rounded-lg overflow-hidden border border-dark-500">
-                    {['BUY', 'SELL'].map(s => (
-                      <button key={s} type="button" onClick={() => setTradeForm(f => ({ ...f, side: s }))}
-                        className={`px-4 py-2 text-sm font-semibold transition-colors ${tradeForm.side === s ? (s === 'BUY' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white') : 'bg-dark-800 text-slate-400 hover:text-slate-200'}`}>
-                        {s}
-                      </button>
-                    ))}
-                  </div>
+                  <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Trade Flow</h3>
+                  <div className="mt-1 text-[11px] text-slate-500">Compact trade controls and touch-book on the left, live predictive flow on the right.</div>
                 </div>
-                <div>
-                  <label className="label">Quantity</label>
-                  <div className="flex items-center gap-1">
-                    <input className="input w-28" type="number" min="0.0001" step="0.0001" placeholder="Shares"
-                      value={tradeForm.quantity} onChange={e => setTradeForm(f => ({ ...f, quantity: e.target.value }))} required />
-                    {tradeForm.side === 'BUY' && totalBuyableCash > 0 && (
-                      <button type="button" title={`Max shares from ${fmtMoney(totalBuyableCash)} (position: ${fmtMoney(positionCashRemaining)} + available: ${fmtMoney(accountAvailable)})`}
-                        className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-800/40 rounded px-1.5 py-1 whitespace-nowrap"
-                        onClick={fillMaxShares}>Max</button>
-                    )}
-                    {tradeForm.side === 'SELL' && selectedPos?.shares > 0 && (
-                      <button type="button" title={`Sell all ${selectedPos.shares} shares`}
-                        className="text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded px-1.5 py-1 whitespace-nowrap"
-                        onClick={fillMaxSellShares}>Max</button>
-                    )}
-                  </div>
+                <div className="rounded-full border border-dark-500 bg-dark-900/60 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                  {tradeForm.side} {selectedSymbol}
                 </div>
-                <div>
-                  <label className="label">Price ($)</label>
-                  <div className="flex items-center gap-2">
-                    <input className="input w-28 shrink-0" type="number" step="0.01"
-                      value={priceInputValue} onChange={e => setTradeForm(f => ({ ...f, price: e.target.value }))} />
-                    {openOrdersPriceHelperEnabled && !!openOrderPriceLevels.length && (
-                      <div className="flex items-center rounded-lg border border-dark-500 overflow-hidden">
-                        <button
-                          type="button"
-                          className="px-2 py-2 text-slate-400 hover:text-slate-200 hover:bg-dark-700"
-                          onClick={() => stepOpenOrderPrice(1)}
-                          title="Step up through open-order prices"
-                        >
-                          ▲
-                        </button>
-                        <button
-                          type="button"
-                          className="px-2 py-2 border-l border-dark-500 text-slate-400 hover:text-slate-200 hover:bg-dark-700"
-                          onClick={() => stepOpenOrderPrice(-1)}
-                          title="Step down through open-order prices"
-                        >
-                          ▼
-                        </button>
+              </div>
+              <div className="grid gap-4 xl:grid-cols-[22rem_minmax(0,1fr)] xl:items-start">
+                <div className="space-y-4">
+                  <div className="rounded-2xl border border-dark-600 bg-dark-900/60 p-4">
+                  <form onSubmit={handleTrade} className="grid grid-cols-[minmax(0,1fr)_3.5rem] gap-3">
+                    <div className="space-y-3">
+                      <div>
+                        <label className="label">Side</label>
+                        <div className="grid grid-cols-2 rounded-lg overflow-hidden border border-dark-500">
+                          {['BUY', 'SELL'].map(s => (
+                            <button key={s} type="button" onClick={() => setTradeForm(f => ({ ...f, side: s }))}
+                              className={`px-4 py-2 text-sm font-semibold transition-colors ${tradeForm.side === s ? (s === 'BUY' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white') : 'bg-dark-800 text-slate-400 hover:text-slate-200'}`}>
+                              {s}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    )}
-                    <button
-                      type="button"
-                      onClick={resetTradePrice}
-                      className="inline-flex items-center justify-center rounded-lg border border-dark-500 bg-dark-800 px-2 py-2 text-slate-400 transition-colors hover:text-slate-200 hover:border-dark-400"
-                      title="Reset to current price"
-                      aria-label="Reset price to current value"
-                    >
-                      <ArrowPathIcon className="h-4 w-4" />
-                    </button>
-                  </div>
-                  {openOrdersPriceHelperEnabled && !!openOrderPriceLevels.length && (
-                    <div className="mt-1">
-                      <select
-                        className="input text-xs py-1.5 w-56"
-                        value=""
-                        onChange={e => {
-                          const v = e.target.value
-                          if (v) pickOpenOrderPrice(v)
-                          e.target.value = ''
-                        }}
-                      >
-                        <option value="">Select from open order levels…</option>
-                        {openOrderPriceLevels.map(row => (
-                          <option key={`${row.side}-${row.price.toFixed(2)}`} value={row.price.toFixed(2)}>
-                            {row.side} {row.price.toFixed(2)} · rem {row.remaining.toFixed(2)} / {row.quantity.toFixed(2)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                </div>
-                <div>
-                  <div>
-                    {hasDayRange && (
-                      <input
-                        className="h-2 w-40 cursor-pointer accent-sky-500"
-                        type="range"
-                        min={dayLow}
-                        max={dayHigh}
-                        step="0.01"
-                        value={sliderPrice ?? dayLow}
-                        onChange={e => setTradeForm(f => ({ ...f, price: Number.parseFloat(e.target.value).toFixed(2) }))}
-                        aria-label="Price within day range"
-                      />
-                    )}
-                  </div>
-                  {hasDayRange && (
-                    <div className="mt-1 flex justify-between text-[10px] text-slate-500 font-mono">
-                      <span>${dayLow.toFixed(2)}</span>
-                      <span>${dayHigh.toFixed(2)}</span>
-                    </div>
-                  )}
-                </div>
-                <button type="submit" disabled={tradeMut.isPending || !tradeForm.quantity}
-                  className={`flex items-center gap-2 px-5 py-2 rounded-lg font-semibold text-sm transition-colors disabled:opacity-50 ${tradeForm.side === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'}`}>
-                  {tradeForm.side === 'BUY' ? <ArrowUpIcon className="h-4 w-4" /> : <ArrowDownIcon className="h-4 w-4" />}
-                  {tradeMut.isPending ? 'Placing…' : `${tradeForm.side} ${tradeForm.quantity || ''} ${selectedSymbol}`}
-                </button>
-              </div>
-              <div className="w-full">
-                <label className="label">Reason</label>
-                <input className="input w-full" placeholder="manual"
-                  value={tradeForm.reason} onChange={e => setTradeForm(f => ({ ...f, reason: e.target.value }))} />
-              </div>
-            </form>
-            {tradeMsg && (
-              <div className={`mt-3 flex items-start justify-between gap-2 p-3 rounded-lg text-sm border ${tradeMsg.type === 'success' ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400' : 'bg-red-900/20 border-red-700/30 text-red-400'}`}>
-                <span>{tradeMsg.text}</span>
-                <button onClick={() => setTradeMsg(null)} className="text-slate-500 hover:text-slate-300 flex-shrink-0"><XMarkIcon className="h-4 w-4" /></button>
-              </div>
-            )}
-          </div>
-          <div className="w-full xl:max-w-xs xl:min-w-[18rem] rounded-xl border border-dark-600 bg-dark-900/50 p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-300">
-                  {ibMode ? 'IB Touch Book' : 'Simulated TOB'}
-                </div>
-                <div className="mt-1 text-[11px] text-slate-500">{bookSourceLabel}</div>
-              </div>
-              <div className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-                topOfBook?.source === 'ib_tob'
-                  ? (isLiveBook ? 'border-emerald-700/40 text-emerald-300' : 'border-amber-700/40 text-amber-300')
-                  : 'border-dark-500 text-slate-400'
-              }`}>
-                {topOfBook?.source === 'ib_tob'
-                  ? (bookMarketDataLabel || (isLiveBook ? 'live' : 'ib'))
-                  : 'derived'}
-              </div>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <div className="rounded-lg border border-emerald-800/30 bg-emerald-900/10 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-emerald-300/80">Bid</div>
-                <div className="mt-1 text-lg font-semibold text-emerald-300">{formatBookPrice(bookBid)}</div>
-                <div className="text-[11px] text-emerald-200/60">Size {formatBookSize(bookBidSize)}</div>
-              </div>
-              <div className="rounded-lg border border-red-800/30 bg-red-900/10 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-red-300/80">Ask</div>
-                <div className="mt-1 text-lg font-semibold text-red-300">{formatBookPrice(bookAsk)}</div>
-                <div className="text-[11px] text-red-200/60">Size {formatBookSize(bookAskSize)}</div>
-              </div>
-              <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Mid</div>
-                <div className="mt-1 text-sm font-semibold text-slate-200">{formatBookPrice(bookMid)}</div>
-                <div className="text-[11px] text-slate-500">Micro {formatBookPrice(bookMicroprice)}</div>
-              </div>
-              <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Spread</div>
-                <div className="mt-1 text-sm font-semibold text-slate-200">{Number.isFinite(bookSpread) ? `$${bookSpread.toFixed(4)}` : '—'}</div>
-                <div className="text-[11px] text-slate-500">
-                  {Number.isFinite(bookSpreadBps)
-                    ? `${bookSpreadBps.toFixed(1)} bps · ${spreadPctOfMid != null ? `${spreadPctOfMid.toFixed(3)}% of mid` : '—'}`
-                    : (spreadPctOfMid != null ? `${spreadPctOfMid.toFixed(3)}% of mid` : '—')}
-                </div>
-              </div>
-            </div>
-            <div className="mt-3 rounded-lg border border-sky-800/30 bg-sky-900/10 px-3 py-2">
-              <div className="text-[11px] uppercase tracking-wide text-sky-300/80">
-                {tradeForm.side === 'BUY' ? 'Buy Touch' : 'Sell Touch'}
-              </div>
-              <div className="mt-1 text-base font-semibold text-sky-200">{formatBookPrice(bookTouchPrice)}</div>
-              <div className="text-[11px] text-sky-200/60">
-                {Number.isFinite(selectedPrice) && Number.isFinite(bookTouchPrice)
-                  ? `${tradeForm.side === 'BUY' ? '+' : ''}${(bookTouchPrice - selectedPrice).toFixed(2)} vs last ${formatBookPrice(selectedPrice)}`
-                  : 'Touch price unavailable'}
-              </div>
-              <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-sky-100/70">
-                <div>
-                  <div className="uppercase tracking-wide text-sky-300/70">Touch bps</div>
-                  <div>{Number.isFinite(touchVsSelectedBps) ? `${touchVsSelectedBps >= 0 ? '+' : ''}${touchVsSelectedBps.toFixed(1)} bps` : '—'}</div>
-                </div>
-                <div>
-                  <div className="uppercase tracking-wide text-sky-300/70">Order notional</div>
-                  <div>{Number.isFinite(touchValue) && touchValue > 0 ? fmtMoney(touchValue) : '—'}</div>
-                </div>
-              </div>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Last / micro drift</div>
-                <div className="mt-1 text-sm font-semibold text-slate-200">{formatBookPrice(bookLastPrice)}</div>
-                <div className="text-[11px] text-slate-500">{Number.isFinite(microVsMidBps) ? `${microVsMidBps >= 0 ? '+' : ''}${microVsMidBps.toFixed(1)} bps micro vs mid` : '—'}</div>
-              </div>
-              <div className="rounded-lg border border-dark-600 bg-dark-800/70 px-3 py-2">
-                <div className="text-[11px] uppercase tracking-wide text-slate-500">Queue imbalance</div>
-                <div className="mt-1 text-sm font-semibold text-slate-200">{simulatedBookPressure != null ? `${simulatedBookPressure >= 0 ? '+' : ''}${simulatedBookPressure.toFixed(1)}%` : '—'}</div>
-                <div className="text-[11px] text-slate-500">Bid {formatBookSize(bookBidSize)} vs ask {formatBookSize(bookAskSize)}</div>
-              </div>
-            </div>
-            <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500">
-              <span>{bookUpdatedLabel}</span>
-              <span>{topOfBook?.source === 'ib_tob' ? `IB ${bookMarketDataLabel || 'feed'}` : (simulatedBookPressure != null ? `${simulatedBookPressure >= 0 ? '+' : ''}${simulatedBookPressure.toFixed(1)}% bid tilt` : '—')}</span>
-            </div>
-            {!ibMode && quote && (
-              <div className="mt-2 text-[11px] text-slate-600">
-                Derived from last {formatBookPrice(Number(quote.last_price))}, day range {formatBookPrice(Number(quote.day_low))} - {formatBookPrice(Number(quote.day_high))}, and volume {quote.volume != null ? Number(quote.volume).toLocaleString() : '—'}.
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
 
-            {/* Strategy card */}
-            <div className="card">
-        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-          <div className="flex items-center gap-2">
-            <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider">Strategy</h3>
-            {selectedPos.strategy_name && (
-              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold ${
-                selectedPos.strategy_enabled
-                  ? 'bg-emerald-900/40 text-emerald-400 border border-emerald-700/40'
-                  : 'bg-slate-800 text-slate-500 border border-dark-500'
-              }`}>
-                <BoltIcon className="h-3 w-3" />
-                {selectedPos.strategy_enabled ? 'Engine ON' : 'Engine OFF'}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {selectedPos.strategy_name && (
-              <button
-                className={`flex items-center gap-1.5 text-xs rounded-lg px-3 py-1.5 font-semibold transition-colors disabled:opacity-50 ${
-                  selectedPos.strategy_enabled
-                    ? 'bg-red-900/30 text-red-400 border border-red-700/40 hover:bg-red-900/50'
-                    : 'bg-emerald-900/30 text-emerald-400 border border-emerald-700/40 hover:bg-emerald-900/50'
-                }`}
-                onClick={() => toggleEngineMut.mutate(selectedSymbol)}
-                disabled={toggleEngineMut.isPending}
-              >
-                {selectedPos.strategy_enabled
-                  ? <><StopCircleIcon className="h-3.5 w-3.5" />Stop Engine</>
-                  : <><PlayIcon className="h-3.5 w-3.5" />Start Engine</>
-                }
-              </button>
-            )}
-            {!editingStrategy ? (
-              <button className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors" onClick={handleEditStratOpen}>
-                <PencilSquareIcon className="h-3.5 w-3.5" />{selectedPos.strategy_name ? 'Change' : 'Assign Strategy'}
-              </button>
-            ) : (
-              <div className="flex items-center gap-2">
-                <button className="flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300" onClick={handleEditStratSave}><CheckIcon className="h-3.5 w-3.5" />Save</button>
-                <button className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300" onClick={() => setEditingStrategy(false)}><XMarkIcon className="h-3.5 w-3.5" />Cancel</button>
-              </div>
-            )}
-          </div>
-        </div>
+                      <div>
+                        <label className="label">Quantity</label>
+                        <div className="flex items-center gap-2">
+                          <input className="input w-full" type="number" min="0.0001" step="0.0001" placeholder="Shares"
+                            value={tradeForm.quantity} onChange={e => setTradeForm(f => ({ ...f, quantity: e.target.value }))} required />
+                          {tradeForm.side === 'BUY' && totalBuyableCash > 0 && (
+                            <button type="button" title={`Max shares from ${fmtMoney(totalBuyableCash)} (position: ${fmtMoney(positionCashRemaining)} + available: ${fmtMoney(accountAvailable)})`}
+                              className="text-xs text-emerald-400 hover:text-emerald-300 border border-emerald-800/40 rounded px-2 py-2 whitespace-nowrap"
+                              onClick={fillMaxShares}>Max</button>
+                          )}
+                          {tradeForm.side === 'SELL' && selectedPos?.shares > 0 && (
+                            <button type="button" title={`Sell all ${selectedPos.shares} shares`}
+                              className="text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded px-2 py-2 whitespace-nowrap"
+                              onClick={fillMaxSellShares}>Max</button>
+                          )}
+                        </div>
+                      </div>
 
-        {editingStrategy ? (
-          <StrategySelector value={editStratType} scriptId={editScriptId} templateFilename={editTemplateFilename}
-            onStrategyChange={handleEditStratChange} onScriptChange={setEditScriptId}
-            onTemplateChange={setEditTemplateFilename}
-            stratParams={editStratParams}
-            onParamChange={(k, v) => setEditStratParams(p => ({ ...p, [k]: v }))}
-            symbol={selectedPos?.symbol} />
-        ) : (
-          <div className="space-y-3">
-            <div className="text-sm">
-              {selectedPos.strategy_name
-                ? <span className="text-blue-400 font-medium">
-                    {stratLabel(selectedPos.strategy_name.split(':')[0])}
-                    {getScriptName(selectedPos.strategy_name) && (
-                      <span className="text-slate-400 font-normal"> · {getScriptName(selectedPos.strategy_name)}</span>
-                    )}
-                  </span>
-                : <span className="text-slate-600 italic">No strategy assigned</span>}
-            </div>
-            {selectedPos.strategy_name && (
-              <><div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                <div className="bg-dark-900/60 rounded-lg p-2.5 border border-dark-600">
-                  <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
-                    <BoltIcon className="h-3 w-3" />Last Signal
-                  </div>
-                  <div className={`text-sm font-bold ${
-                    selectedPos.last_signal === 1 ? 'text-emerald-400'
-                      : selectedPos.last_signal === -1 ? 'text-red-400'
-                      : 'text-slate-500'
-                  }`}>
-                    {selectedPos.last_signal === 1 ? '▲ BUY'
-                      : selectedPos.last_signal === -1 ? '▼ SELL'
-                      : selectedPos.last_signal === 0 ? '— HOLD'
-                      : '— None'}
-                  </div>
-                </div>
-                <div className="bg-dark-900/60 rounded-lg p-2.5 border border-dark-600">
-                  <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
-                    <ClockIcon className="h-3 w-3" />Last Run
-                  </div>
-                  <div className="text-xs text-slate-400">
-                    {selectedPos.last_run_at ? new Date(selectedPos.last_run_at).toLocaleTimeString() : '—'}
-                  </div>
-                </div>
-                <div className="bg-dark-900/60 rounded-lg p-2.5 border border-dark-600">
-                  <div className="text-xs text-slate-500 mb-1 flex items-center gap-1">
-                    <SignalIcon className="h-3 w-3" />Engine Tick
-                  </div>
-                  <div className="text-xs text-slate-400">
-                    {engineState?.last_tick ? new Date(engineState.last_tick).toLocaleTimeString() : '—'}
-                  </div>
-                </div>
-              </div>
-              {selectedPos.pending_shares > 0 && (
-                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30">
-                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <span className="text-xs text-amber-400 font-semibold">Pending Order — awaiting fill</span>
-                    <div className="text-xs text-amber-300/70 mt-0.5">
-                      {selectedPos.pending_shares.toFixed(4)} sh @ ${selectedPos.pending_avg_cost?.toFixed(2)} avg cost
-                      {selectedPos.pending_since && (
-                        <span className="text-amber-400/50"> · placed {new Date(selectedPos.pending_since).toLocaleTimeString()}</span>
+                      <div>
+                        <label className="label">Price ($)</label>
+                        <div className="flex items-center gap-2">
+                          <input className="input w-full" type="number" step="0.01"
+                            value={priceInputValue} onChange={e => setTradeForm(f => ({ ...f, price: e.target.value }))} />
+                          {openOrdersPriceHelperEnabled && !!openOrderPriceLevels.length && (
+                            <div className="flex items-center rounded-lg border border-dark-500 overflow-hidden">
+                              <button
+                                type="button"
+                                className="px-2 py-2 text-slate-400 hover:text-slate-200 hover:bg-dark-700"
+                                onClick={() => stepOpenOrderPrice(1)}
+                                title="Step up through open-order prices"
+                              >
+                                ▲
+                              </button>
+                              <button
+                                type="button"
+                                className="px-2 py-2 border-l border-dark-500 text-slate-400 hover:text-slate-200 hover:bg-dark-700"
+                                onClick={() => stepOpenOrderPrice(-1)}
+                                title="Step down through open-order prices"
+                              >
+                                ▼
+                              </button>
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={resetTradePrice}
+                            className="inline-flex items-center justify-center rounded-lg border border-dark-500 bg-dark-800 px-2 py-2 text-slate-400 transition-colors hover:text-slate-200 hover:border-dark-400"
+                            title="Reset to current price"
+                            aria-label="Reset price to current value"
+                          >
+                            <ArrowPathIcon className="h-4 w-4" />
+                          </button>
+                        </div>
+                        {openOrdersPriceHelperEnabled && !!openOrderPriceLevels.length && (
+                          <div className="mt-2">
+                            <select
+                              className="input text-xs py-1.5 w-full"
+                              value=""
+                              onChange={e => {
+                                const v = e.target.value
+                                if (v) pickOpenOrderPrice(v)
+                                e.target.value = ''
+                              }}
+                            >
+                              <option value="">Select from open order levels…</option>
+                              {openOrderPriceLevels.map(row => (
+                                <option key={`${row.side}-${row.price.toFixed(2)}`} value={row.price.toFixed(2)}>
+                                  {row.side} {row.price.toFixed(2)} · rem {row.remaining.toFixed(2)} / {row.quantity.toFixed(2)}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="label">Reason</label>
+                        <input className="input w-full" placeholder="manual"
+                          value={tradeForm.reason} onChange={e => setTradeForm(f => ({ ...f, reason: e.target.value }))} />
+                      </div>
+
+                      <button type="submit" disabled={tradeMut.isPending || !tradeForm.quantity}
+                        className={`flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-colors disabled:opacity-50 ${tradeForm.side === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-red-600 hover:bg-red-500 text-white'}`}>
+                        {tradeForm.side === 'BUY' ? <ArrowUpIcon className="h-4 w-4" /> : <ArrowDownIcon className="h-4 w-4" />}
+                        {tradeMut.isPending ? 'Placing…' : `${tradeForm.side} ${tradeForm.quantity || ''} ${selectedSymbol}`}
+                      </button>
+                    </div>
+
+                    <div className="flex flex-col items-center rounded-xl border border-dark-600 bg-dark-950/60 px-2 py-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Range</div>
+                      {hasDayRange ? (
+                        <>
+                          <div className="mt-2 text-[10px] font-mono text-slate-400">${dayHigh.toFixed(2)}</div>
+                          <div className="my-2 flex-1 flex items-center">
+                            <input
+                              className="h-40 w-5 cursor-pointer accent-sky-500 [writing-mode:vertical-lr]"
+                              style={{ writingMode: 'vertical-lr', direction: 'rtl' }}
+                              type="range"
+                              min={dayLow}
+                              max={dayHigh}
+                              step="0.01"
+                              value={sliderPrice ?? dayLow}
+                              onChange={e => setTradeForm(f => ({ ...f, price: Number.parseFloat(e.target.value).toFixed(2) }))}
+                              aria-label="Price within day range"
+                            />
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-400">${dayLow.toFixed(2)}</div>
+                          <div className="mt-3 text-[10px] font-semibold text-sky-300">{Number.isFinite(sliderPrice) ? `$${sliderPrice.toFixed(2)}` : '—'}</div>
+                        </>
+                      ) : (
+                        <div className="mt-4 text-center text-[11px] text-slate-600">Waiting for intraday range</div>
                       )}
                     </div>
-                  </div>
-                </div>
-              )}
-              {!isSimulated && pendingOrdersForSymbol.length > 0 && (
-                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30">
-                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <span className="text-xs text-amber-400 font-semibold">Pending IB Order{pendingOrdersForSymbol.length > 1 ? 's' : ''} — awaiting broker update</span>
-                    <div className="text-xs text-amber-300/70 mt-0.5">
-                      {pendingOrdersForSymbol.length} open/pending snapshot{pendingOrdersForSymbol.length > 1 ? 's' : ''}
-                      {pendingOrdersForSymbol[0]?.limit_price != null
-                        ? ` · ${pendingOrdersForSymbol[0].side} @ $${Number(pendingOrdersForSymbol[0].limit_price).toFixed(2)}`
-                        : ''}
+                  </form>
+
+                  {tradeMsg && (
+                    <div className={`mt-3 flex items-start justify-between gap-2 rounded-lg border p-3 text-sm ${tradeMsg.type === 'success' ? 'bg-emerald-900/20 border-emerald-700/30 text-emerald-400' : 'bg-red-900/20 border-red-700/30 text-red-400'}`}>
+                      <span>{tradeMsg.text}</span>
+                      <button onClick={() => setTradeMsg(null)} className="text-slate-500 hover:text-slate-300 flex-shrink-0"><XMarkIcon className="h-4 w-4" /></button>
                     </div>
-                  </div>
+                  )}
                 </div>
-              )}
-            </>)}
-            {selectedPos.engine_error && (
-              <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-900/20 border border-amber-700/30 text-xs text-amber-400">
-                <ExclamationTriangleIcon className="h-4 w-4 flex-shrink-0 mt-0.5" />
-                <span>{selectedPos.engine_error}</span>
+
+                  {topOfBookPanel}
+                </div>
+
+                <div>
+                  <NextBarPredictor
+                    chartData={chartData}
+                    currentPrice={selectedPrice}
+                    symbol={selectedSymbol}
+                    topOfBook={topOfBook}
+                    refetchInterval={appSettings.portfolio_detail_ms}
+                  />
+                </div>
               </div>
-            )}
-            {selectedPos.strategy_enabled && (
-              <div className="flex items-center gap-2 text-xs">
-                {engineState?.market_active ? (
-                  <>
-                    <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span className="text-emerald-400/80">Automated trading active — scans every 60 seconds</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="inline-block w-2 h-2 rounded-full bg-slate-500" />
-                    <span className="text-slate-500">Engine paused — market closed (active 09:20–16:00 ET, Mon–Fri)</span>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+            </div>
 
     </div>
   </div>
