@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,8 +153,14 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/trades")
-async def get_trades(symbol: Optional[str] = None, limit: int = 200, db: AsyncSession = Depends(get_db)):
-    if ib_service.is_connected:
+async def get_trades(
+    symbol: Optional[str] = None,
+    limit: int = 200,
+    profile: Optional[str] = Query(default=None, pattern=r"^(simulated|paper|live)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    requested_profile = (profile or ("paper" if ib_service.is_connected else "simulated") or "simulated").lower()
+    if ib_service.is_connected and requested_profile != "simulated":
         return {"trades": [], "source": "ib"}
 
     q = select(SandboxTrade).order_by(SandboxTrade.created_at.desc()).limit(limit)

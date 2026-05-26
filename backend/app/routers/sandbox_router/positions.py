@@ -5,7 +5,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -45,8 +45,14 @@ def _should_force_engine_off_for_position(pos: SandboxPosition) -> bool:
 
 
 @router.get("/positions")
-async def get_positions(db: AsyncSession = Depends(get_db)):
-    if ib_service.is_connected:
+async def get_positions(
+    profile: Optional[str] = Query(default=None, pattern=r"^(simulated|paper|live)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    requested_profile = (profile or (settings.TRADING_MODE if ib_service.is_connected else "simulated") or "simulated").lower()
+    use_ib = requested_profile in {"paper", "live"} and ib_service.is_connected
+
+    if use_ib:
         from app.models.trade import Trade, TradingMode, OrderStatus
 
         raw_positions = await ib_service.get_positions()
@@ -57,7 +63,7 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
             if str(p.get("symbol") or "").strip()
         }
 
-        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        mode = requested_profile if requested_profile in {"paper", "live"} else "paper"
         trade_mode = TradingMode.LIVE if mode == "live" else TradingMode.PAPER
         pnl_res = await db.execute(
             select(Trade.symbol, Trade.pnl).where(
@@ -183,7 +189,7 @@ async def get_positions(db: AsyncSession = Depends(get_db)):
             insights = {}
         enriched = [{**p, **insights.get(p["symbol"], {})} for p in enriched]
 
-        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        mode = requested_profile if requested_profile in {"paper", "live"} else "paper"
         save_portfolio_state(mode, {
             "source": "ib",
             "mode": mode,

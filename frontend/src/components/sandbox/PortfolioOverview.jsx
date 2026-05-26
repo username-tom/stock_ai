@@ -123,6 +123,7 @@ export default function PortfolioOverview({
   realizedMetrics,
   allTrades = [],
   activities = [],
+  managerActivities = [],
   pmScores = {},
   managerSettings = null,
   onOpenManager = null,
@@ -132,6 +133,10 @@ export default function PortfolioOverview({
   const isSimulated = !ibMode
   const activeProfile = isSimulated ? 'simulated' : String(ibMode).toLowerCase()
   const priceColors = usePriceChangeTracking(quotes)
+  const recentPmActivities = useMemo(
+    () => (Array.isArray(managerActivities) ? managerActivities : []).slice(0, 8),
+    [managerActivities],
+  )
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
     queryFn: getSandboxFundEvents,
@@ -842,8 +847,8 @@ export default function PortfolioOverview({
       {/* Portfolio Manager Summary */}
       {managerSettings && (
         <div className="card border border-violet-800/30 bg-violet-950/10">
-          <div className="flex items-start justify-between gap-3">
-            <div>
+          <div className="flex items-start justify-between gap-4 flex-wrap xl:flex-nowrap">
+            <div className="min-w-0 flex-1">
               <h3 className="text-sm font-semibold text-violet-300">Portfolio Manager Summary</h3>
               <p className="text-xs text-slate-400 mt-1">
                 Automatically rebalances idle capital, refreshes sentiment scores, and can deploy available cash based on your manager rules.
@@ -868,6 +873,30 @@ export default function PortfolioOverview({
                 Open Manager
               </button>
             )}
+            <div className="w-full xl:w-[54%] min-w-0 rounded-xl border border-violet-800/30 bg-dark-950/60 p-3">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-violet-200">Recent Activities</h4>
+                <span className="text-[10px] text-slate-500">PM feed</span>
+              </div>
+              <div className="max-h-28 overflow-y-auto pr-1 space-y-1.5">
+                {recentPmActivities.length > 0 ? (
+                  recentPmActivities.map((entry, index) => (
+                    <div key={`${entry?.at ?? 'activity'}-${index}`} className="rounded-lg border border-dark-700 bg-dark-900/70 px-2.5 py-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-xs text-slate-200 leading-snug break-words">{entry?.msg ?? '—'}</p>
+                      </div>
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        {entry?.at ? new Date(entry.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="rounded-lg border border-dark-700 bg-dark-900/40 px-2.5 py-4 text-center text-xs text-slate-500">
+                    No PM activity yet.
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}

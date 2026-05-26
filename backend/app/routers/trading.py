@@ -28,6 +28,93 @@ logger = logging.getLogger(__name__)
 _SIM_AUTOMATION_PROFILE = "simulated_automation"
 
 
+async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) -> int:
+    """Best-effort reconciliation of stale IB pending trade rows.
+
+    Trade rows are written at submit-time and can remain PENDING if no later
+    endpoint mutates them. This checker uses current open orders + latest IB
+    callback statuses to mark rows FILLED/CANCELLED.
+    """
+    if not ib_service.is_connected:
+        return 0
+
+    pending = [
+        t
+        for t in trades
+        if t.status == OrderStatus.PENDING
+        and t.mode in {TradingMode.PAPER, TradingMode.LIVE}
+        and t.ib_order_id is not None
+    ]
+    if not pending:
+        return 0
+
+    active_statuses = {"PENDINGSUBMIT", "APIPENDING", "PRESUBMITTED", "SUBMITTED"}
+    cancelled_statuses = {"CANCELLED", "APICANCELLED", "INACTIVE"}
+
+    open_orders = await ib_service.get_open_orders()
+    open_status_by_id: dict[int, str] = {}
+    for order in open_orders:
+        oid = order.get("ib_order_id")
+        if oid is None:
+            continue
+        try:
+            open_status_by_id[int(oid)] = str(order.get("status") or "").upper()
+        except Exception:
+            continue
+
+    known_status_by_id = {
+        int(oid): str(status or "").upper()
+        for oid, status in ib_service.get_known_order_statuses().items()
+    }
+
+    symbol_qty: dict[str, float] = {}
+    try:
+        for row in await ib_service.get_positions():
+            sym = str(row.get("symbol") or "").upper()
+            if not sym:
+                continue
+            symbol_qty[sym] = float(row.get("quantity") or 0.0)
+    except Exception as exc:
+        logger.debug("Pending-trade reconciliation position lookup failed: %s", exc)
+
+    changed = 0
+    now_utc = datetime.now(timezone.utc)
+    for trade in pending:
+        oid = int(trade.ib_order_id)
+        open_status = open_status_by_id.get(oid)
+        known_status = known_status_by_id.get(oid, "")
+
+        final_status: OrderStatus | None = None
+        if open_status == "FILLED" or known_status == "FILLED":
+            final_status = OrderStatus.FILLED
+        elif open_status in cancelled_statuses or known_status in cancelled_statuses:
+            final_status = OrderStatus.CANCELLED
+        elif open_status in active_statuses or known_status in active_statuses:
+            final_status = None
+        else:
+            # Heuristic fallback when IB no longer reports the order:
+            # BUY likely filled if long position now exists.
+            # SELL likely filled if no long position remains.
+            sym = str(trade.symbol or "").upper()
+            qty = float(symbol_qty.get(sym, 0.0) or 0.0)
+            if trade.side == OrderSide.BUY and qty > 0.0:
+                final_status = OrderStatus.FILLED
+            elif trade.side == OrderSide.SELL and qty <= 0.0:
+                final_status = OrderStatus.FILLED
+
+        if final_status is None or trade.status == final_status:
+            continue
+
+        trade.status = final_status
+        if final_status == OrderStatus.FILLED and trade.filled_at is None:
+            trade.filled_at = now_utc
+        changed += 1
+
+    if changed:
+        await db.commit()
+    return changed
+
+
 async def _snapshot_ib_state(mode: str) -> None:
     if not ib_service.is_connected:
         return
@@ -464,6 +551,15 @@ async def trade_history(
             q = q.where(Trade.mode == TradingMode(mode_norm))
     result = await db.execute(q.order_by(Trade.created_at.desc()).limit(limit))
     trades = result.scalars().all()
+
+    # Keep IB activity/history views in sync with actual order state.
+    # This prevents stale PENDING rows from lingering in the UI when orders
+    # were filled/cancelled but no explicit mutation endpoint was called.
+    await _reconcile_pending_ib_trades(db, trades)
+
+    result = await db.execute(q.order_by(Trade.created_at.desc()).limit(limit))
+    trades = result.scalars().all()
+
     return {
         "trades": [
             {

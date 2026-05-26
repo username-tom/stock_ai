@@ -59,9 +59,15 @@ export default function TradingPanel() {
     refetchInterval: appSettings.trading_orders_ms,
   })
 
+  const isConnected = ibStatus?.connected
+  const currentMode = ibStatus?.mode ?? 'paper'
+  const historyMode = isConnected
+    ? (currentMode === 'live' ? 'LIVE' : 'PAPER')
+    : 'SIMULATED'
+
   const { data: histData, isLoading: histLoading, refetch: refetchHistory } = useQuery({
-    queryKey: ['trade-history'],
-    queryFn: () => getTradeHistory(50),
+    queryKey: ['trade-history', historyMode],
+    queryFn: () => getTradeHistory(50, historyMode),
   })
 
   const connectMut = useMutation({
@@ -83,7 +89,7 @@ export default function TradingPanel() {
     mutationFn: placeOrder,
     onSuccess: (data) => {
       setOrderMsg({ type: 'success', text: `Order placed — ID: ${data.id ?? data.ib_order_id}` })
-      qc.invalidateQueries({ queryKey: ['trade-history'] })
+      qc.invalidateQueries({ queryKey: ['trade-history', historyMode] })
       qc.invalidateQueries({ queryKey: ['ib-positions'] })
       qc.invalidateQueries({ queryKey: ['ib-orders'] })
     },
@@ -103,7 +109,7 @@ export default function TradingPanel() {
     onSuccess: (data) => {
       setOrderMsg({ type: 'success', text: `Cancel submitted for order #${data?.cancelled ?? 'unknown'}` })
       qc.invalidateQueries({ queryKey: ['ib-orders'] })
-      qc.invalidateQueries({ queryKey: ['trade-history'] })
+      qc.invalidateQueries({ queryKey: ['trade-history', historyMode] })
     },
     onError: (err) => {
       setOrderMsg({ type: 'error', text: err.response?.data?.detail || err.message })
@@ -137,8 +143,6 @@ export default function TradingPanel() {
     orderMut.mutate(payload)
   }
 
-  const isConnected = ibStatus?.connected
-  const currentMode = ibStatus?.mode ?? 'paper'
   const executionModeLabel = isConnected
     ? (currentMode === 'live' ? 'LIVE (IB API)' : 'PAPER (IB API)')
     : 'SIMULATED'

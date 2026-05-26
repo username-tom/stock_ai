@@ -189,13 +189,15 @@ export default function SandboxPanel() {
   const [bulkTemplateFilename, setBulkTemplateFilename] = useState(null)
   const [bulkStratParams, setBulkStratParams] = useState({})
   const [activeMainTab, setActiveMainTab] = useState('summary')
+  const [portfolioView, setPortfolioView] = useState('simulated')
 
   // IB status
   const { data: ibStatus } = useQuery({ queryKey: ['ib-status'], queryFn: getIBStatus, refetchInterval: appSettings.trading_status_ms })
   const ibConnected = ibStatus?.connected === true
   const ibSelectedMode = ibStatus?.mode ?? 'paper'
   const ibMode = ibConnected ? (ibStatus?.mode ?? 'paper') : null
-  const activeProfile = ibConnected ? (ibMode ?? 'paper') : 'simulated'
+  const activeProfile = ibConnected ? portfolioView : 'simulated'
+  const viewIbMode = activeProfile === 'simulated' ? null : activeProfile
   useEffect(() => { activeProfileRef.current = activeProfile }, [activeProfile])
   const { data: ibPositionsData } = useQuery({
     queryKey: ['ib-positions', ibMode ?? 'disconnected'],
@@ -213,13 +215,13 @@ export default function SandboxPanel() {
   // queries
   const { data: accountData, refetch: refetchAccount, isFetching: isAccountFetching } = useQuery({
     queryKey: ['sandbox-account', activeProfile],
-    queryFn: getSandboxAccount,
+    queryFn: () => getSandboxAccount(activeProfile),
     refetchInterval: appSettings.sandbox_account_ms,
     placeholderData: (prev) => prev,
   })
   const { data: posData, refetch: refetchPositions, isFetching: isPositionsFetching } = useQuery({
     queryKey: ['sandbox-positions', activeProfile],
-    queryFn: getSandboxPositions,
+    queryFn: () => getSandboxPositions(activeProfile),
     refetchInterval: appSettings.sandbox_account_ms,
     placeholderData: (prev) => prev,
   })
@@ -336,9 +338,9 @@ export default function SandboxPanel() {
   })
   const sectors = sectorsData ?? {}
   const { data: tradesData } = useQuery({
-    queryKey: ['sandbox-trades', selectedSymbol],
-    queryFn: () => getSandboxTrades(selectedSymbol),
-    enabled: !!selectedSymbol && !ibConnected,
+    queryKey: ['sandbox-trades', selectedSymbol, activeProfile],
+    queryFn: () => getSandboxTrades(selectedSymbol, 200, activeProfile),
+    enabled: !!selectedSymbol && activeProfile === 'simulated',
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const selectedPos = positions.find(p => p.symbol === selectedSymbol)
@@ -346,24 +348,24 @@ export default function SandboxPanel() {
 
   // portfolio calcs
   const totalEquity = useMemo(() => {
-    if (ibConnected && Number.isFinite(Number(accountData?.equity))) {
+    if (activeProfile !== 'simulated' && Number.isFinite(Number(accountData?.equity))) {
       return Number(accountData.equity)
     }
     return rawPositions.reduce((s, p) => s + (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares, 0)
-  }, [ibConnected, accountData?.equity, rawPositions, quotesData])
+  }, [activeProfile, accountData?.equity, rawPositions, quotesData])
   const totalRealizedPnl = useMemo(() => {
-    if (ibConnected && Number.isFinite(Number(accountData?.realized_pnl))) {
+    if (activeProfile !== 'simulated' && Number.isFinite(Number(accountData?.realized_pnl))) {
       return Number(accountData.realized_pnl)
     }
     return rawPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
-  }, [ibConnected, accountData?.realized_pnl, rawPositions])
+  }, [activeProfile, accountData?.realized_pnl, rawPositions])
 
   const totalUnrealizedPnl = useMemo(() => {
-    if (ibConnected && Number.isFinite(Number(accountData?.unrealized_pnl))) {
+    if (activeProfile !== 'simulated' && Number.isFinite(Number(accountData?.unrealized_pnl))) {
       return Number(accountData.unrealized_pnl)
     }
     return rawPositions.reduce((s, p) => s + ((getOwnedMarketPrice(p) ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
-  }, [ibConnected, accountData?.unrealized_pnl, rawPositions, quotesData])
+  }, [activeProfile, accountData?.unrealized_pnl, rawPositions, quotesData])
   const pieData = useMemo(() => {
     const active = rawPositions.filter((p) => {
       const shares = Number(p.shares ?? 0)
@@ -408,8 +410,8 @@ export default function SandboxPanel() {
 
   // all recent trades (for notification + activity log)
   const { data: allTradesData } = useQuery({
-    queryKey: ['sandbox-trades-all'],
-    queryFn: () => getSandboxTrades(undefined, 200),
+    queryKey: ['sandbox-trades-all', activeProfile],
+    queryFn: () => getSandboxTrades(undefined, 200, activeProfile),
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const allTrades = allTradesData?.trades ?? []
@@ -425,25 +427,30 @@ export default function SandboxPanel() {
   const ibTradeHistory = ibTradeHistoryData?.trades ?? []
 
   const latestNotifiableTrade = useMemo(() => {
-    if (ibConnected) {
+    if (activeProfile !== 'simulated') {
       const recentIbTrade = ibTradeHistory.find(t => String(t?.status ?? '').toUpperCase() !== 'CANCELLED')
       return recentIbTrade ?? ibTradeHistory[0] ?? null
     }
     return engineTrades[0] ?? null
-  }, [ibConnected, ibTradeHistory, engineTrades])
+  }, [activeProfile, ibTradeHistory, engineTrades])
 
-  // Use IB history when connected, sandbox trades when simulated
-  const activeTrades = ibConnected ? ibTradeHistory : allTrades
+  // Use IB history when viewing IB, sandbox trades when viewing simulated
+  const activeTrades = activeProfile === 'simulated' ? allTrades : ibTradeHistory
   // Per-symbol trades: IB history filtered by symbol, or sandbox trades
-  const trades = ibConnected
-    ? ibTradeHistory.filter(t => t.symbol === selectedSymbol)
-    : (tradesData?.trades ?? [])
+  const trades = activeProfile === 'simulated'
+    ? (tradesData?.trades ?? [])
+    : ibTradeHistory.filter(t => t.symbol === selectedSymbol)
 
   // On first IB connect (or paper/live mode switch), clear sandbox activity state.
   useEffect(() => {
     const prev = prevIbSessionRef.current
     const switchedIntoIb = ibConnected && !prev.connected
     const switchedIbMode = ibConnected && prev.connected && ibMode !== prev.mode
+    if (!ibConnected) {
+      setPortfolioView('simulated')
+    } else if (switchedIntoIb || switchedIbMode) {
+      setPortfolioView(ibMode ?? 'paper')
+    }
     if (switchedIntoIb || switchedIbMode) {
       setActivities([])
       prevTradeIdRef.current = null
@@ -485,7 +492,7 @@ export default function SandboxPanel() {
       const firstSeen = tradeFirstSeenRef.current
       const tradeEntries = activeTrades
         .map(t => {
-          const profile = ibConnected ? (t.mode ?? 'PAPER').toLowerCase() : activeProfile
+          const profile = activeProfile === 'simulated' ? 'simulated' : (t.mode ?? activeProfile).toLowerCase()
           const status = String(t.status ?? '').toUpperCase()
           const isCancelled = status === 'CANCELLED'
           const createdTs = t.created_at ? new Date(t.created_at).getTime() : Number.NaN
@@ -496,7 +503,7 @@ export default function SandboxPanel() {
             firstSeen[fallbackKey] = Date.now()
           }
           const ts = Number.isFinite(createdTs) && createdTs > 0 ? createdTs : firstSeen[fallbackKey]
-          const sub = ibConnected
+          const sub = activeProfile !== 'simulated'
             ? buildIbTradeNote(t)
             : (t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined)
           return {
@@ -530,7 +537,7 @@ export default function SandboxPanel() {
         .sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
         .slice(0, 500)
     })
-  }, [activeTrades, activeProfile, ibConnected])
+  }, [activeTrades, activeProfile])
 
   // mutations
   const removeSymbolMut = useMutation({
@@ -976,7 +983,7 @@ export default function SandboxPanel() {
               </div>
               <div className="flex items-center gap-2 min-w-0">
                 <span className="text-xs text-slate-500 font-medium uppercase tracking-wider">
-                  {ibMode === 'live' ? 'Live Mode — IB Connected' : ibMode === 'paper' ? 'Paper Mode — IB Connected' : 'Portfolio Simulation'}
+                  {activeProfile === 'live' ? 'Live Mode — IB Connected' : activeProfile === 'paper' ? 'Paper Mode — IB Connected' : 'Portfolio Simulation'}
                 </span>
                 {ibMode && (
                   <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold ${
@@ -992,26 +999,46 @@ export default function SandboxPanel() {
             <div className="flex items-center gap-2 flex-wrap">
               <div className="flex items-center gap-1.5 mr-1">
                 <div className="inline-flex items-center rounded-md border border-dark-500 overflow-hidden">
+                  {ibConnected && (
+                    <button
+                      className={`text-[10px] px-2 py-1 font-semibold transition-colors border-r border-dark-500 ${
+                        activeProfile === 'simulated'
+                          ? 'bg-blue-900/35 text-blue-300'
+                          : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
+                      }`}
+                      onClick={() => setPortfolioView('simulated')}
+                      disabled={setIbModeMut.isPending || activeProfile === 'simulated'}
+                      title="View simulated portfolio while IB stays connected"
+                    >
+                      SIM
+                    </button>
+                  )}
                   <button
                     className={`text-[10px] px-2 py-1 font-semibold transition-colors ${
-                      ibSelectedMode === 'paper'
+                      activeProfile === 'paper'
                         ? 'bg-blue-900/35 text-blue-300'
                         : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
                     }`}
-                    onClick={() => setIbModeMut.mutate('paper')}
-                    disabled={setIbModeMut.isPending || ibSelectedMode === 'paper'}
+                    onClick={() => {
+                      setPortfolioView('paper')
+                      setIbModeMut.mutate('paper')
+                    }}
+                    disabled={setIbModeMut.isPending || activeProfile === 'paper'}
                     title="Switch IB mode to paper"
                   >
                     Paper
                   </button>
                   <button
                     className={`text-[10px] px-2 py-1 font-semibold transition-colors border-l border-dark-500 ${
-                      ibSelectedMode === 'live'
+                      activeProfile === 'live'
                         ? 'bg-emerald-900/35 text-emerald-300'
                         : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
                     }`}
-                    onClick={() => setIbModeMut.mutate('live')}
-                    disabled={setIbModeMut.isPending || ibSelectedMode === 'live'}
+                    onClick={() => {
+                      setPortfolioView('live')
+                      setIbModeMut.mutate('live')
+                    }}
+                    disabled={setIbModeMut.isPending || activeProfile === 'live'}
                     title="Switch IB mode to live"
                   >
                     Live
@@ -1204,11 +1231,11 @@ export default function SandboxPanel() {
             />
           ) : !selectedSymbol ? (
             <PortfolioOverview
-              ibMode={ibMode}
+              ibMode={viewIbMode}
               accountData={accountData}
               positions={positions}
               positionsRefreshing={isAccountFetching || isPositionsFetching}
-              ibPositions={ibConnected ? (ibPositionsData?.positions ?? []) : []}
+              ibPositions={viewIbMode ? (ibPositionsData?.positions ?? []) : []}
               quotes={quotes}
               totalEquity={totalEquity}
               totalUnrealizedPnl={totalUnrealizedPnl}
@@ -1218,6 +1245,7 @@ export default function SandboxPanel() {
               realizedMetrics={realizedMetrics}
               allTrades={activeTrades}
               activities={visibleActivities}
+              managerActivities={managerState?.last_activity ?? []}
               pmScores={managerState?.scores ?? {}}
               managerSettings={managerState?.settings ?? null}
               onOpenManager={activeMainTab === 'summary' ? () => setActiveMainTab('manager') : null}
@@ -1227,8 +1255,8 @@ export default function SandboxPanel() {
             <div className="text-slate-500 text-sm">Loading…</div>
           ) : (
             <PositionDetail
-              ibMode={ibMode}
-              ibOrders={ibConnected ? (ibOrdersData?.orders ?? []) : []}
+              ibMode={viewIbMode}
+              ibOrders={viewIbMode ? (ibOrdersData?.orders ?? []) : []}
               selectedSymbol={selectedSymbol}
               selectedPos={selectedPos}
               selectedPrice={selectedPrice}

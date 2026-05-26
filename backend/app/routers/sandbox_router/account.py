@@ -1,7 +1,9 @@
 """Account and fund management endpoints."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,8 +28,14 @@ router = APIRouter()
 
 
 @router.get("/account")
-async def get_account_info(db: AsyncSession = Depends(get_db)):
-    if ib_service.is_connected:
+async def get_account_info(
+    profile: Optional[str] = Query(default=None, pattern=r"^(simulated|paper|live)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    requested_profile = (profile or (settings.TRADING_MODE if ib_service.is_connected else "simulated") or "simulated").lower()
+    use_ib = requested_profile in {"paper", "live"} and ib_service.is_connected
+
+    if use_ib:
         summary = await ib_service.get_account_summary()
         ib_positions = await ib_service.get_positions()
 
@@ -60,7 +68,7 @@ async def get_account_info(db: AsyncSession = Depends(get_db)):
         if equity is None and total_funds is not None and available_funds is not None:
             equity = max(0.0, total_funds - available_funds)
 
-        mode = settings.TRADING_MODE if settings.TRADING_MODE in {"paper", "live"} else "paper"
+        mode = requested_profile if requested_profile in {"paper", "live"} else "paper"
         save_portfolio_state(mode, {
             "source": "ib",
             "mode": mode,

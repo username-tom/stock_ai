@@ -400,10 +400,27 @@ function loadPresetStore() {
     const raw = localStorage.getItem(PRESETS_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object') return parsed
+      if (Array.isArray(parsed)) return parsed
+      if (parsed && typeof parsed === 'object') {
+        // Backward compatibility: merge legacy per-profile preset buckets
+        // into a single shared preset list.
+        const merged = []
+        const seen = new Set()
+        PROFILE_ORDER.forEach(profile => {
+          const entries = Array.isArray(parsed?.[profile]) ? parsed[profile] : []
+          entries.forEach(entry => {
+            if (!entry || typeof entry !== 'object') return
+            const id = String(entry.id ?? '')
+            if (!id || seen.has(id)) return
+            seen.add(id)
+            merged.push(entry)
+          })
+        })
+        return merged
+      }
     }
   } catch {}
-  return {}
+  return []
 }
 
 function savePresetStore(store) {
@@ -417,10 +434,18 @@ function loadDefaultPresetSelection() {
     const raw = localStorage.getItem(PRESET_DEFAULT_SELECTION_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      if (parsed && typeof parsed === 'object') return parsed
+      if (typeof parsed === 'string') return parsed
+      if (parsed && typeof parsed === 'object') {
+        // Backward compatibility: pick a legacy per-profile default.
+        for (const profile of PROFILE_ORDER) {
+          if (typeof parsed[profile] === 'string' && parsed[profile]) {
+            return parsed[profile]
+          }
+        }
+      }
     }
   } catch {}
-  return {}
+  return ''
 }
 
 function saveDefaultPresetSelection(selection) {
@@ -762,7 +787,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [draft, setDraft] = useState(null)
   const [savedStates, setSavedStates] = useState(() => loadSavedStates())
   const [presetStore, setPresetStore] = useState(() => loadPresetStore())
-  const [defaultPresetByProfile, setDefaultPresetByProfile] = useState(() => loadDefaultPresetSelection())
+  const [launchDefaultPresetId, setLaunchDefaultPresetId] = useState(() => loadDefaultPresetSelection())
   const [selectedPresetId, setSelectedPresetId] = useState('')
   const [routingGroups, setRoutingGroups] = useState({ manual: [], market: [], symbol: [] })
   const [dragPayload, setDragPayload] = useState(null)
@@ -771,8 +796,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [importNotice, setImportNotice] = useState(null)
   const [presetNotice, setPresetNotice] = useState(null)
   const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, risk: false, pmValues: false })
-  const activePresets = presetStore[activeProfile] ?? []
-  const launchDefaultPresetId = defaultPresetByProfile[activeProfile] ?? ''
+  const activePresets = Array.isArray(presetStore) ? presetStore : []
   const selectedPreset = activePresets.find(p => p.id === selectedPresetId) ?? null
 
   function toggleSection(key) {
@@ -884,7 +908,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   useEffect(() => {
     if (isLoading || !managerData) return
     setPresetStore(prev => {
-      const current = Array.isArray(prev[activeProfile]) ? prev[activeProfile] : []
+      const current = Array.isArray(prev) ? prev : []
       const merged = [...current]
       const defaults = buildDefaultPresetEntries(managerData.settings)
       let changed = false
@@ -895,11 +919,11 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         }
       }
       if (!changed) return prev
-      const next = { ...prev, [activeProfile]: merged }
+      const next = merged
       savePresetStore(next)
       return next
     })
-  }, [activeProfile, managerData, isLoading])
+  }, [managerData, isLoading])
 
   useEffect(() => {
     if (!activePresets.length) {
@@ -908,11 +932,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     }
     const hasLaunchDefault = launchDefaultPresetId && activePresets.some(p => p.id === launchDefaultPresetId)
     if (!hasLaunchDefault && activePresets.some(p => p.id === 'default-intraday-1m-volume-first')) {
-      const nextSelection = {
-        ...defaultPresetByProfile,
-        [activeProfile]: 'default-intraday-1m-volume-first',
-      }
-      setDefaultPresetByProfile(nextSelection)
+      const nextSelection = 'default-intraday-1m-volume-first'
+      setLaunchDefaultPresetId(nextSelection)
       saveDefaultPresetSelection(nextSelection)
     }
     const effectiveDefault = hasLaunchDefault
@@ -923,7 +944,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     if (!selectedPresetId || !activePresets.some(p => p.id === selectedPresetId)) {
       setSelectedPresetId(effectiveDefault)
     }
-  }, [activePresets, selectedPresetId, activeProfile, defaultPresetByProfile, launchDefaultPresetId])
+  }, [activePresets, selectedPresetId, launchDefaultPresetId])
 
   useEffect(() => {
     if (!managerData) return
@@ -1090,11 +1111,11 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
   function upsertPreset(entry, { select = true } = {}) {
     setPresetStore(prev => {
-      const list = Array.isArray(prev[activeProfile]) ? [...prev[activeProfile]] : []
+      const list = Array.isArray(prev) ? [...prev] : []
       const idx = list.findIndex(p => p.id === entry.id)
       if (idx >= 0) list[idx] = entry
       else list.push(entry)
-      const next = { ...prev, [activeProfile]: list }
+      const next = list
       savePresetStore(next)
       return next
     })
@@ -1181,11 +1202,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
   function handleSetLaunchDefaultPreset() {
     if (!selectedPreset) return
-    const nextSelection = {
-      ...defaultPresetByProfile,
-      [activeProfile]: selectedPreset.id,
-    }
-    setDefaultPresetByProfile(nextSelection)
+    const nextSelection = selectedPreset.id
+    setLaunchDefaultPresetId(nextSelection)
     saveDefaultPresetSelection(nextSelection)
     setPresetNotice(`Launch default preset set: ${selectedPreset.name}`)
   }
@@ -1346,7 +1364,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             {activePresets.length === 0 && <option value="">No presets</option>}
             {activePresets.map(p => (
               <option key={p.id} value={p.id}>
-                {p.name}{(defaultPresetByProfile[activeProfile] === p.id) ? ' (launch default)' : ''}
+                {p.name}{(launchDefaultPresetId === p.id) ? ' (launch default)' : ''}
               </option>
             ))}
           </select>

@@ -2321,9 +2321,17 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
 async def _process_ib_engine_signals() -> None:
     """Consume engine signals in IB mode and route execution through PM rules."""
     from app.services.ib_service import ib_service
+    from app.config import settings as app_settings
 
     if not ib_service.is_connected:
         return
+
+    ib_mode = str(getattr(app_settings, "TRADING_MODE", "paper") or "paper").strip().lower()
+    activity_debug_enabled = ib_mode == "paper"
+
+    def _log_ib_trigger(msg: str) -> None:
+        if activity_debug_enabled:
+            _log_activity(f"IB {ib_mode.upper()} trigger: {msg}")
 
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
@@ -2352,6 +2360,28 @@ async def _process_ib_engine_signals() -> None:
         sym: float(info.get("avg_cost") or 0.0)
         for sym, info in ib_by_symbol.items()
     }
+
+    account_summary = await ib_service.get_account_summary()
+    account_cap_base = 0.0
+    account_buying_power = 0.0
+    account_available_funds = 0.0
+    if isinstance(account_summary, dict) and not account_summary.get("error"):
+        for key in ("NetLiquidation", "TotalCashValue", "AvailableFunds"):
+            try:
+                value = float(account_summary.get(key) or 0.0)
+            except Exception:
+                value = 0.0
+            if value > 0:
+                account_cap_base = value
+                break
+        try:
+            account_buying_power = float(account_summary.get("BuyingPower") or 0.0)
+        except Exception:
+            account_buying_power = 0.0
+        try:
+            account_available_funds = float(account_summary.get("AvailableFunds") or 0.0)
+        except Exception:
+            account_available_funds = 0.0
 
     open_orders = await ib_service.get_open_orders()
     active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
@@ -2426,24 +2456,34 @@ async def _process_ib_engine_signals() -> None:
             score,
             ib_qty,
         )
+        _log_ib_trigger(
+            f"observed symbol={symbol} signal={signal:+d} score={score:+.3f} tag={tag or 'WATCH'} ib_qty={ib_qty:.4f}"
+        )
 
         if signal > 0:
             if ai_enabled and tag in {"SHORT", "STRONG SHORT"}:
                 _log_activity(f"IB signal BUY blocked for {symbol}: ai_tag={tag}")
+                _log_ib_trigger(f"BUY blocked symbol={symbol} reason=ai_tag:{tag}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
             if score < -0.2:
                 _log_activity(f"IB signal BUY blocked for {symbol}: score={score:+.3f}")
+                _log_ib_trigger(f"BUY blocked symbol={symbol} reason=score:{score:+.3f}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
             if ib_qty > 0 or symbol in pending_buy_symbols:
+                reason = "has_position" if ib_qty > 0 else "pending_buy"
+                _log_ib_trigger(f"BUY skipped symbol={symbol} reason={reason}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
             buy_symbols_needing_quote.add(symbol)
             buy_signal_rows.append((pos, symbol, score, tag, process_key))
+            _log_ib_trigger(f"BUY candidate queued symbol={symbol}")
 
         elif signal < 0:
             if ib_qty <= 0 or symbol in pending_sell_symbols:
+                reason = "no_position" if ib_qty <= 0 else "pending_sell"
+                _log_ib_trigger(f"SELL skipped symbol={symbol} reason={reason}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
 
@@ -2453,7 +2493,11 @@ async def _process_ib_engine_signals() -> None:
                 "quantity": float(abs(ib_qty)),
                 "reason": f"pm_engine_signal_sell (signal={signal}, score={score:+.3f}, tag={tag or 'WATCH'})",
                 "processed_key": process_key,
+                "price_source": "ib_tob_bid_or_quote_last",
             })
+            _log_ib_trigger(
+                f"SELL candidate symbol={symbol} qty={float(abs(ib_qty)):.4f} reason=pm_engine_signal_sell"
+            )
 
         if (
             ib_qty > 0
@@ -2496,25 +2540,34 @@ async def _process_ib_engine_signals() -> None:
 
         for pos, symbol, score, tag, process_key in buy_signal_rows:
             book = book_map.get(symbol, {})
-            cp = float((book.get("ask") if isinstance(book, dict) else 0.0) or price_map.get(symbol, 0.0))
-            alloc = float(pos.allocated_funds or 0.0)
+            ask_px = float((book.get("ask") if isinstance(book, dict) else 0.0) or 0.0)
+            cp = float(ask_px or price_map.get(symbol, 0.0))
+            price_source = "ib_tob_ask" if ask_px > 0.0 else "quote_last"
+            tob_source = str(book.get("source") or "") if isinstance(book, dict) else ""
+            cap_budget = _position_max_allocation(pos, account_cap_base)
+            if not math.isfinite(cap_budget) or cap_budget <= 0.0:
+                cap_budget = max(account_available_funds, account_buying_power)
             if cp <= 0.0:
                 _log_activity(f"IB signal BUY skipped for {symbol}: no market price")
+                _log_ib_trigger(f"BUY skipped symbol={symbol} reason=no_market_price")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
 
-            qty = math.floor(alloc / cp)
+            qty = math.floor(cap_budget / cp)
             if qty <= 0:
                 _log_activity(
-                    f"IB signal BUY skipped for {symbol}: alloc=${alloc:.2f}, price=${cp:.2f}"
+                    f"IB signal BUY skipped for {symbol}: cap=${cap_budget:.2f}, price=${cp:.2f}"
+                )
+                _log_ib_trigger(
+                    f"BUY skipped symbol={symbol} reason=zero_qty cap=${cap_budget:.2f} price=${cp:.2f} src={price_source}"
                 )
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
 
             logger.info(
-                "PM IB BUY candidate (symbol=%s alloc=%.2f price=%.2f qty=%s)",
+                "PM IB BUY candidate (symbol=%s cap=%.2f price=%.2f qty=%s)",
                 symbol,
-                alloc,
+                cap_budget,
                 cp,
                 qty,
             )
@@ -2522,17 +2575,25 @@ async def _process_ib_engine_signals() -> None:
                 "symbol": symbol,
                 "side": "BUY",
                 "quantity": float(qty),
-                "alloc": float(alloc),
+                "alloc": float(cap_budget),
                 "price": cp,
                 "reference_price": cp,
                 "top_size": float((book.get("ask_size") if isinstance(book, dict) else 0.0) or 0.0),
+                "price_source": price_source,
+                "top_of_book_source": tob_source,
                 "reason": f"pm_engine_signal_buy (signal=1, score={score:+.3f}, tag={tag or 'WATCH'})",
                 "processed_key": process_key,
             })
+            _log_ib_trigger(
+                f"BUY candidate symbol={symbol} qty={float(qty):.4f} cap=${cap_budget:.2f} ref=${cp:.4f} src={price_source} tob={tob_source or '-'}"
+            )
 
         for symbol, qty, avg_cost in risk_rows:
             book = book_map.get(symbol, {})
-            cp = float((book.get("bid") if isinstance(book, dict) else 0.0) or price_map.get(symbol, 0.0))
+            bid_px = float((book.get("bid") if isinstance(book, dict) else 0.0) or 0.0)
+            cp = float(bid_px or price_map.get(symbol, 0.0))
+            price_source = "ib_tob_bid" if bid_px > 0.0 else "quote_last"
+            tob_source = str(book.get("source") or "") if isinstance(book, dict) else ""
             if cp <= 0.0 or avg_cost <= 0.0 or qty <= 0.0:
                 continue
 
@@ -2553,8 +2614,13 @@ async def _process_ib_engine_signals() -> None:
                 "price": cp,
                 "reference_price": cp,
                 "top_size": float((book.get("bid_size") if isinstance(book, dict) else 0.0) or 0.0),
+                "price_source": price_source,
+                "top_of_book_source": tob_source,
                 "reason": reason,
             })
+            _log_ib_trigger(
+                f"SELL candidate symbol={symbol} qty={float(qty):.4f} ref=${cp:.4f} src={price_source} tob={tob_source or '-'} reason={reason}"
+            )
 
     if not order_candidates:
         return
@@ -2579,9 +2645,14 @@ async def _process_ib_engine_signals() -> None:
             or order.get("price")
             or 0.0
         )
+        _log_ib_trigger(
+            f"dispatch symbol={symbol} side={side} qty={float(order.get('quantity') or 0.0):.4f} "
+            f"ref=${reference_price:.4f} src={order.get('price_source') or 'n/a'} tob={order.get('top_of_book_source') or '-'}"
+        )
         limit_price = _auto_limit_price_from_reference(reference_price, side)
         if limit_price <= 0.0:
             _log_activity(f"IB PM {side} skipped for {symbol}: no reference price")
+            _log_ib_trigger(f"{side} skipped symbol={symbol} reason=no_reference_price")
             processed_key = order.get("processed_key")
             if processed_key:
                 _ib_signal_last_processed_at[symbol] = str(processed_key)
@@ -2589,9 +2660,9 @@ async def _process_ib_engine_signals() -> None:
 
         qty_to_submit = float(order.get("quantity") or 0.0)
         if side == "BUY":
-            alloc = float(order.get("alloc") or 0.0)
-            if alloc > 0.0:
-                qty_to_submit = float(math.floor(alloc / limit_price))
+            cap_budget = float(order.get("alloc") or 0.0)
+            if cap_budget > 0.0:
+                qty_to_submit = float(math.floor(cap_budget / limit_price))
         elif side == "SELL":
             # Match top-of-book quantity on exits so submitted size aligns with
             # visible touch liquidity and avoids crossing deeper levels.
@@ -2600,6 +2671,7 @@ async def _process_ib_engine_signals() -> None:
                 qty_to_submit = min(qty_to_submit, top_size)
         if qty_to_submit <= 0.0:
             _log_activity(f"IB PM {side} skipped for {symbol}: zero quantity at ${limit_price:.4f}")
+            _log_ib_trigger(f"{side} skipped symbol={symbol} reason=zero_submit_qty limit=${limit_price:.4f}")
             processed_key = order.get("processed_key")
             if processed_key:
                 _ib_signal_last_processed_at[symbol] = str(processed_key)
@@ -2614,6 +2686,7 @@ async def _process_ib_engine_signals() -> None:
         )
         if result.get("error"):
             _log_activity(f"IB PM {side} failed for {symbol}: {result['error']}")
+            _log_ib_trigger(f"{side} failed symbol={symbol} error={result['error']}")
             processed_key = order.get("processed_key")
             if processed_key:
                 _ib_signal_last_processed_at[symbol] = str(processed_key)
@@ -2645,6 +2718,10 @@ async def _process_ib_engine_signals() -> None:
         _log_activity(
             f"IB PM {side} submitted from engine signal for {symbol} x{qty_to_submit:.4f} @ ${submitted_price:.4f}"
         )
+        _log_ib_trigger(
+            f"{side} submitted symbol={symbol} qty={qty_to_submit:.4f} limit=${submitted_price:.4f} "
+            f"status={ib_status or 'UNKNOWN'} ib_order_id={result.get('ib_order_id')}"
+        )
         processed_key = order.get("processed_key")
         full_qty = float(order.get("quantity") or 0.0)
         is_partial = side == "SELL" and qty_to_submit + 1e-9 < full_qty
@@ -2653,6 +2730,9 @@ async def _process_ib_engine_signals() -> None:
         elif processed_key and is_partial:
             _log_activity(
                 f"IB PM SELL partial for {symbol}: submitted {qty_to_submit:.4f}/{full_qty:.4f} to match top-of-book size"
+            )
+            _log_ib_trigger(
+                f"SELL partial symbol={symbol} submitted={qty_to_submit:.4f}/{full_qty:.4f} reason=top_of_book_size"
             )
 
 

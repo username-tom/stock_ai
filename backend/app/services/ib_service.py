@@ -719,5 +719,15 @@ class IBService:
             logger.error("get_open_orders error: %s", exc)
             return []
 
+    def get_known_order_statuses(self) -> dict[int, str]:
+        """Return latest order statuses observed from IB callbacks."""
+        if not self._app:
+            return {}
+        with self._app._lock:
+            return {
+                int(order_id): str(status)
+                for order_id, status in self._app.order_status.items()
+            }
+
 
 ib_service = IBService()

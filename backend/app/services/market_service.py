@@ -1667,8 +1667,10 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
             )
             rows: list[dict[str, Any]] = []
             for bar in bars:
+                bar_dt = _parse_ib_bar_datetime(bar.get("date"))
                 rows.append(
                     {
+                        "Datetime": bar_dt.isoformat() if bar_dt is not None else None,
                         "Open": float(bar["open"]),
                         "High": float(bar["high"]),
                         "Low": float(bar["low"]),
@@ -1691,11 +1693,16 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
         volumes = quotes.get("volume", [])
 
         rows = []
-        for i, ts in enumerate(timestamps):  # noqa: F841 – ts unused but kept for alignment
+        for i, ts in enumerate(timestamps):
             c = closes[i] if i < len(closes) else None
             if c is None:
                 continue
+            try:
+                ts_iso = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+            except Exception:
+                ts_iso = None
             rows.append({
+                "Datetime": ts_iso,
                 "Open": float(opens[i]) if i < len(opens) and opens[i] is not None else float(c),
                 "High": float(highs[i]) if i < len(highs) and highs[i] is not None else float(c),
                 "Low": float(lows[i]) if i < len(lows) and lows[i] is not None else float(c),
@@ -1709,7 +1716,17 @@ async def get_intraday_df(symbol: str, range_: str = "5d", interval: str = "1m",
 
     rows = await _cache.pull(cache_key, ttl, _fetch_rows, wait_timeout=10.0)
     df = pd.DataFrame(rows)
-    df.index = pd.RangeIndex(len(df))
+    if "Datetime" in df.columns:
+        dt = pd.to_datetime(df["Datetime"], errors="coerce", utc=True)
+        if dt.notna().any():
+            mask = dt.notna()
+            df = df.loc[mask].copy()
+            df.index = pd.DatetimeIndex(dt.loc[mask]).tz_convert(_ET)
+        else:
+            df.index = pd.RangeIndex(len(df))
+        df = df.drop(columns=["Datetime"], errors="ignore")
+    else:
+        df.index = pd.RangeIndex(len(df))
     return df
 
 

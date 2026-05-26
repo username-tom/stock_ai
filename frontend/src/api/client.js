@@ -77,12 +77,14 @@ export const getSettings = () => api.get('/settings').then(r => r.data)
 export const updateSettings = (payload) => api.patch('/settings', payload).then(r => r.data)
 
 // Sandbox
-export const getSandboxAccount = () => api.get('/sandbox/account').then(r => r.data)
+export const getSandboxAccount = (profile = undefined) =>
+  api.get('/sandbox/account', { params: profile ? { profile } : {} }).then(r => r.data)
 export const addSandboxFunds = (amount) => api.post('/sandbox/account/add-funds', { amount }).then(r => r.data)
 export const withdrawSandboxFunds = (amount) => api.post('/sandbox/account/withdraw-funds', { amount }).then(r => r.data)
 export const repairSandboxFunds = () => api.post('/sandbox/account/repair-funds').then(r => r.data)
 export const getSandboxFundEvents = (limit = 200) => api.get('/sandbox/account/fund-events', { params: { limit } }).then(r => r.data)
-export const getSandboxPositions = () => api.get('/sandbox/positions').then(r => r.data)
+export const getSandboxPositions = (profile = undefined) =>
+  api.get('/sandbox/positions', { params: profile ? { profile } : {} }).then(r => r.data)
 export const getSandboxLearnerInsights = (symbols) =>
   api.get('/sandbox/learner/insights', { params: { symbols: symbols.join(',') } }).then(r => r.data)
 export const addSandboxSymbol = (payload) => api.post('/sandbox/positions', payload).then(r => r.data)
@@ -90,8 +92,8 @@ export const updateSandboxPosition = (symbol, payload) => api.patch(`/sandbox/po
 export const bulkUpdateSandboxStrategy = (strategy_name) => api.patch('/sandbox/positions-bulk-strategy', { strategy_name }).then(r => r.data)
 export const bulkUpdateSandboxAllocationCap = (payload) => api.patch('/sandbox/positions-bulk-allocation-cap', payload).then(r => r.data)
 export const removeSandboxSymbol = (symbol) => api.delete(`/sandbox/positions/${symbol}`).then(r => r.data)
-export const getSandboxTrades = (symbol, limit = 200) =>
-  api.get('/sandbox/trades', { params: { symbol, limit } }).then(r => r.data)
+export const getSandboxTrades = (symbol, limit = 200, profile = undefined) =>
+  api.get('/sandbox/trades', { params: { symbol, limit, ...(profile ? { profile } : {}) } }).then(r => r.data)
 export const placeSandboxTrade = (payload) => api.post('/sandbox/trade', payload).then(r => r.data)
 export const getSandboxIBMode = () => api.get('/sandbox/ib-mode').then(r => r.data)
 export const setSandboxIBMode = (mode) => api.post('/sandbox/ib-mode', { mode }).then(r => r.data)
