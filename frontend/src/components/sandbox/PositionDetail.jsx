@@ -122,6 +122,36 @@ export default function PositionDetail({
     },
     [ibOrders, selectedSymbol],
   )
+  const pendingTradeOrdersForSymbol = useMemo(() => {
+    if (isSimulated) return []
+    const openIds = new Set(
+      openOrdersForSymbol
+        .map(o => Number(o?.ib_order_id))
+        .filter(id => Number.isFinite(id) && id > 0),
+    )
+    return (trades ?? [])
+      .filter(t => String(t?.status ?? '').toUpperCase() === 'PENDING')
+      .filter(t => {
+        const oid = Number(t?.ib_order_id)
+        return !(Number.isFinite(oid) && oid > 0 && openIds.has(oid))
+      })
+      .map(t => ({
+        ib_order_id: t.ib_order_id,
+        symbol: t.symbol,
+        side: t.side,
+        quantity: Number(t.quantity ?? 0),
+        remaining: Number(t.quantity ?? 0),
+        limit_price: Number.isFinite(Number(t.price)) ? Number(t.price) : null,
+        created_at: t.created_at,
+        status: t.status,
+        _source: 'trade-history',
+        _local_key: `${t.id ?? `${t.symbol}:${t.side}:${t.created_at ?? ''}`}`,
+      }))
+  }, [isSimulated, openOrdersForSymbol, trades])
+  const pendingOrdersForSymbol = useMemo(
+    () => [...openOrdersForSymbol, ...pendingTradeOrdersForSymbol],
+    [openOrdersForSymbol, pendingTradeOrdersForSymbol],
+  )
   const openOrderPriceLevels = useMemo(() => {
     const levels = openOrdersForSymbol
       .filter(o => Number.isFinite(Number(o.limit_price)) && Number(o.limit_price) > 0)
@@ -885,6 +915,20 @@ export default function PositionDetail({
                   </div>
                 </div>
               )}
+              {!isSimulated && pendingOrdersForSymbol.length > 0 && (
+                <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-700/30">
+                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs text-amber-400 font-semibold">Pending IB Order{pendingOrdersForSymbol.length > 1 ? 's' : ''} — awaiting broker update</span>
+                    <div className="text-xs text-amber-300/70 mt-0.5">
+                      {pendingOrdersForSymbol.length} open/pending snapshot{pendingOrdersForSymbol.length > 1 ? 's' : ''}
+                      {pendingOrdersForSymbol[0]?.limit_price != null
+                        ? ` · ${pendingOrdersForSymbol[0].side} @ $${Number(pendingOrdersForSymbol[0].limit_price).toFixed(2)}`
+                        : ''}
+                    </div>
+                  </div>
+                </div>
+              )}
             </>)}
             {selectedPos.engine_error && (
               <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-900/20 border border-amber-700/30 text-xs text-amber-400">
@@ -1065,18 +1109,18 @@ export default function PositionDetail({
         <h3 className="font-semibold text-slate-200 text-sm uppercase tracking-wider mb-4">
           Activity Log — {selectedSymbol}
         </h3>
-        {openOrdersPanelEnabled && !!openOrdersForSymbol.length && (
+        {openOrdersPanelEnabled && !!pendingOrdersForSymbol.length && (
           <div className="mb-4 rounded-lg border border-amber-700/30 bg-amber-900/10 p-3">
-            <div className="text-xs font-semibold text-amber-300 mb-2 uppercase tracking-wider">Open Order Status</div>
+            <div className="text-xs font-semibold text-amber-300 mb-2 uppercase tracking-wider">Open/Pending Order Status</div>
             <div className="space-y-2">
-              {openOrdersForSymbol.map(o => {
+              {pendingOrdersForSymbol.map(o => {
                 const timing = getOpenOrderTiming(o)
                 const progress = timing.progress ?? 1
                 const r = 12
                 const c = 2 * Math.PI * r
                 const offset = c * (1 - progress)
                 return (
-                  <div key={o.ib_order_id} className="flex items-center justify-between rounded-md border border-dark-600 bg-dark-900/60 px-2.5 py-2">
+                  <div key={`${o._source}-${o.ib_order_id ?? o._local_key ?? `${o.side}-${o.created_at ?? ''}`}`} className="flex items-center justify-between rounded-md border border-dark-600 bg-dark-900/60 px-2.5 py-2">
                     <div className="min-w-0">
                       <div className="text-xs text-slate-200">
                         #{o.ib_order_id} {o.side} {Number(o.remaining ?? o.quantity ?? 0).toFixed(2)} / {Number(o.quantity ?? 0).toFixed(2)}
@@ -1084,10 +1128,11 @@ export default function PositionDetail({
                       </div>
                       <div className="text-[11px] text-slate-500">
                         {timing.status} · remaining {timing.remainingLabel}
+                        {o._source === 'trade-history' ? ' · no IB open-order snapshot' : ''}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
-                      {cancelOrderMut && (
+                      {cancelOrderMut && o._source === 'ib-orders' && o.ib_order_id != null && (
                         <button
                           type="button"
                           className="text-[11px] text-red-400 hover:text-red-300 disabled:opacity-50"
@@ -1147,16 +1192,13 @@ export default function PositionDetail({
           }))
           const tradeEntries = backfillTradeAvgPrice(rawTradeEntries).map((entry) => {
             const explicit = getVisibleTradePnl(entry)
-            if (Number.isFinite(explicit)) {
-              return { ...entry, displayPnl: explicit }
-            }
-
             const isIbSnapshot = entry.syncFromIb === true && String(entry.sub ?? '').startsWith('Market Value:')
             if (isIbSnapshot) {
               return { ...entry, displayPnl: null }
             }
 
             const status = String(entry.status ?? '').toUpperCase()
+            let derivedSellPnl = null
             if (entry.side === 'SELL' && status === 'FILLED') {
               const avg = Number(entry.avgPrice)
               const qty = Number(entry.shares)
@@ -1164,12 +1206,21 @@ export default function PositionDetail({
               const px = Number(entry.price)
               if (Number.isFinite(avg) && avg > 0 && Number.isFinite(qty) && qty !== 0) {
                 if (Number.isFinite(mv) && mv !== 0) {
-                  return { ...entry, displayPnl: mv - (avg * qty) }
-                }
-                if (Number.isFinite(px) && px > 0) {
-                  return { ...entry, displayPnl: (px - avg) * qty }
+                  derivedSellPnl = mv - (avg * qty)
+                } else if (Number.isFinite(px) && px > 0) {
+                  derivedSellPnl = (px - avg) * qty
                 }
               }
+            }
+
+            if (Number.isFinite(derivedSellPnl) && !isSimulated && Number.isFinite(explicit) && Math.abs(explicit) < 1e-9) {
+              return { ...entry, displayPnl: derivedSellPnl }
+            }
+            if (Number.isFinite(explicit)) {
+              return { ...entry, displayPnl: explicit }
+            }
+            if (Number.isFinite(derivedSellPnl)) {
+              return { ...entry, displayPnl: derivedSellPnl }
             }
 
             return { ...entry, displayPnl: null }
@@ -1224,7 +1275,14 @@ export default function PositionDetail({
           return (
             <>
             <div className="space-y-1">
-              {pageItems.map(entry => (
+              {pageItems.map(entry => {
+                const tradeStatus = String(entry.status ?? '').toUpperCase()
+                const tradeAction = tradeStatus === 'CANCELLED' ? 'CANCEL' : entry.side
+                const tradeQty = Number(entry.shares)
+                const hasTradeQty = Number.isFinite(tradeQty)
+                const tradePrice = Number(entry.price)
+                const tradeLabel = `${tradeAction} ${hasTradeQty ? tradeQty : ''} ${entry.symbol ?? ''}${Number.isFinite(tradePrice) ? ` @ $${tradePrice.toFixed(2)}` : ''}`.replace(/\s+/g, ' ').trim()
+                return (
                 <div key={entry.id} className="flex items-start gap-3 py-2 border-b border-dark-700 last:border-0">
                   <div className="mt-0.5 flex-shrink-0">
                     {entry.kind === 'trade' ? (
@@ -1239,10 +1297,10 @@ export default function PositionDetail({
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-baseline gap-2">
-                      <span className="text-sm text-slate-200">{entry.label}</span>
+                      <span className="text-sm text-slate-200">{entry.kind === 'trade' ? tradeLabel : entry.label}</span>
                       {entry.displayPnl != null && (
-                        <span className={`text-xs font-medium ${entry.displayPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {entry.displayPnl >= 0 ? '+' : ''}{entry.displayPnl.toFixed(2)} PnL
+                        <span className={`text-xs font-medium ${entry.displayPnl > 0 ? 'text-emerald-400' : entry.displayPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                          {entry.displayPnl > 0 ? '+' : ''}{entry.displayPnl.toFixed(2)} PnL
                         </span>
                       )}
                     </div>
@@ -1255,7 +1313,8 @@ export default function PositionDetail({
                     {entry.date ? new Date(entry.date).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
                   </span>
                 </div>
-              ))}
+                )
+              })}
             </div>
             {totalPages > 1 && (
               <div className="flex items-center justify-between px-1 pt-3 border-t border-dark-700 mt-2">

@@ -200,12 +200,91 @@ async def get_analytics(
     requested_profile = (profile or ("paper" if ib_service.is_connected else "simulated") or "simulated").lower()
     use_ib = requested_profile in {"paper", "live"}
 
+    def _status_text(value) -> str:
+        raw = getattr(value, "value", value)
+        return str(raw or "").upper()
+
+    def _normalize_realized_pnl_rows(rows, created_at_fn, side_fn, qty_fn, price_fn, pnl_fn, status_fn):
+        """Return trade-id -> normalized realized pnl for FILLED SELL rows.
+
+        Uses explicit pnl when available, but in IB flows explicit pnl can be 0.0
+        despite a known realized outcome. In that case we derive from reconstructed
+        average cost basis built from filled trade sequence.
+        """
+        state_by_symbol: dict[str, dict[str, float]] = {}
+        by_id: dict[int, float | None] = {}
+
+        for t in rows:
+            tid = int(getattr(t, "id", 0) or 0)
+            side = str(side_fn(t) or "").upper()
+            qty = float(qty_fn(t) or 0.0)
+            px = float(price_fn(t) or 0.0)
+            sym = str(getattr(t, "symbol", "") or "").upper()
+            status = str(status_fn(t) or "").upper()
+
+            explicit_raw = pnl_fn(t)
+            explicit = float(explicit_raw) if explicit_raw is not None else None
+
+            if not sym or qty <= 0.0 or px <= 0.0 or status != "FILLED":
+                by_id[tid] = None
+                continue
+
+            st = state_by_symbol.get(sym) or {"qty": 0.0, "avg": 0.0}
+            derived: float | None = None
+
+            if side == "BUY":
+                if st["qty"] >= 0.0:
+                    next_qty = st["qty"] + qty
+                    st["avg"] = ((st["avg"] * st["qty"]) + (px * qty)) / next_qty if next_qty > 0 else 0.0
+                    st["qty"] = next_qty
+                else:
+                    # Covering a short; if crossing to long, new long basis is this buy price.
+                    if abs(st["qty"]) > qty:
+                        st["qty"] += qty
+                    elif abs(st["qty"]) == qty:
+                        st["qty"] = 0.0
+                        st["avg"] = 0.0
+                    else:
+                        rem = qty - abs(st["qty"])
+                        st["qty"] = rem
+                        st["avg"] = px
+            elif side == "SELL":
+                if st["qty"] > 0.0 and st["avg"] > 0.0:
+                    close_qty = min(qty, st["qty"])
+                    if close_qty > 0.0:
+                        derived = round((px - st["avg"]) * close_qty, 4)
+                    st["qty"] -= close_qty
+                    if st["qty"] <= 0.0:
+                        st["avg"] = 0.0
+                else:
+                    # Opening/adding short inventory (should be rare/disabled).
+                    cur_short = abs(min(st["qty"], 0.0))
+                    next_short = cur_short + qty
+                    st["qty"] = -next_short
+                    st["avg"] = ((st["avg"] * cur_short) + (px * qty)) / next_short if next_short > 0 else 0.0
+
+            state_by_symbol[sym] = st
+
+            normalized = None
+            if explicit is not None:
+                if derived is not None and abs(explicit) < 1e-9 and side == "SELL":
+                    normalized = derived
+                else:
+                    normalized = explicit
+            elif derived is not None and side == "SELL":
+                normalized = derived
+
+            by_id[tid] = normalized
+
+        return by_id
+
     if use_ib:
         mode = TradingMode.PAPER if requested_profile == "paper" else TradingMode.LIVE
         trades_res = await db.execute(
             select(Trade).where(Trade.mode == mode).order_by(Trade.created_at)
         )
-        trades = trades_res.scalars().all()
+        all_trades = trades_res.scalars().all()
+        trades = [t for t in all_trades if _status_text(t.status) == "FILLED"]
 
         def _created_at(t: Trade):
             return t.created_at
@@ -219,8 +298,27 @@ async def get_analytics(
         def _total(t: Trade) -> float:
             return float(t.quantity or 0.0) * float(t.price or 0.0)
 
+        def _qty(t: Trade) -> float:
+            return float(t.quantity or 0.0)
+
+        def _price(t: Trade) -> float:
+            return float(t.price or 0.0)
+
+        def _status(t: Trade) -> str:
+            return _status_text(t.status)
+
         def _pnl(t: Trade):
             return t.pnl
+
+        normalized_pnl_by_id = _normalize_realized_pnl_rows(
+            trades,
+            created_at_fn=_created_at,
+            side_fn=_side,
+            qty_fn=_qty,
+            price_fn=_price,
+            pnl_fn=_pnl,
+            status_fn=_status,
+        )
     else:
         trades_res = await db.execute(select(SandboxTrade).order_by(SandboxTrade.created_at))
         trades = trades_res.scalars().all()
@@ -240,11 +338,16 @@ async def get_analytics(
         def _pnl(t: SandboxTrade):
             return t.pnl
 
+        normalized_pnl_by_id = {
+            int(getattr(t, "id", 0) or 0): (float(_pnl(t)) if _pnl(t) is not None else None)
+            for t in trades
+        }
+
     # Cumulative realised P&L
     cumulative = []
     running = 0.0
     for t in trades:
-        pnl_val = _pnl(t)
+        pnl_val = normalized_pnl_by_id.get(int(getattr(t, "id", 0) or 0))
         if pnl_val is not None:
             running += float(pnl_val)
         local_time = _created_at(t).astimezone() if _created_at(t) else None
@@ -272,14 +375,18 @@ async def get_analytics(
         if sym not in sym_map:
             sym_map[sym] = {"symbol": sym, "realized_pnl": 0.0, "trade_count": 0}
         sym_map[sym]["trade_count"] += 1
-        pnl_val = _pnl(t)
+        pnl_val = normalized_pnl_by_id.get(int(getattr(t, "id", 0) or 0))
         if pnl_val is not None:
             sym_map[sym]["realized_pnl"] = round(sym_map[sym]["realized_pnl"] + float(pnl_val), 2)
     symbol_pnl = sorted(sym_map.values(), key=lambda x: x["realized_pnl"], reverse=True)
 
-    wins      = sum(1 for t in trades if _pnl(t) is not None and float(_pnl(t)) > 0)
-    losses    = sum(1 for t in trades if _pnl(t) is not None and float(_pnl(t)) < 0)
-    breakeven = sum(1 for t in trades if _pnl(t) is not None and float(_pnl(t)) == 0)
+    normalized_realized = [
+        v for v in normalized_pnl_by_id.values()
+        if v is not None
+    ]
+    wins      = sum(1 for v in normalized_realized if float(v) > 0)
+    losses    = sum(1 for v in normalized_realized if float(v) < 0)
+    breakeven = sum(1 for v in normalized_realized if float(v) == 0)
 
     return {
         "cumulative_pnl": cumulative,
@@ -301,14 +408,84 @@ async def get_realized_metrics(
     requested_profile = (profile or ("paper" if ib_service.is_connected else "simulated") or "simulated").lower()
     use_ib = requested_profile in {"paper", "live"}
 
+    def _status_text(value) -> str:
+        raw = getattr(value, "value", value)
+        return str(raw or "").upper()
+
+    def _normalize_realized_pnl_rows(rows, side_fn, qty_fn, price_fn, pnl_fn, status_fn):
+        state_by_symbol: dict[str, dict[str, float]] = {}
+        by_id: dict[int, float | None] = {}
+
+        for t in rows:
+            tid = int(getattr(t, "id", 0) or 0)
+            side = str(side_fn(t) or "").upper()
+            qty = float(qty_fn(t) or 0.0)
+            px = float(price_fn(t) or 0.0)
+            sym = str(getattr(t, "symbol", "") or "").upper()
+            status = str(status_fn(t) or "").upper()
+
+            explicit_raw = pnl_fn(t)
+            explicit = float(explicit_raw) if explicit_raw is not None else None
+
+            if not sym or qty <= 0.0 or px <= 0.0 or status != "FILLED":
+                by_id[tid] = None
+                continue
+
+            st = state_by_symbol.get(sym) or {"qty": 0.0, "avg": 0.0}
+            derived: float | None = None
+
+            if side == "BUY":
+                if st["qty"] >= 0.0:
+                    next_qty = st["qty"] + qty
+                    st["avg"] = ((st["avg"] * st["qty"]) + (px * qty)) / next_qty if next_qty > 0 else 0.0
+                    st["qty"] = next_qty
+                else:
+                    if abs(st["qty"]) > qty:
+                        st["qty"] += qty
+                    elif abs(st["qty"]) == qty:
+                        st["qty"] = 0.0
+                        st["avg"] = 0.0
+                    else:
+                        rem = qty - abs(st["qty"])
+                        st["qty"] = rem
+                        st["avg"] = px
+            elif side == "SELL":
+                if st["qty"] > 0.0 and st["avg"] > 0.0:
+                    close_qty = min(qty, st["qty"])
+                    if close_qty > 0.0:
+                        derived = round((px - st["avg"]) * close_qty, 4)
+                    st["qty"] -= close_qty
+                    if st["qty"] <= 0.0:
+                        st["avg"] = 0.0
+                else:
+                    cur_short = abs(min(st["qty"], 0.0))
+                    next_short = cur_short + qty
+                    st["qty"] = -next_short
+                    st["avg"] = ((st["avg"] * cur_short) + (px * qty)) / next_short if next_short > 0 else 0.0
+
+            state_by_symbol[sym] = st
+
+            normalized = None
+            if explicit is not None:
+                if derived is not None and abs(explicit) < 1e-9 and side == "SELL":
+                    normalized = derived
+                else:
+                    normalized = explicit
+            elif derived is not None and side == "SELL":
+                normalized = derived
+
+            by_id[tid] = normalized
+
+        return by_id
+
     if use_ib:
         mode = TradingMode.PAPER if requested_profile == "paper" else TradingMode.LIVE
         trades_res = await db.execute(
             select(Trade)
-            .where(Trade.mode == mode, Trade.pnl.isnot(None))
+            .where(Trade.mode == mode)
             .order_by(Trade.created_at)
         )
-        realized_trades = trades_res.scalars().all()
+        trades = [t for t in trades_res.scalars().all() if _status_text(t.status) == "FILLED"]
         total_deposited = 0.0
 
         def _created_at(t: Trade):
@@ -316,6 +493,31 @@ async def get_realized_metrics(
 
         def _pnl(t: Trade) -> float:
             return float(t.pnl or 0.0)
+
+        def _side(t: Trade) -> str:
+            return t.side.value if t.side is not None else ""
+
+        def _qty(t: Trade) -> float:
+            return float(t.quantity or 0.0)
+
+        def _price(t: Trade) -> float:
+            return float(t.price or 0.0)
+
+        def _status(t: Trade) -> str:
+            return _status_text(t.status)
+
+        normalized_pnl_by_id = _normalize_realized_pnl_rows(
+            trades,
+            side_fn=_side,
+            qty_fn=_qty,
+            price_fn=_price,
+            pnl_fn=lambda t: t.pnl,
+            status_fn=_status,
+        )
+        realized_trades = [
+            t for t in trades
+            if normalized_pnl_by_id.get(int(getattr(t, "id", 0) or 0)) is not None
+        ]
     else:
         trades_res = await db.execute(
             select(SandboxTrade)
@@ -332,6 +534,12 @@ async def get_realized_metrics(
         def _pnl(t: SandboxTrade) -> float:
             return float(t.pnl or 0.0)
 
+        normalized_pnl_by_id = {
+            int(getattr(t, "id", 0) or 0): float(t.pnl)
+            for t in realized_trades
+            if t.pnl is not None
+        }
+
     def _to_utc(dt: datetime | None) -> datetime | None:
         if dt is None:
             return None
@@ -340,9 +548,9 @@ async def get_realized_metrics(
         return dt.astimezone(timezone.utc)
 
     realized_points = [
-        (_to_utc(_created_at(t)), _pnl(t))
+        (_to_utc(_created_at(t)), float(normalized_pnl_by_id.get(int(getattr(t, "id", 0) or 0)) or 0.0))
         for t in realized_trades
-        if _to_utc(_created_at(t)) is not None
+        if _to_utc(_created_at(t)) is not None and normalized_pnl_by_id.get(int(getattr(t, "id", 0) or 0)) is not None
     ]
 
     realized_pnl_sum = float(sum(pnl for _, pnl in realized_points))

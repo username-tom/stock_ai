@@ -2419,6 +2419,7 @@ async def _process_ib_engine_signals() -> None:
     risk_symbols_needing_quote: set[str] = set()
     risk_rows: list[tuple[str, float, float]] = []
     buy_signal_rows: list[tuple[SandboxPosition, str, float, str, str]] = []
+    sell_signal_rows: list[tuple[str, float, float, str, str]] = []
     quote_price_map: dict[str, float] = {}
 
     def _auto_limit_price_from_reference(reference_price: float, side: str) -> float:
@@ -2494,15 +2495,8 @@ async def _process_ib_engine_signals() -> None:
                 _log_ib_trigger(f"SELL skipped symbol={symbol} reason={reason}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
-
-            order_candidates.append({
-                "symbol": symbol,
-                "side": "SELL",
-                "quantity": float(abs(ib_qty)),
-                "reason": f"pm_engine_signal_sell (signal={signal}, score={score:+.3f}, tag={tag or 'WATCH'})",
-                "processed_key": process_key,
-                "price_source": "ib_tob_bid_or_quote_last",
-            })
+            risk_symbols_needing_quote.add(symbol)
+            sell_signal_rows.append((symbol, float(abs(ib_qty)), score, tag, process_key))
             _log_ib_trigger(
                 f"SELL candidate symbol={symbol} qty={float(abs(ib_qty)):.4f} reason=pm_engine_signal_sell"
             )
@@ -2596,7 +2590,38 @@ async def _process_ib_engine_signals() -> None:
                 f"BUY candidate symbol={symbol} qty={float(qty):.4f} cap=${cap_budget:.2f} ref=${cp:.4f} src={price_source} tob={tob_source or '-'}"
             )
 
+        signal_sell_symbols: set[str] = set()
+        for symbol, qty, score, tag, process_key in sell_signal_rows:
+            book = book_map.get(symbol, {})
+            bid_px = float((book.get("bid") if isinstance(book, dict) else 0.0) or 0.0)
+            cp = float(bid_px or price_map.get(symbol, 0.0))
+            price_source = "ib_tob_bid" if bid_px > 0.0 else "quote_last"
+            tob_source = str(book.get("source") or "") if isinstance(book, dict) else ""
+            if cp <= 0.0:
+                _log_activity(f"IB signal SELL skipped for {symbol}: no market price")
+                _log_ib_trigger(f"SELL skipped symbol={symbol} reason=no_market_price")
+                _ib_signal_last_processed_at[symbol] = process_key
+                continue
+            order_candidates.append({
+                "symbol": symbol,
+                "side": "SELL",
+                "quantity": float(qty),
+                "price": cp,
+                "reference_price": cp,
+                "top_size": float((book.get("bid_size") if isinstance(book, dict) else 0.0) or 0.0),
+                "price_source": price_source,
+                "top_of_book_source": tob_source,
+                "reason": f"pm_engine_signal_sell (signal=-1, score={score:+.3f}, tag={tag or 'WATCH'})",
+                "processed_key": process_key,
+            })
+            signal_sell_symbols.add(symbol)
+            _log_ib_trigger(
+                f"SELL candidate symbol={symbol} qty={float(qty):.4f} ref=${cp:.4f} src={price_source} tob={tob_source or '-'} reason=pm_engine_signal_sell"
+            )
+
         for symbol, qty, avg_cost in risk_rows:
+            if symbol in signal_sell_symbols:
+                continue
             book = book_map.get(symbol, {})
             bid_px = float((book.get("bid") if isinstance(book, dict) else 0.0) or 0.0)
             cp = float(bid_px or price_map.get(symbol, 0.0))

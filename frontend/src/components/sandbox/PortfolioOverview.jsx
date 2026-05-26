@@ -290,10 +290,57 @@ export default function PortfolioOverview({
   const totalDepositedServer = numOrNull(realizedMetrics?.total_deposited)
   const elapsedTradingDaysServer = numOrNull(realizedMetrics?.elapsed_trading_days) ?? elapsedDaysServer
 
-  const realizedTradeLog = allTrades
-    .map(t => ({ pnl: numOrNull(t.pnl), date: parsePointDate(t.created_at) }))
-    .filter(t => t.pnl != null && t.date)
-    .sort((a, b) => a.date - b.date)
+  const realizedTradeLog = useMemo(() => {
+    const ordered = [...(allTrades ?? [])]
+      .map((t, i) => {
+        const ts = parsePointDate(t.created_at)
+        return { t, i, ts }
+      })
+      .filter(row => row.ts)
+      .sort((a, b) => {
+        const diff = a.ts - b.ts
+        return diff !== 0 ? diff : a.i - b.i
+      })
+
+    const rawRows = ordered.map(({ t, i, ts }) => ({
+      id: t.id ?? `ov-${i}`,
+      symbol: t.symbol,
+      side: t.side,
+      status: t.status,
+      shares: t.quantity,
+      price: t.price,
+      pnl: t.pnl,
+      date: ts.toISOString(),
+      ts: ts.getTime(),
+    }))
+
+    return backfillTradeAvgPrice(rawRows)
+      .map((row) => {
+        const status = String(row.status ?? '').toUpperCase()
+        const side = String(row.side ?? '').toUpperCase()
+        const explicit = getVisibleTradePnl(row)
+        let derived = null
+        if (status === 'FILLED' && side === 'SELL') {
+          const avg = Number(row.avgPrice)
+          const qty = Number(row.shares)
+          const px = Number(row.price)
+          if (Number.isFinite(avg) && avg > 0 && Number.isFinite(qty) && qty > 0 && Number.isFinite(px) && px > 0) {
+            derived = (px - avg) * qty
+          }
+        }
+        if (!isSimulated && Number.isFinite(explicit) && Math.abs(explicit) < 1e-9 && Number.isFinite(derived)) {
+          return { pnl: derived, date: parsePointDate(row.date) }
+        }
+        if (Number.isFinite(explicit)) {
+          return { pnl: explicit, date: parsePointDate(row.date) }
+        }
+        if (Number.isFinite(derived)) {
+          return { pnl: derived, date: parsePointDate(row.date) }
+        }
+        return null
+      })
+      .filter(v => v && v.date)
+  }, [allTrades, isSimulated])
   const realizedTradeDaysFallback = new Set(realizedTradeLog.map(t => t.date.toISOString().slice(0, 10))).size
   const realizedPnlSumFallback = realizedTradeLog.reduce((sum, t) => sum + t.pnl, 0)
   const firstRealizedDateFallback = realizedTradeLog.length > 0 ? realizedTradeLog[0].date : null
@@ -1248,16 +1295,13 @@ export default function PortfolioOverview({
           }))
           const tradeEntries = backfillTradeAvgPrice(rawTradeEntries).map((entry) => {
             const explicit = getVisibleTradePnl(entry)
-            if (Number.isFinite(explicit)) {
-              return { ...entry, displayPnl: explicit }
-            }
-
             const isIbSnapshot = entry.syncFromIb === true && String(entry.reason ?? '').startsWith('Market Value:')
             if (isIbSnapshot) {
               return { ...entry, displayPnl: null }
             }
 
             const status = String(entry.status ?? '').toUpperCase()
+            let derivedSellPnl = null
             if (entry.side === 'SELL' && status === 'FILLED') {
               const avg = Number(entry.avgPrice)
               const qty = Number(entry.shares)
@@ -1265,12 +1309,23 @@ export default function PortfolioOverview({
               const px = Number(entry.price)
               if (Number.isFinite(avg) && avg > 0 && Number.isFinite(qty) && qty !== 0) {
                 if (Number.isFinite(mv) && mv !== 0) {
-                  return { ...entry, displayPnl: mv - (avg * qty) }
-                }
-                if (Number.isFinite(px) && px > 0) {
-                  return { ...entry, displayPnl: (px - avg) * qty }
+                  derivedSellPnl = mv - (avg * qty)
+                } else if (Number.isFinite(px) && px > 0) {
+                  derivedSellPnl = (px - avg) * qty
                 }
               }
+            }
+
+            // IB endpoints can report explicit pnl=0 for a SELL even when the
+            // realized value is available from trade price vs reconstructed avg.
+            if (Number.isFinite(derivedSellPnl) && activeProfile !== 'simulated' && Number.isFinite(explicit) && Math.abs(explicit) < 1e-9) {
+              return { ...entry, displayPnl: derivedSellPnl }
+            }
+            if (Number.isFinite(explicit)) {
+              return { ...entry, displayPnl: explicit }
+            }
+            if (Number.isFinite(derivedSellPnl)) {
+              return { ...entry, displayPnl: derivedSellPnl }
             }
 
             return { ...entry, displayPnl: null }
@@ -1361,7 +1416,7 @@ export default function PortfolioOverview({
                         <td className="py-1.5 text-right font-mono text-slate-200">${entry.total.toFixed(2)}</td>
                         <td className="py-1.5 text-right font-mono">
                           {entry.displayPnl != null
-                            ? <span className={entry.displayPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{entry.displayPnl >= 0 ? '+' : ''}{entry.displayPnl.toFixed(2)}</span>
+                            ? <span className={entry.displayPnl > 0 ? 'text-emerald-400' : entry.displayPnl < 0 ? 'text-red-400' : 'text-slate-400'}>{entry.displayPnl > 0 ? '+' : ''}{entry.displayPnl.toFixed(2)}</span>
                             : <span className="text-slate-600">—</span>}
                         </td>
                         <td className="py-1.5 text-slate-400 max-w-[200px] truncate">

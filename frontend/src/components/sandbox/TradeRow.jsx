@@ -9,7 +9,7 @@ export default function TradeRow({ trade }) {
       <td className="font-mono text-slate-200">{trade.quantity}</td>
       <td className="font-mono text-slate-200">${trade.price?.toFixed(2)}</td>
       <td className="font-mono text-slate-200">${trade.total?.toFixed(2)}</td>
-      <td className={`font-mono text-xs ${trade.pnl == null ? 'text-slate-600' : trade.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{trade.pnl != null ? fmt(trade.pnl) : '—'}</td>
+      <td className={`font-mono text-xs ${trade.pnl == null ? 'text-slate-600' : trade.pnl > 0 ? 'text-emerald-400' : trade.pnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>{trade.pnl != null ? fmt(trade.pnl) : '—'}</td>
       <td className="text-slate-500 text-xs max-w-xs truncate" title={trade.reason}>{trade.reason || '—'}</td>
       <td className="text-slate-500 text-xs whitespace-nowrap">{trade.strategy_name?.split(':')[0] || '—'}</td>
     </tr>

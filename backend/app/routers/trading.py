@@ -106,6 +106,24 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
             elif trade.side == OrderSide.SELL and qty <= 0.0:
                 final_status = OrderStatus.FILLED
 
+            # If IB no longer reports the order and we still cannot infer a fill,
+            # treat an old unresolved pending row as cancelled to prevent
+            # indefinitely stuck local PENDING state in the UI.
+            if final_status is None and open_status is None and not known_status:
+                created_at = trade.created_at
+                if created_at is not None:
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    age_seconds = (now_utc - created_at).total_seconds()
+                    if age_seconds >= 120:
+                        final_status = OrderStatus.CANCELLED
+                        logger.info(
+                            "Pending IB trade stale timeout -> CANCELLED (ib_order_id=%s symbol=%s age=%.1fs)",
+                            trade.ib_order_id,
+                            trade.symbol,
+                            age_seconds,
+                        )
+
         if final_status is None or trade.status == final_status:
             if row_changed:
                 changed += 1

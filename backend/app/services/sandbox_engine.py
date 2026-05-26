@@ -463,11 +463,12 @@ async def _process_symbol(
     pos: SandboxPosition,
     scripts: dict[int, str],
     loop: asyncio.AbstractEventLoop,
+    ib_holdings_by_symbol: dict[str, tuple[float, float]] | None = None,
 ) -> None:
     """Evaluate strategy for one symbol and execute a trade if signalled."""
     global _symbol_status
 
-    symbol = pos.symbol
+    symbol = str(pos.symbol or "").upper()
     strategy_name = pos.strategy_name or ""
     prev_status = _symbol_status.get(symbol) or {}
     status: dict[str, Any] = {
@@ -484,10 +485,18 @@ async def _process_symbol(
 
     try:
         from app.services.portfolio_manager import get_manager_settings
+        from app.services.ib_service import ib_service
 
         manager_settings = get_manager_settings()
         symbol_overrides = manager_settings.get("position_overrides") if isinstance(manager_settings.get("position_overrides"), dict) else {}
         sym_override = symbol_overrides.get(symbol.upper(), {}) if isinstance(symbol_overrides, dict) else {}
+        ib_logic_active = bool(ib_service.is_connected and ib_holdings_by_symbol is not None)
+        ib_qty, ib_avg_cost = (0.0, 0.0)
+        if ib_logic_active:
+            ib_qty, ib_avg_cost = ib_holdings_by_symbol.get(symbol, (0.0, 0.0))
+        shares_for_logic = float(ib_qty if ib_logic_active else (pos.shares or 0.0))
+        avg_cost_for_logic = float(ib_avg_cost if ib_logic_active else (pos.avg_cost or 0.0))
+        pending_shares_for_logic = float(0.0 if ib_logic_active else (pos.pending_shares or 0.0))
         override_strategy = str(sym_override.get("strategy_name") or "").strip() if isinstance(sym_override, dict) else ""
         default_strategy = str(manager_settings.get("default_strategy_name") or "").strip()
         effective_strategy_name = override_strategy or strategy_name or default_strategy
@@ -600,7 +609,7 @@ async def _process_symbol(
                 return a is not None
             return a is not None and a > switch_idx
 
-        if pos.shares > 0:
+        if shares_for_logic > 0:
             # Exit only on a fresh post-switch sell event (or explicit current -1).
             has_fresh_sell_event = _idx_after(last_sell_idx, last_buy_idx) and _idx_after_switch(last_sell_idx, switched_at_idx)
             trade_signal = -1 if (current_signal < 0 or has_fresh_sell_event) else 0
@@ -615,8 +624,6 @@ async def _process_symbol(
         signal_source = ""
         if ref_idx is not None and "signal_source" in df_sig.columns:
             signal_source = str(df_sig.loc[ref_idx, "signal_source"]).strip()
-
-        from app.services.ib_service import ib_service
 
         # In IB mode, PM consumes SandboxPosition.last_signal. Persist the
         # actionable signal so event-based strategies (where last bar signal
@@ -635,12 +642,12 @@ async def _process_symbol(
         # At the first tick of the final sell window (per symbol/day),
         # immediately lock in winners and notify unrealized losers.
         if (
-            pos.shares > 0
-            and pos.avg_cost > 0
+            shares_for_logic > 0
+            and avg_cost_for_logic > 0
             and in_final_sell_window
             and _mark_first_entry_into_final_sell_window(symbol, eod_window_mins)
         ):
-            unrealized_pnl = (current_price - pos.avg_cost) * pos.shares
+            unrealized_pnl = (current_price - avg_cost_for_logic) * shares_for_logic
             if unrealized_pnl > 0:
                 action = "SELL"
                 disable_engine_after_sell = True
@@ -653,23 +660,23 @@ async def _process_symbol(
 
         # End-of-day sell override: force liquidation if EOD window is active
         # and hold_positions_overnight is disabled.
-        if action is None and pos.shares > 0 and pos.avg_cost > 0 and in_final_sell_window:
+        if action is None and shares_for_logic > 0 and avg_cost_for_logic > 0 and in_final_sell_window:
             action = "SELL"
             disable_engine_after_sell = True
             reason = f"end_of_day_liquidation (window: {eod_window_mins}min)"
 
         # Standard risk exits: stop loss and take profit
-        if action is None and pos.shares > 0 and pos.avg_cost > 0:
+        if action is None and shares_for_logic > 0 and avg_cost_for_logic > 0:
             sl_targets: list[float] = []
             tp_targets: list[float] = []
             if stop_loss_pct > 0:
-                sl_targets.append(pos.avg_cost * (1.0 - stop_loss_pct / 100.0))
+                sl_targets.append(avg_cost_for_logic * (1.0 - stop_loss_pct / 100.0))
             if stop_loss_value > 0:
-                sl_targets.append(pos.avg_cost - stop_loss_value)
+                sl_targets.append(avg_cost_for_logic - stop_loss_value)
             if take_profit_pct > 0:
-                tp_targets.append(pos.avg_cost * (1.0 + take_profit_pct / 100.0))
+                tp_targets.append(avg_cost_for_logic * (1.0 + take_profit_pct / 100.0))
             if take_profit_value > 0:
-                tp_targets.append(pos.avg_cost + take_profit_value)
+                tp_targets.append(avg_cost_for_logic + take_profit_value)
 
             stop_price = max(sl_targets) if sl_targets else None
             tp_price = min(tp_targets) if tp_targets else None
@@ -682,13 +689,13 @@ async def _process_symbol(
                 reason = f"take_profit (@ ${tp_price:.2f})"
 
         disable_engine_without_position = should_force_engine_off_without_position(
-            shares=pos.shares,
-            pending_shares=pos.pending_shares,
+            shares=shares_for_logic,
+            pending_shares=pending_shares_for_logic,
             hold_overnight=hold_overnight,
             eod_sell_window_minutes=eod_window_mins,
             eod_engine_shutoff_minutes_before_sell=pre_sell_shutoff_mins,
         )
-        if action is None and trade_signal > 0 and pos.shares == 0 and pos.pending_shares == 0 and not has_pending_sell:
+        if action is None and trade_signal > 0 and shares_for_logic == 0 and pending_shares_for_logic == 0 and not has_pending_sell:
             # During pre-sell shutdown and final sell windows, suppress new entries.
             if in_pre_sell_shutoff_window or in_final_sell_window:
                 logger.debug(
@@ -699,7 +706,7 @@ async def _process_symbol(
                 action = "BUY"
                 reason = signal_source if signal_source else f"{strat_label} buy @ ${current_price:.2f}"
 
-        elif action is None and trade_signal < 0 and pos.shares > 0 and not has_pending_sell:
+        elif action is None and trade_signal < 0 and shares_for_logic > 0 and not has_pending_sell:
             action = "SELL"
             reason = signal_source if signal_source else f"{strat_label} sell @ ${current_price:.2f}"
 
@@ -1304,7 +1311,10 @@ async def _settle_pending_shares() -> None:
                 price=fill_price,
                 total=round(total, 4),
                 strategy_name=position.strategy_name,
-                reason=f"{order.get('reason') or 'pending_sell'} | pending_fill",
+                reason=(
+                    f"{order.get('reason') or 'pending_sell'} | "
+                    f"pending_fill @ ${fill_price:.2f}"
+                ),
                 pnl=pnl,
             )
             db.add(trade)
@@ -1393,8 +1403,27 @@ async def _tick(loop: asyncio.AbstractEventLoop) -> None:
         _last_tick = datetime.now(timezone.utc)
         return
 
+    ib_holdings_by_symbol: dict[str, tuple[float, float]] | None = None
+    try:
+        from app.services.ib_service import ib_service
+
+        if ib_service.is_connected:
+            ib_rows = await ib_service.get_positions()
+            ib_holdings_by_symbol = {}
+            for row in ib_rows:
+                sym = str(row.get("symbol") or "").upper()
+                if not sym:
+                    continue
+                ib_holdings_by_symbol[sym] = (
+                    float(row.get("quantity") or 0.0),
+                    float(row.get("avg_cost") or 0.0),
+                )
+    except Exception as exc:
+        logger.warning("Engine IB holdings snapshot failed: %s", exc)
+        ib_holdings_by_symbol = None
+
     await asyncio.gather(
-        *[_process_symbol(p, scripts, loop) for p in positions],
+        *[_process_symbol(p, scripts, loop, ib_holdings_by_symbol) for p in positions],
         return_exceptions=True,
     )
     _last_tick = datetime.now(timezone.utc)
