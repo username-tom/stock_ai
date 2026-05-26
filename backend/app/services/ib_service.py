@@ -489,6 +489,7 @@ class IBService:
         bar_size: str,
         what_to_show: str,
         use_rth: bool,
+        timeout_s: float = 20.0,
     ) -> list[dict]:
         meta = await self.get_historical_bars_request_meta(
             symbol=symbol,
@@ -497,6 +498,7 @@ class IBService:
             bar_size=bar_size,
             what_to_show=what_to_show,
             use_rth=use_rth,
+            timeout_s=timeout_s,
         )
         return list(meta.get("bars", []))
 
@@ -508,6 +510,7 @@ class IBService:
         bar_size: str,
         what_to_show: str,
         use_rth: bool,
+        timeout_s: float = 20.0,
     ) -> dict[str, Any]:
         if not self.is_connected or not self._app:
             return {
@@ -536,10 +539,17 @@ class IBService:
                 False,
                 [],
             )
-            done = await self._wait_event(evt, timeout=20)
+            wait_timeout = max(1.0, float(timeout_s))
+            done = await self._wait_event(evt, timeout=wait_timeout)
             self._app.cancelHistoricalData(req_id)
             if not done:
-                logger.warning("Historical data request timed out for %s", symbol)
+                logger.warning(
+                    "Historical data request timed out for %s (duration=%s bar_size=%s timeout=%.1fs)",
+                    symbol,
+                    duration,
+                    bar_size,
+                    wait_timeout,
+                )
             with self._app._lock:
                 bars = list(self._app.historical_data.get(req_id, []))
             err = self._pop_req_error(req_id)

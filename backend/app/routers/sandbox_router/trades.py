@@ -1,6 +1,8 @@
 """Trade execution and analytics endpoints."""
 from __future__ import annotations
 
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +13,7 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models.sandbox import SandboxAccount, SandboxPosition, SandboxTrade, SandboxAllocationEvent
+from app.models.trade import Trade, TradingMode
 from app.routers.sandbox_router._helpers import (
     get_account,
     position_dict,
@@ -19,6 +22,7 @@ from app.routers.sandbox_router._helpers import (
     offload_simulated_state,
 )
 from app.services.ib_service import ib_service
+from app.services.market_calendar import count_nyse_trading_days
 from app.services.local_storage import (
     save_trade_logs_csv, save_trade_logs_json, list_trade_log_files,
     records_to_csv_bytes, records_to_json_bytes,
@@ -188,58 +192,94 @@ async def get_trades(
 
 
 @router.get("/analytics")
-async def get_analytics(db: AsyncSession = Depends(get_db)):
+async def get_analytics(
+    profile: Optional[str] = Query(default=None, pattern=r"^(simulated|paper|live)$"),
+    db: AsyncSession = Depends(get_db),
+):
     """Time-series analytics derived from trade history."""
-    if ib_service.is_connected:
-        return {
-            "cumulative_pnl": [],
-            "daily_volume": [],
-            "symbol_pnl": [],
-            "win_loss": {"wins": 0, "losses": 0, "breakeven": 0},
-            "total_trades": 0,
-            "source": "ib",
-        }
+    requested_profile = (profile or ("paper" if ib_service.is_connected else "simulated") or "simulated").lower()
+    use_ib = requested_profile in {"paper", "live"}
 
-    trades_res = await db.execute(select(SandboxTrade).order_by(SandboxTrade.created_at))
-    trades = trades_res.scalars().all()
+    if use_ib:
+        mode = TradingMode.PAPER if requested_profile == "paper" else TradingMode.LIVE
+        trades_res = await db.execute(
+            select(Trade).where(Trade.mode == mode).order_by(Trade.created_at)
+        )
+        trades = trades_res.scalars().all()
+
+        def _created_at(t: Trade):
+            return t.created_at
+
+        def _side(t: Trade) -> str:
+            return t.side.value if t.side is not None else ""
+
+        def _symbol(t: Trade) -> str:
+            return t.symbol
+
+        def _total(t: Trade) -> float:
+            return float(t.quantity or 0.0) * float(t.price or 0.0)
+
+        def _pnl(t: Trade):
+            return t.pnl
+    else:
+        trades_res = await db.execute(select(SandboxTrade).order_by(SandboxTrade.created_at))
+        trades = trades_res.scalars().all()
+
+        def _created_at(t: SandboxTrade):
+            return t.created_at
+
+        def _side(t: SandboxTrade) -> str:
+            return t.side
+
+        def _symbol(t: SandboxTrade) -> str:
+            return t.symbol
+
+        def _total(t: SandboxTrade) -> float:
+            return float(t.total or 0.0)
+
+        def _pnl(t: SandboxTrade):
+            return t.pnl
 
     # Cumulative realised P&L
     cumulative = []
     running = 0.0
     for t in trades:
-        if t.pnl is not None:
-            running += t.pnl
-        local_time = t.created_at.astimezone() if t.created_at else None
+        pnl_val = _pnl(t)
+        if pnl_val is not None:
+            running += float(pnl_val)
+        local_time = _created_at(t).astimezone() if _created_at(t) else None
         date_str = local_time.strftime("%Y-%m-%d %H:%M") if local_time else "unknown"
         cumulative.append({"date": date_str, "value": round(running, 2)})
 
     # Daily buy/sell volume
     daily: dict[str, dict] = {}
     for t in trades:
-        local_time = t.created_at.astimezone() if t.created_at else None
+        local_time = _created_at(t).astimezone() if _created_at(t) else None
         day = local_time.strftime("%Y-%m-%d") if local_time else "unknown"
         if day not in daily:
             daily[day] = {"date": day, "buy": 0.0, "sell": 0.0}
-        if t.side == "BUY":
-            daily[day]["buy"] = round(daily[day]["buy"] + t.total, 2)
+        if _side(t) == "BUY":
+            daily[day]["buy"] = round(daily[day]["buy"] + _total(t), 2)
         else:
-            daily[day]["sell"] = round(daily[day]["sell"] + t.total, 2)
+            daily[day]["sell"] = round(daily[day]["sell"] + _total(t), 2)
     daily_volume = [{"date": d, "buy": v["buy"], "sell": v["sell"]}
                     for d, v in sorted(daily.items())]
 
     # Per-symbol realised P&L
     sym_map: dict[str, dict] = {}
     for t in trades:
-        if t.symbol not in sym_map:
-            sym_map[t.symbol] = {"symbol": t.symbol, "realized_pnl": 0.0, "trade_count": 0}
-        sym_map[t.symbol]["trade_count"] += 1
-        if t.pnl is not None:
-            sym_map[t.symbol]["realized_pnl"] = round(sym_map[t.symbol]["realized_pnl"] + t.pnl, 2)
+        sym = _symbol(t)
+        if sym not in sym_map:
+            sym_map[sym] = {"symbol": sym, "realized_pnl": 0.0, "trade_count": 0}
+        sym_map[sym]["trade_count"] += 1
+        pnl_val = _pnl(t)
+        if pnl_val is not None:
+            sym_map[sym]["realized_pnl"] = round(sym_map[sym]["realized_pnl"] + float(pnl_val), 2)
     symbol_pnl = sorted(sym_map.values(), key=lambda x: x["realized_pnl"], reverse=True)
 
-    wins      = sum(1 for t in trades if t.pnl is not None and t.pnl > 0)
-    losses    = sum(1 for t in trades if t.pnl is not None and t.pnl < 0)
-    breakeven = sum(1 for t in trades if t.pnl is not None and t.pnl == 0)
+    wins      = sum(1 for t in trades if _pnl(t) is not None and float(_pnl(t)) > 0)
+    losses    = sum(1 for t in trades if _pnl(t) is not None and float(_pnl(t)) < 0)
+    breakeven = sum(1 for t in trades if _pnl(t) is not None and float(_pnl(t)) == 0)
 
     return {
         "cumulative_pnl": cumulative,
@@ -247,6 +287,122 @@ async def get_analytics(db: AsyncSession = Depends(get_db)):
         "symbol_pnl": symbol_pnl,
         "win_loss": {"wins": wins, "losses": losses, "breakeven": breakeven},
         "total_trades": len(trades),
+        "profile": requested_profile,
+        "source": "ib" if use_ib else "simulated",
+    }
+
+
+@router.get("/realized-metrics")
+async def get_realized_metrics(
+    profile: Optional[str] = Query(default=None, pattern=r"^(simulated|paper|live)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return realized-performance metrics for the requested profile."""
+    requested_profile = (profile or ("paper" if ib_service.is_connected else "simulated") or "simulated").lower()
+    use_ib = requested_profile in {"paper", "live"}
+
+    if use_ib:
+        mode = TradingMode.PAPER if requested_profile == "paper" else TradingMode.LIVE
+        trades_res = await db.execute(
+            select(Trade)
+            .where(Trade.mode == mode, Trade.pnl.isnot(None))
+            .order_by(Trade.created_at)
+        )
+        realized_trades = trades_res.scalars().all()
+        total_deposited = 0.0
+
+        def _created_at(t: Trade):
+            return t.created_at
+
+        def _pnl(t: Trade) -> float:
+            return float(t.pnl or 0.0)
+    else:
+        trades_res = await db.execute(
+            select(SandboxTrade)
+            .where(SandboxTrade.pnl.isnot(None))
+            .order_by(SandboxTrade.created_at)
+        )
+        realized_trades = trades_res.scalars().all()
+        account = await get_account(db)
+        total_deposited = float(account.total_deposited or 0.0)
+
+        def _created_at(t: SandboxTrade):
+            return t.created_at
+
+        def _pnl(t: SandboxTrade) -> float:
+            return float(t.pnl or 0.0)
+
+    def _to_utc(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    realized_points = [
+        (_to_utc(_created_at(t)), _pnl(t))
+        for t in realized_trades
+        if _to_utc(_created_at(t)) is not None
+    ]
+
+    realized_pnl_sum = float(sum(pnl for _, pnl in realized_points))
+
+    first_realized_at = None
+    elapsed_calendar_days = None
+    elapsed_trading_days = None
+    if realized_points:
+        first_realized_at = realized_points[0][0]
+        now_utc = datetime.now(timezone.utc)
+        elapsed_calendar_days = max(1, (now_utc - first_realized_at).days)
+        elapsed_trading_days = max(1, count_nyse_trading_days(first_realized_at, now_utc))
+
+    trade_days = {dt.date().isoformat() for dt, _ in realized_points}
+    realized_trade_days = len(trade_days)
+
+    now_utc = datetime.now(timezone.utc)
+    today_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start_utc = today_start_utc - timedelta(days=today_start_utc.weekday())
+    month_start_utc = today_start_utc.replace(day=1)
+
+    daily_realized_pnl = sum(pnl for dt, pnl in realized_points if dt >= today_start_utc)
+    weekly_realized_pnl = sum(pnl for dt, pnl in realized_points if dt >= week_start_utc)
+    monthly_realized_pnl = sum(pnl for dt, pnl in realized_points if dt >= month_start_utc)
+
+    daily_realized_pnl_pct = (daily_realized_pnl / total_deposited) * 100 if total_deposited > 0 else None
+    weekly_realized_pnl_pct = (weekly_realized_pnl / total_deposited) * 100 if total_deposited > 0 else None
+    monthly_realized_pnl_pct = (monthly_realized_pnl / total_deposited) * 100 if total_deposited > 0 else None
+
+    avg_daily_realized_pnl = (
+        round(realized_pnl_sum / realized_trade_days, 4)
+        if realized_trade_days > 0
+        else None
+    )
+
+    annualized_return_pct = None
+    if elapsed_trading_days is not None and total_deposited > 0:
+        realized_return_decimal = realized_pnl_sum / total_deposited
+        if realized_return_decimal > -1:
+            annualized_return_pct = (math.pow(1 + realized_return_decimal, 252 / elapsed_trading_days) - 1) * 100
+            annualized_return_pct = round(annualized_return_pct, 4)
+
+    return {
+        "realized_pnl_sum": round(realized_pnl_sum, 4),
+        "total_deposited": round(total_deposited, 4),
+        "first_realized_at": first_realized_at.isoformat() if first_realized_at else None,
+        "elapsed_days": elapsed_trading_days,
+        "elapsed_trading_days": elapsed_trading_days,
+        "elapsed_calendar_days": elapsed_calendar_days,
+        "realized_trade_days": realized_trade_days,
+        "daily_realized_pnl": round(daily_realized_pnl, 4),
+        "weekly_realized_pnl": round(weekly_realized_pnl, 4),
+        "monthly_realized_pnl": round(monthly_realized_pnl, 4),
+        "daily_realized_pnl_pct": round(daily_realized_pnl_pct, 4) if daily_realized_pnl_pct is not None else None,
+        "weekly_realized_pnl_pct": round(weekly_realized_pnl_pct, 4) if weekly_realized_pnl_pct is not None else None,
+        "monthly_realized_pnl_pct": round(monthly_realized_pnl_pct, 4) if monthly_realized_pnl_pct is not None else None,
+        "avg_daily_realized_pnl": avg_daily_realized_pnl,
+        "annualized_return_pct": annualized_return_pct,
+        "profile": requested_profile,
+        "source": "ib" if use_ib else "simulated",
     }
 
 

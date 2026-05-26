@@ -7,7 +7,12 @@ import numpy as np
 import pytest
 from unittest.mock import patch, MagicMock
 
-from app.services.data_provider import fetch_ohlcv, list_data_sources
+from app.services.data_provider import (
+    fetch_ohlcv,
+    list_data_sources,
+    warm_intraday_cache,
+    get_intraday_cache_coverage,
+)
 
 
 def _make_ohlcv(n=100, seed=42) -> pd.DataFrame:
@@ -174,3 +179,75 @@ class TestListDataSources:
             assert "description" in s
             assert "requires_auth" in s
             assert "available" in s
+
+
+# ------------------------------------------------------------------ #
+# warm_intraday_cache – source resolution / IB bypass
+# ------------------------------------------------------------------ #
+
+class TestWarmIntradayCache:
+    def test_auto_source_can_bypass_ib_when_prefer_ib_false(self):
+        intraday_df = pd.DataFrame(
+            {
+                "Open": [100.0, 101.0],
+                "High": [101.0, 102.0],
+                "Low": [99.0, 100.5],
+                "Close": [100.5, 101.5],
+                "Volume": [1000, 1200],
+            },
+            index=pd.date_range("2026-05-20 09:30:00", periods=2, freq="1min", tz="US/Eastern"),
+        )
+
+        ticker = MagicMock()
+        ticker.history.return_value = intraday_df
+
+        with (
+            patch("app.services.data_provider._ib_is_connected", return_value=True),
+            patch("app.services.data_provider.yf.Ticker", return_value=ticker),
+            patch("app.services.data_provider._save_cached_df"),
+            patch(
+                "app.services.data_provider.get_intraday_cache_coverage",
+                return_value={
+                    "symbol": "AAPL",
+                    "source": "yfinance",
+                    "rows": 2,
+                    "oldest": "2026-05-20 09:30:00-04:00",
+                    "newest": "2026-05-20 09:31:00-04:00",
+                },
+            ),
+        ):
+            result = warm_intraday_cache(
+                "AAPL",
+                lookback_days=5,
+                source="auto",
+                prefer_ib=False,
+            )
+
+        assert result["source"] == "yfinance"
+        assert ticker.history.called
+
+
+class TestIntradayCacheCoverage:
+    def test_explicit_yfinance_coverage_not_upgraded_to_ib(self):
+        fake_cache = pd.DataFrame(
+            {
+                "Open": [100.0],
+                "High": [101.0],
+                "Low": [99.0],
+                "Close": [100.5],
+                "Volume": [1000],
+            },
+            index=pd.DatetimeIndex([pd.Timestamp("2026-05-20 09:30:00", tz="US/Eastern")]),
+        )
+
+        with (
+            patch("app.services.data_provider._ib_is_connected", return_value=True),
+            patch("app.services.data_provider._load_cached_df", return_value=fake_cache) as mock_load,
+        ):
+            cov = get_intraday_cache_coverage("AAPL", "yfinance")
+
+        assert cov["source"] == "yfinance"
+        assert cov["rows"] == 1
+        assert cov["ib_verified"] is False
+        call_args = mock_load.call_args.args
+        assert call_args[1] == "yfinance"

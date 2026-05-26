@@ -170,7 +170,7 @@ async def _ensure_watchlist_intraday_cache(
     today_dt = datetime.now().date()
     warm_lookback_days = max(lookback_days, (today_dt - start_dt).days + 1)
 
-    async def _warm_symbols(target_symbols: list[str], source: DataSource) -> None:
+    async def _warm_symbols(target_symbols: list[str], source: DataSource, *, prefer_ib: bool) -> None:
         sem = asyncio.Semaphore(3)
 
         async def _warm_one(sym: str) -> None:
@@ -181,7 +181,7 @@ async def _ensure_watchlist_intraday_cache(
                     lookback_days=warm_lookback_days,
                     source=source,
                     chunk_days=min(max(1, warm_lookback_days), 20),
-                    prefer_ib=True,
+                    prefer_ib=prefer_ib,
                     ib_use_rth=False,
                     ib_what_to_show="TRADES",
                     ib_max_retries=2,
@@ -195,17 +195,30 @@ async def _ensure_watchlist_intraday_cache(
         if not _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)
     ]
     if missing:
-        await _warm_symbols(missing, data_source)
+        if data_source == "auto":
+            # In auto mode, avoid IB-first warm-ups that can stall and trip
+            # frontend proxy timeouts while connected to IB.
+            await _warm_symbols(missing, "auto", prefer_ib=False)
+        else:
+            await _warm_symbols(missing, data_source, prefer_ib=(data_source == "ib"))
 
     still_missing = [
         sym for sym in symbols
         if not _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)
     ]
-    if still_missing and data_source != "yfinance":
+    if still_missing and data_source == "auto":
+        # For long lookbacks where Yahoo coverage is insufficient, make a
+        # second pass through IB only for remaining symbols.
+        await _warm_symbols(still_missing, "ib", prefer_ib=True)
+        still_missing = [
+            sym for sym in symbols
+            if not _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)
+        ]
+    if still_missing and data_source == "ib":
         # Force a second pass against Yahoo for symbols that still have gaps.
         # This handles cases where IB is technically connected but not serving
         # historical bars for the current host/session.
-        await _warm_symbols(still_missing, "yfinance")
+        await _warm_symbols(still_missing, "yfinance", prefer_ib=False)
         still_missing = [
             sym for sym in symbols
             if not _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)

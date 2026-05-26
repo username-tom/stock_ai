@@ -105,8 +105,10 @@ export const importSandbox = (file) => {
 }
 export const resetSandbox = () => api.post('/sandbox/reset').then(r => r.data)
 export const resetSandboxSoft = () => api.post('/sandbox/reset-soft').then(r => r.data)
-export const getSandboxAnalytics = () => api.get('/sandbox/analytics').then(r => r.data)
-export const getSandboxRealizedMetrics = () => api.get('/sandbox/realized-metrics').then(r => r.data)
+export const getSandboxAnalytics = (profile = undefined) =>
+  api.get('/sandbox/analytics', { params: profile ? { profile } : {} }).then(r => r.data)
+export const getSandboxRealizedMetrics = (profile = undefined) =>
+  api.get('/sandbox/realized-metrics', { params: profile ? { profile } : {} }).then(r => r.data)
 export const getSandboxEngineState = () => api.get('/sandbox/engine/state').then(r => r.data)
 export const toggleAllSandboxEngines = () => api.post('/sandbox/engine/toggle-all').then(r => r.data)
 export const toggleSandboxEngine = (symbol) => api.post(`/sandbox/engine/toggle/${symbol}`).then(r => r.data)

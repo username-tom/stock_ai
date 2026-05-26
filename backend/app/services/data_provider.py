@@ -21,7 +21,7 @@ import json
 import logging
 import time
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -99,6 +99,20 @@ def _cache_path(symbol: str, source: str, intraday: bool) -> Path:
     return _HIST_CACHE_DIR / f"{safe_symbol}__{source}__{kind}.json"
 
 
+def _load_cache_meta(symbol: str, source: str, intraday: bool) -> dict[str, object]:
+    """Load lightweight cache-file metadata without materialising rows."""
+    path = _cache_path(symbol, source, intraday)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+    except Exception:
+        return {}
+
+
 def _ensure_et_index(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     idx = pd.to_datetime(out.index, errors="coerce")
@@ -155,13 +169,21 @@ def _load_cached_df(symbol: str, source: str, start: str, end: str, intraday: bo
         return None
 
 
-def _save_cached_df(symbol: str, source: str, intraday: bool, df: pd.DataFrame) -> None:
+def _save_cached_df(
+    symbol: str,
+    source: str,
+    intraday: bool,
+    df: pd.DataFrame,
+    *,
+    ib_verified: bool | None = None,
+) -> None:
     if df.empty:
         return
     try:
         _HIST_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         path = _cache_path(symbol, source, intraday)
         existing = _load_cached_df(symbol, source, "1900-01-01", "2100-01-01", intraday)
+        existing_meta = _load_cache_meta(symbol, source, intraday)
         merged = pd.concat([existing, df]) if existing is not None else df.copy()
         merged = merged[~merged.index.duplicated(keep="last")].sort_index()
         if intraday and not merged.empty:
@@ -184,11 +206,22 @@ def _save_cached_df(symbol: str, source: str, intraday: bool, df: pd.DataFrame) 
                 # Fallback: the first reset-index column is the timestamp axis.
                 out = out.rename(columns={out.columns[0]: "ts"})
         out["ts"] = out["ts"].astype(str)
+        effective_ib_verified = (
+            bool(ib_verified)
+            if ib_verified is not None
+            else bool(existing_meta.get("ib_verified", source == "ib"))
+        )
+        ib_verified_at = existing_meta.get("ib_verified_at")
+        if effective_ib_verified and not ib_verified_at:
+            ib_verified_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
         payload = {
             "symbol": symbol.upper(),
             "source": source,
             "intraday": intraday,
             "interval": df.attrs.get("interval"),
+            "ib_verified": effective_ib_verified,
+            "ib_verified_at": ib_verified_at,
             "rows": out.to_dict(orient="records"),
         }
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -198,8 +231,12 @@ def _save_cached_df(symbol: str, source: str, intraday: bool, df: pd.DataFrame) 
 
 def get_intraday_cache_coverage(symbol: str, source: DataSource = "auto") -> dict[str, str | int | None]:
     """Return basic coverage metadata for a symbol's intraday local cache."""
-    resolved = _resolve_source(source)
+    # Coverage inspection must honor explicit source selection. In IB-connected
+    # sessions, resolving "yfinance" to "ib" would incorrectly hide Yahoo cache
+    # rows and make auto-source coverage checks fail.
+    resolved = _resolve_source(source) if source == "auto" else source
     cached = _load_cached_df(symbol, resolved, "1900-01-01", "2100-01-01", intraday=True)
+    meta = _load_cache_meta(symbol, resolved, intraday=True)
     if cached is None or cached.empty:
         return {
             "symbol": symbol.upper(),
@@ -207,6 +244,8 @@ def get_intraday_cache_coverage(symbol: str, source: DataSource = "auto") -> dic
             "rows": 0,
             "oldest": None,
             "newest": None,
+            "ib_verified": bool(meta.get("ib_verified", resolved == "ib")),
+            "ib_verified_at": str(meta.get("ib_verified_at") or "") or None,
         }
     return {
         "symbol": symbol.upper(),
@@ -214,6 +253,8 @@ def get_intraday_cache_coverage(symbol: str, source: DataSource = "auto") -> dic
         "rows": int(len(cached)),
         "oldest": str(cached.index.min()),
         "newest": str(cached.index.max()),
+        "ib_verified": bool(meta.get("ib_verified", resolved == "ib")),
+        "ib_verified_at": str(meta.get("ib_verified_at") or "") or None,
     }
 
 
@@ -244,7 +285,12 @@ def warm_intraday_cache(
         chunk_days = 1
 
     resolved = _resolve_source(source)
-    if prefer_ib and _ib_is_connected():
+    # Allow callers to explicitly bypass IB even when connected.
+    # This is used by backtest preflight to avoid IB historical stalls in
+    # auto mode while still keeping IB as an optional second pass.
+    if source in ("auto", "yfinance") and not prefer_ib:
+        resolved = "yfinance"
+    elif prefer_ib and _ib_is_connected():
         resolved = "ib"
     sym = symbol.upper()
     end_dt = datetime.now(_ET).date()
@@ -278,6 +324,9 @@ def warm_intraday_cache(
         def _fetch_ib_1m_chunk(chunk_start: date, chunk_end: date) -> pd.DataFrame:
             duration_days = max((chunk_end - chunk_start).days + 1, 1)
             end_datetime = f"{chunk_end.strftime('%Y%m%d')} 23:59:59"
+            # IB can take substantially longer for larger intraday windows,
+            # especially while other quote/account polling is active.
+            request_timeout_s = max(25.0, min(90.0, float(duration_days * 3)))
             meta = _run_async(
                 ib_service.get_historical_bars_request_meta(
                     symbol=sym,
@@ -286,6 +335,7 @@ def warm_intraday_cache(
                     bar_size="1 min",
                     what_to_show=what_to_show,
                     use_rth=bool(ib_use_rth),
+                    timeout_s=request_timeout_s,
                 )
             )
             bars = list(meta.get("bars") or [])
@@ -329,7 +379,7 @@ def warm_intraday_cache(
                 try:
                     df = _fetch_ib_1m_chunk(cursor, chunk_end)
                     if not df.empty:
-                        _save_cached_df(sym, resolved, intraday=True, df=df)
+                        _save_cached_df(sym, resolved, intraday=True, df=df, ib_verified=(resolved == "ib"))
                         fetched_rows += int(len(df))
                     chunk_ok = True
                     break
@@ -404,7 +454,7 @@ def warm_intraday_cache(
                     continue
                 df = _tag_market_session(df)
                 df.attrs["interval"] = interval
-                _save_cached_df(sym, resolved, intraday=True, df=df)
+                _save_cached_df(sym, resolved, intraday=True, df=df, ib_verified=(resolved == "ib"))
                 fetched_rows += int(len(df))
                 got_any_rows = True
                 fetched_chunks += 1
@@ -437,6 +487,8 @@ def warm_intraday_cache(
         "ib_use_rth": bool(ib_use_rth) if resolved == "ib" else None,
         "ib_what_to_show": (str(ib_what_to_show or "").upper() if resolved == "ib" else None),
         "full_lookback_covered": bool(oldest and pd.Timestamp(oldest).date() <= start_dt),
+        "ib_verified": bool(coverage.get("ib_verified", resolved == "ib")),
+        "ib_verified_at": coverage.get("ib_verified_at"),
         "warning": warning,
         "error": last_error,
     }
@@ -751,7 +803,7 @@ def fetch_ohlcv_intraday(
 
     if source == "ib":
         df = _fetch_ib_intraday(symbol, start, end)
-        _save_cached_df(symbol, source, intraday=True, df=df)
+        _save_cached_df(symbol, source, intraday=True, df=df, ib_verified=(source == "ib"))
         return df
 
     if source != "yfinance":
@@ -762,7 +814,7 @@ def fetch_ohlcv_intraday(
         )
         df = fetch_ohlcv(symbol, start, end, source=source)
         df.attrs["interval"] = "1d"
-        _save_cached_df(symbol, source, intraday=False, df=df)
+        _save_cached_df(symbol, source, intraday=False, df=df, ib_verified=(source == "ib"))
         return df
 
     for interval in ("1m", "2m", "5m"):
@@ -786,7 +838,7 @@ def fetch_ohlcv_intraday(
                 "%d total bars (%d regular-session)",
                 interval, symbol, start, end, len(df), n_regular,
             )
-            _save_cached_df(symbol, source, intraday=True, df=df)
+            _save_cached_df(symbol, source, intraday=True, df=df, ib_verified=(source == "ib"))
             return df
         except Exception as exc:
             logger.debug("Intraday interval %s failed for %s: %s", interval, symbol, exc)
@@ -864,7 +916,7 @@ def fetch_ohlcv(
     if source == "ib":
         try:
             df = _fetch_ib(symbol, start, end)
-            _save_cached_df(symbol, source, intraday=False, df=df)
+            _save_cached_df(symbol, source, intraday=False, df=df, ib_verified=(source == "ib"))
             return df
         except ValueError as exc:
             logger.warning(
@@ -875,7 +927,7 @@ def fetch_ohlcv(
     if source == "yfinance":
         try:
             df = _fetch_yfinance(symbol, start, end)
-            _save_cached_df(symbol, source, intraday=False, df=df)
+            _save_cached_df(symbol, source, intraday=False, df=df, ib_verified=(source == "ib"))
             return df
         except ValueError as exc:
             if requested_source in ("auto", "ib"):
@@ -883,12 +935,12 @@ def fetch_ohlcv(
                     "yfinance failed (%s); falling back to stooq for %s.", exc, symbol
                 )
                 df = _fetch_stooq(symbol, start, end)
-                _save_cached_df(symbol, "stooq", intraday=False, df=df)
+                _save_cached_df(symbol, "stooq", intraday=False, df=df, ib_verified=False)
                 return df
             raise
 
     df = fetchers[source](symbol, start, end)
-    _save_cached_df(symbol, source, intraday=False, df=df)
+    _save_cached_df(symbol, source, intraday=False, df=df, ib_verified=(source == "ib"))
     return df
 
 
