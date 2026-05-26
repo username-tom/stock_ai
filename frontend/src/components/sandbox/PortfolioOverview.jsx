@@ -13,7 +13,7 @@ import { getSandboxFundEvents } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { usePriceChangeTracking } from '../../hooks/usePriceChangeTracking'
 import { PIE_COLORS } from './sandboxConstants'
-import { backfillTradeAvgPrice, fmt, fmtMoney } from './sandboxHelpers'
+import { backfillTradeAvgPrice, fmt, fmtMoney, getVisibleTradePnl } from './sandboxHelpers'
 import MiniSparkline from '../dashboard/MiniSparkline'
 
 const BULL_COLOR = '#10b981'
@@ -1233,6 +1233,7 @@ export default function PortfolioOverview({
             id: a.tradeId != null ? `t-${a.tradeId}` : `ta-${a.ts ?? 0}-${a.symbol ?? ''}-${a.side ?? ''}-${i}`,
             kind: 'trade',
             side: a.side,
+            status: a.status,
             syncFromIb: a.syncFromIb === true,
             ts: a.ts,
             date: new Date(a.ts).toISOString(),
@@ -1246,7 +1247,7 @@ export default function PortfolioOverview({
             reason: a.reason ?? a.sub ?? null,
           }))
           const tradeEntries = backfillTradeAvgPrice(rawTradeEntries).map((entry) => {
-            const explicit = entry.pnl != null ? Number(entry.pnl) : Number.NaN
+            const explicit = getVisibleTradePnl(entry)
             if (Number.isFinite(explicit)) {
               return { ...entry, displayPnl: explicit }
             }
@@ -1256,7 +1257,8 @@ export default function PortfolioOverview({
               return { ...entry, displayPnl: null }
             }
 
-            if (entry.side === 'SELL') {
+            const status = String(entry.status ?? '').toUpperCase()
+            if (entry.side === 'SELL' && status === 'FILLED') {
               const avg = Number(entry.avgPrice)
               const qty = Number(entry.shares)
               const mv = Number(entry.marketValue)

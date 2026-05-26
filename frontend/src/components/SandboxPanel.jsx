@@ -23,7 +23,7 @@ import {
   bulkUpdateSandboxAllocationCap,
   cancelOrder,
 } from '../api/client'
-import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy } from './sandbox/sandboxHelpers'
+import { pct, fmt, fmtMoney, defaultParams, encodeStrategy, decodeStrategy, getVisibleTradePnl } from './sandbox/sandboxHelpers'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandbox/sandboxConstants'
 import { useAppSettings } from '../hooks/useAppSettings'
 import { WATCHLIST_SYMBOL_LIMIT } from '../hooks/useWatchlist'
@@ -196,7 +196,9 @@ export default function SandboxPanel() {
   const ibConnected = ibStatus?.connected === true
   const ibSelectedMode = ibStatus?.mode ?? 'paper'
   const ibMode = ibConnected ? (ibStatus?.mode ?? 'paper') : null
-  const activeProfile = ibConnected ? portfolioView : 'simulated'
+  const activeProfile = ibConnected
+    ? (portfolioView === 'simulated' ? 'simulated' : (ibMode ?? 'paper'))
+    : 'simulated'
   const viewIbMode = activeProfile === 'simulated' ? null : activeProfile
   useEffect(() => { activeProfileRef.current = activeProfile }, [activeProfile])
   const { data: ibPositionsData } = useQuery({
@@ -503,6 +505,7 @@ export default function SandboxPanel() {
           const profile = activeProfile === 'simulated' ? 'simulated' : (t.mode ?? activeProfile).toLowerCase()
           const status = String(t.status ?? '').toUpperCase()
           const isCancelled = status === 'CANCELLED'
+          const visiblePnl = getVisibleTradePnl(t)
           const createdTs = t.created_at ? new Date(t.created_at).getTime() : Number.NaN
           const fallbackKey = t.id != null
             ? `trade:${t.id}`
@@ -519,14 +522,15 @@ export default function SandboxPanel() {
             profile,
             tradeId: t.id,
             side: t.side,
+            status,
             symbol: t.symbol,
             shares: t.quantity ?? null,
             price: t.price ?? null,
-            pnl: t.pnl ?? null,
+            pnl: visiblePnl,
             reason: t.reason ?? null,
             label: `${isCancelled ? 'CANCEL' : t.side} ${t.quantity} ${t.symbol}${
               t.price != null ? ` @ $${Number(t.price).toFixed(2)}` : ''}${
-              t.pnl != null ? ` · PnL: ${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}` : ''
+              visiblePnl != null ? ` · PnL: ${visiblePnl >= 0 ? '+' : ''}${visiblePnl.toFixed(2)}` : ''
             }`,
             sub,
             time: new Date(ts).toLocaleTimeString(),
@@ -1028,10 +1032,13 @@ export default function SandboxPanel() {
                         : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
                     }`}
                     onClick={() => {
-                      setPortfolioView('paper')
+                      if (ibMode === 'paper') {
+                        setPortfolioView('paper')
+                        return
+                      }
                       setIbModeMut.mutate('paper')
                     }}
-                    disabled={setIbModeMut.isPending || activeProfile === 'paper'}
+                    disabled={setIbModeMut.isPending || (ibMode === 'paper' && activeProfile === 'paper')}
                     title="Switch IB mode to paper"
                   >
                     Paper
@@ -1043,10 +1050,13 @@ export default function SandboxPanel() {
                         : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'
                     }`}
                     onClick={() => {
-                      setPortfolioView('live')
+                      if (ibMode === 'live') {
+                        setPortfolioView('live')
+                        return
+                      }
                       setIbModeMut.mutate('live')
                     }}
-                    disabled={setIbModeMut.isPending || activeProfile === 'live'}
+                    disabled={setIbModeMut.isPending || (ibMode === 'live' && activeProfile === 'live')}
                     title="Switch IB mode to live"
                   >
                     Live

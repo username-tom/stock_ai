@@ -80,6 +80,10 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
     changed = 0
     now_utc = datetime.now(timezone.utc)
     for trade in pending:
+        row_changed = False
+        if trade.pnl is not None:
+            trade.pnl = None
+            row_changed = True
         oid = int(trade.ib_order_id)
         open_status = open_status_by_id.get(oid)
         known_status = known_status_by_id.get(oid, "")
@@ -103,12 +107,21 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
                 final_status = OrderStatus.FILLED
 
         if final_status is None or trade.status == final_status:
+            if row_changed:
+                changed += 1
             continue
 
         trade.status = final_status
+        row_changed = True
+        if final_status != OrderStatus.FILLED:
+            trade.pnl = None
+        elif trade.side != OrderSide.SELL:
+            trade.pnl = None
         if final_status == OrderStatus.FILLED and trade.filled_at is None:
             trade.filled_at = now_utc
-        changed += 1
+            row_changed = True
+        if row_changed:
+            changed += 1
 
     if changed:
         await db.commit()

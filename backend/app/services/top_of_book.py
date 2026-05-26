@@ -229,7 +229,7 @@ async def get_ib_top_of_book(symbol: str) -> dict[str, Any] | None:
         bid_size = bid_size or est_bid
         ask_size = ask_size or est_ask
 
-    return _build_book(
+    book = _build_book(
         symbol=symbol,
         bid=bid,
         ask=ask,
@@ -238,6 +238,17 @@ async def get_ib_top_of_book(symbol: str) -> dict[str, Any] | None:
         last_price=last_px if last_px > 0.0 else (bid + ask) / 2.0,
         source="ib_tob",
     )
+    market_data_type = int(raw.get("market_data_type") or 0)
+    labels = {
+        1: "live",
+        2: "frozen",
+        3: "delayed",
+        4: "delayed-frozen",
+    }
+    book["market_data_type"] = market_data_type or None
+    book["market_data_label"] = labels.get(market_data_type, "unknown")
+    book["is_live_market_data"] = market_data_type == 1
+    return book
 
 
 def market_fill_price(book: dict[str, Any] | None, side: str, fallback_price: float = 0.0) -> float:

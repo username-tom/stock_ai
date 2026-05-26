@@ -433,6 +433,7 @@ class IBService:
                 "last": data.get("last"),
                 "close": data.get("close"),
                 "volume": data.get("volume"),
+                "market_data_type": settings.IB_MARKET_DATA_TYPE,
                 "halted": None,
             }
         except Exception as exc:

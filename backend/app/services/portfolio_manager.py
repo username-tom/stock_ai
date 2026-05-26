@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.database import AsyncSessionLocal
 from app.models.sandbox import SandboxPosition, SandboxTrade
+from app.services.local_storage import append_portfolio_activity_entry
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,7 @@ _state: dict[str, Any] = {
     "last_transfer_at": None,
     "last_score_at": None,
     "scores": {},          # { symbol: { score, classification, updated_at } }
-    "last_activity": [],   # list of recent log entries (max 20)
+    "last_activity": [],   # list of recent log entries (max 200)
     "market_classification": {
         "score": 0.0, "classification": "neutral", "bucket": "neutral", "updated_at": None,
     },
@@ -1517,7 +1518,14 @@ async def _apply_ai_tag_strategies() -> None:
 def _log_activity(msg: str) -> None:
     entry = {"at": datetime.now(timezone.utc).isoformat(), "msg": msg}
     _state["last_activity"].insert(0, entry)
-    _state["last_activity"] = _state["last_activity"][:20]
+    _state["last_activity"] = _state["last_activity"][:200]
+    try:
+        append_portfolio_activity_entry({
+            **entry,
+            "source": "portfolio_manager",
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("PortfolioManager activity persistence failed: %s", exc)
     logger.info("PortfolioManager: %s", msg)
 
 
@@ -2327,7 +2335,7 @@ async def _process_ib_engine_signals() -> None:
         return
 
     ib_mode = str(getattr(app_settings, "TRADING_MODE", "paper") or "paper").strip().lower()
-    activity_debug_enabled = ib_mode == "paper"
+    activity_debug_enabled = True
 
     def _log_ib_trigger(msg: str) -> None:
         if activity_debug_enabled:

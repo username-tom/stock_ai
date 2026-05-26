@@ -30,6 +30,7 @@ import httpx
 import pandas as pd
 import yfinance as yf
 
+from app.config import settings
 from app.services.ib_service import IB_AVAILABLE, ib_service
 from app.services.market_calendar import is_nyse_trading_day
 
@@ -73,6 +74,7 @@ DataSource = Literal["auto", "yfinance", "stooq", "ib"]
 _FREE_SOURCES: tuple[str, ...] = ("yfinance", "stooq")
 
 _HIST_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "historical_cache"
+_HIST_ARCHIVE_DIR = Path(settings.LOCAL_STORAGE_DIR) / "historical_archive" / "intraday"
 _DAILY_CACHE_LIMIT = 20_000
 _INTRADAY_CACHE_LIMIT = 300_000
 _INTRADAY_CACHE_RETENTION_DAYS = 370
@@ -169,6 +171,80 @@ def _load_cached_df(symbol: str, source: str, start: str, end: str, intraday: bo
         return None
 
 
+def _cached_df_covers_range(df: pd.DataFrame | None, start: str, end: str, *, intraday: bool) -> bool:
+    if df is None or df.empty:
+        return False
+    try:
+        start_dt = pd.Timestamp(start).date()
+        end_dt = pd.Timestamp(end).date()
+        oldest_dt = pd.Timestamp(df.index.min()).date()
+        newest_dt = pd.Timestamp(df.index.max()).date()
+    except Exception:
+        return False
+
+    required_start = start_dt
+    while required_start.weekday() >= 5:
+        required_start += timedelta(days=1)
+
+    required_end = min(end_dt, datetime.now().date())
+    while required_end.weekday() >= 5:
+        required_end -= timedelta(days=1)
+
+    tolerance_days = 3 if intraday else 0
+    return (
+        oldest_dt <= (required_start + timedelta(days=tolerance_days))
+        and (newest_dt + timedelta(days=tolerance_days)) >= required_end
+    )
+
+
+def _archive_intraday_rows(symbol: str, source: str, df: pd.DataFrame) -> None:
+    """Persist old intraday rows into local storage archive partitioned by year."""
+    if df.empty:
+        return
+    try:
+        scoped = _ensure_et_index(df)
+        scoped = scoped[[c for c in ["Open", "High", "Low", "Close", "Volume", "session"] if c in scoped.columns]]
+        if scoped.empty:
+            return
+
+        _HIST_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        for year, part in scoped.groupby(scoped.index.year):
+            if part.empty:
+                continue
+            archive_path = _HIST_ARCHIVE_DIR / f"{symbol.upper()}__{source}__{int(year)}__intraday.json"
+            existing: pd.DataFrame | None = None
+            if archive_path.exists():
+                try:
+                    payload = json.loads(archive_path.read_text(encoding="utf-8"))
+                    rows = payload.get("rows") or []
+                    if rows:
+                        existing = pd.DataFrame(rows)
+                        if "ts" in existing.columns:
+                            existing["ts"] = pd.to_datetime(existing["ts"], errors="coerce")
+                            existing = existing.dropna(subset=["ts"]).set_index("ts").sort_index()
+                            existing = existing[[c for c in ["Open", "High", "Low", "Close", "Volume", "session"] if c in existing.columns]]
+                        else:
+                            existing = None
+                except Exception:
+                    existing = None
+
+            merged = pd.concat([existing, part]) if existing is not None else part.copy()
+            merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+            out = merged.reset_index().rename(columns={merged.index.name or "index": "ts"})
+            out["ts"] = out["ts"].astype(str)
+            payload = {
+                "symbol": symbol.upper(),
+                "source": source,
+                "intraday": True,
+                "year": int(year),
+                "rows": out.to_dict(orient="records"),
+                "archived_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            archive_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Failed archiving historical intraday rows for %s (%s): %s", symbol, source, exc)
+
+
 def _save_cached_df(
     symbol: str,
     source: str,
@@ -189,6 +265,9 @@ def _save_cached_df(
         if intraday and not merged.empty:
             scoped = _ensure_et_index(merged)
             cutoff = datetime.now(_ET) - timedelta(days=_INTRADAY_CACHE_RETENTION_DAYS)
+            old_rows = scoped[scoped.index < cutoff]
+            if not old_rows.empty:
+                _archive_intraday_rows(symbol, source, old_rows)
             merged = scoped[scoped.index >= cutoff]
         max_rows = _INTRADAY_CACHE_LIMIT if intraday else _DAILY_CACHE_LIMIT
         if len(merged) > max_rows:
@@ -501,14 +580,55 @@ def _ib_is_connected() -> bool:
 def _resolve_source(source: DataSource) -> DataSource:
     """Resolve requested source to the effective source.
 
-    When IB is connected, Yahoo requests are upgraded to IB so the app uses
-    the broker feed consistently.
+    Only auto mode is upgraded based on connection state. Explicit source
+    selections must remain explicit so cached Yahoo data does not become
+    inaccessible just because IB is connected.
     """
     if source == "auto":
         return "ib" if _ib_is_connected() else "yfinance"
-    if source == "yfinance" and _ib_is_connected():
-        return "ib"
     return source
+
+
+def _load_best_local_cached_df(
+    symbol: str,
+    start: str,
+    end: str,
+    *,
+    intraday: bool,
+    requested_source: DataSource,
+) -> pd.DataFrame | None:
+    """Return the best locally cached dataframe for a cache-first backtest.
+
+    In IB mode we still want to consume existing local Yahoo/Stooq cache while
+    background verification fills IB-specific gaps. Prefer a full-range cache;
+    otherwise return no cache so callers can fail loudly instead of silently
+    truncating the backtest.
+    """
+    if intraday:
+        fallback_sources: tuple[str, ...] = (
+            ("ib", "yfinance")
+            if requested_source in ("auto", "ib")
+            else (str(requested_source),)
+        )
+    else:
+        fallback_sources = (
+            ("ib", "yfinance", "stooq")
+            if requested_source in ("auto", "ib")
+            else (str(requested_source),)
+        )
+
+    partial_candidate: pd.DataFrame | None = None
+    partial_rows = -1
+    for cache_source in fallback_sources:
+        cached_any = _load_cached_df(symbol, cache_source, start, end, intraday=intraday)
+        if cached_any is None:
+            continue
+        if _cached_df_covers_range(cached_any, start, end, intraday=intraday):
+            return cached_any
+        if len(cached_any) > partial_rows:
+            partial_candidate = cached_any
+            partial_rows = len(cached_any)
+    return partial_candidate
 
 
 # --------------------------------------------------------------------------- #
@@ -783,15 +903,42 @@ def fetch_ohlcv_intraday(
     ValueError
         When no intraday data could be fetched for any supported interval.
     """
+    requested_source = source
     source = _resolve_source(source)
 
-    cached = _load_cached_df(symbol, source, start, end, intraday=True)
-    if cached is not None:
-        return cached
+    if requested_source == "auto":
+        # Auto backtests should only consume a cache source that actually
+        # covers the whole requested range. Otherwise a short IB cache can
+        # eclipse a longer Yahoo cache and silently truncate the run.
+        cached_local = _load_best_local_cached_df(
+            symbol,
+            start,
+            end,
+            intraday=True,
+            requested_source=requested_source,
+        )
+        if cached_local is not None and (
+            _cached_df_covers_range(cached_local, start, end, intraday=True) or allow_remote_pull
+        ):
+            return cached_local
+    elif requested_source == "ib" and not allow_remote_pull:
+        cached_local = _load_best_local_cached_df(
+            symbol,
+            start,
+            end,
+            intraday=True,
+            requested_source=requested_source,
+        )
+        if cached_local is not None and _cached_df_covers_range(cached_local, start, end, intraday=True):
+            return cached_local
+    else:
+        cached = _load_cached_df(symbol, source, start, end, intraday=True)
+        if cached is not None and (_cached_df_covers_range(cached, start, end, intraday=True) or allow_remote_pull):
+            return cached
 
-    if not allow_remote_pull and source != "ib":
+    if not allow_remote_pull:
         raise ValueError(
-            f"No cached intraday data for {symbol!r} ({start}→{end}, source={source}). "
+            f"No cached intraday data for {symbol!r} ({start}→{end}, source={requested_source}). "
             "Backtest network pulls are disabled; warm cache via data manager workflows first."
         )
 
@@ -892,13 +1039,38 @@ def fetch_ohlcv(
     requested_source = source
     source = _resolve_source(source)
 
-    cached = _load_cached_df(symbol, source, start, end, intraday=False)
-    if cached is not None:
-        return cached
+    if requested_source == "auto":
+        # Mirror intraday behavior: prefer the first cache source that fully
+        # covers the requested range instead of any partial cache hit.
+        cached_local = _load_best_local_cached_df(
+            symbol,
+            start,
+            end,
+            intraday=False,
+            requested_source=requested_source,
+        )
+        if cached_local is not None and (
+            _cached_df_covers_range(cached_local, start, end, intraday=False) or allow_remote_pull
+        ):
+            return cached_local
+    elif requested_source == "ib" and not allow_remote_pull:
+        cached_local = _load_best_local_cached_df(
+            symbol,
+            start,
+            end,
+            intraday=False,
+            requested_source=requested_source,
+        )
+        if cached_local is not None and _cached_df_covers_range(cached_local, start, end, intraday=False):
+            return cached_local
+    else:
+        cached = _load_cached_df(symbol, source, start, end, intraday=False)
+        if cached is not None and (_cached_df_covers_range(cached, start, end, intraday=False) or allow_remote_pull):
+            return cached
 
-    if not allow_remote_pull and source != "ib":
+    if not allow_remote_pull:
         raise ValueError(
-            f"No cached daily data for {symbol!r} ({start}→{end}, source={source}). "
+            f"No cached daily data for {symbol!r} ({start}→{end}, source={requested_source}). "
             "Backtest network pulls are disabled; warm cache via data manager workflows first."
         )
 

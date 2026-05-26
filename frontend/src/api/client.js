@@ -4,6 +4,7 @@ const api = axios.create({ baseURL: '/api' })
 
 // Market data
 export const getQuote = (symbol) => api.get(`/market-data/quote/${symbol}`).then(r => r.data)
+export const getTopOfBook = (symbol) => api.get(`/market-data/top-of-book/${symbol}`).then(r => r.data)
 export const getBulkQuotes = (symbols) =>
   api.get('/market-data/bulk-quotes', { params: { symbols: symbols.join(',') } }).then(r => r.data)
 export const getSymbolSectors = (symbols) =>
@@ -31,6 +32,8 @@ export const runSandboxBacktest = (payload) => api.post('/backtest/run-sandbox',
 export const warmIntradayCache = (payload) => api.post('/backtest/cache/warm-intraday', payload).then(r => r.data)
 export const getIntradayCacheCoverage = (symbol, dataSource = 'auto') =>
   api.get('/backtest/cache/intraday-coverage', { params: { symbol, data_source: dataSource } }).then(r => r.data)
+export const getBacktestIbVerificationStatus = (limit = 50) =>
+  api.get('/backtest/cache/ib-verification-status', { params: { limit } }).then(r => r.data)
 export const getReports = ({ page = 1, pageSize = 50 } = {}) =>
   api.get('/backtest/reports', { params: { page, page_size: pageSize } }).then(r => r.data)
 export const getReport = (id) => api.get(`/backtest/reports/${id}`).then(r => r.data)

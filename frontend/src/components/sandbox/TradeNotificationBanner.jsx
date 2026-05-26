@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { XMarkIcon, ArrowTrendingUpIcon, ArrowTrendingDownIcon } from '@heroicons/react/24/outline'
+import { getVisibleTradePnl } from './sandboxHelpers'
 
 const NOTIFICATION_TTL_MS = 5 * 60 * 1000
 const MAX_BANNER_VISIBLE_MS = 8_000
@@ -48,8 +49,9 @@ export default function TradeNotificationBanner({ latestEngineTrade }) {
   if (!visible || !trade) return null
 
   const isBuy = trade.side === 'BUY'
-  const isGain = !isBuy && trade.pnl != null && trade.pnl >= 0
-  const isLoss = !isBuy && trade.pnl != null && trade.pnl < 0
+  const visiblePnl = getVisibleTradePnl(trade)
+  const isGain = !isBuy && visiblePnl != null && visiblePnl >= 0
+  const isLoss = !isBuy && visiblePnl != null && visiblePnl < 0
   const stratLabel = trade.strategy_name?.split(':')[0] ?? 'Engine'
 
   const bannerCls = isBuy
@@ -87,9 +89,9 @@ export default function TradeNotificationBanner({ latestEngineTrade }) {
           <span className={`font-bold ${sideCls}`}>{trade.side}</span>
           {' '}{trade.quantity} <span className="font-bold text-white">{trade.symbol}</span>
           {' '}@ <span className="font-mono">${trade.price?.toFixed(2)}</span>
-          {trade.pnl != null && (
-            <span className={`ml-2 ${trade.pnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
-              PnL: {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
+          {visiblePnl != null && (
+            <span className={`ml-2 ${visiblePnl >= 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+              PnL: {visiblePnl >= 0 ? '+' : ''}{visiblePnl.toFixed(2)}
             </span>
           )}
           <span className="ml-2 text-xs opacity-60">via {stratLabel}</span>

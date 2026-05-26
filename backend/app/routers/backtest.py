@@ -17,12 +17,14 @@ from app.database import get_db
 from app.models.custom_script import CustomScript
 from app.models.report import BacktestReport
 from app.services.backtester import run_backtest
+from app.services.data_maintenance import enqueue_ib_verification, get_ib_verification_status
 from app.services.data_provider import (
     DataSource,
     get_intraday_cache_coverage,
     list_data_sources,
     warm_intraday_cache,
 )
+from app.services.ib_service import IB_AVAILABLE, ib_service
 from app.services.local_storage import (
     _safe_filename,
     list_backtest_report_files,
@@ -111,6 +113,10 @@ def _intraday_cache_covers_range(coverage: dict, start_date: str, end_date: str)
     except ValueError:
         return False
 
+    required_start = start_dt
+    while required_start.weekday() >= 5:
+        required_start += timedelta(days=1)
+
     # Intraday feeds do not emit bars on weekends/holidays, and callers often
     # use "today" as end_date. Validate against the latest required trading day.
     required_end = min(end_dt, datetime.now().date())
@@ -119,7 +125,7 @@ def _intraday_cache_covers_range(coverage: dict, start_date: str, end_date: str)
 
     # Allow a small calendar-day tolerance so holiday closures (for example,
     # Monday market holidays) do not fail otherwise valid Friday-ending caches.
-    return oldest_dt <= start_dt and (newest_dt + timedelta(days=3)) >= required_end
+    return oldest_dt <= (required_start + timedelta(days=3)) and (newest_dt + timedelta(days=3)) >= required_end
 
 
 def _intraday_cache_covers_range_for_source(
@@ -150,7 +156,7 @@ async def _ensure_watchlist_intraday_cache(
     start_date: str,
     end_date: str,
     data_source: DataSource,
-) -> None:
+) -> dict[str, object]:
     """Warm intraday cache for a watchlist backtest and fail fast on gaps.
 
     Sandbox portfolio backtests are cache-first. For a month-long 1m run we
@@ -158,13 +164,13 @@ async def _ensure_watchlist_intraday_cache(
     silently skip symbols with cache misses and return a partial report.
     """
     if not symbols:
-        return
+        return {}
 
     try:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
         end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
     except ValueError:
-        return
+        return {}
 
     lookback_days = max(1, (end_dt - start_dt).days + 1)
     today_dt = datetime.now().date()
@@ -235,6 +241,39 @@ async def _ensure_watchlist_intraday_cache(
             ),
         )
 
+    verification_info: dict[str, object] = {}
+    ib_connected = bool(IB_AVAILABLE and ib_service.is_connected)
+    if data_source == "auto" and ib_connected:
+        unverified = [
+            sym
+            for sym in symbols
+            if _intraday_cache_covers_range_for_source(sym, data_source, start_date, end_date)
+            and not _intraday_cache_covers_range(
+                get_intraday_cache_coverage(sym, "ib"),
+                start_date,
+                end_date,
+            )
+        ]
+        if unverified:
+            queued = enqueue_ib_verification(
+                unverified,
+                start_date,
+                end_date,
+                reason="sandbox_backtest_preflight",
+            )
+            verification_info = {
+                "verification_unverified_symbols": unverified,
+                "verification_queued_symbols": queued,
+                "verification_warning": (
+                    "Not all intraday bars are IB-verified for this range. "
+                    "The backtest used existing cached data now, and IB verification "
+                    "was queued in the background for: "
+                    + ", ".join(unverified)
+                ),
+            }
+
+    return verification_info
+
 
 def _bars_per_year_from_interval(interval: str | None) -> float:
     """Map interval strings to trading bars per year for Sharpe scaling."""
@@ -302,6 +341,82 @@ def _flatten_per_symbol_trades(per_symbol: list[dict]) -> list[dict]:
         str(t.get("symbol") or ""),
     ))
     return combined
+
+
+def _extract_result_bar_date(bar: dict | None) -> datetime.date | None:
+    if not isinstance(bar, dict):
+        return None
+    raw = bar.get("date") or bar.get("timestamp") or bar.get("Date") or bar.get("ts")
+    if not raw:
+        return None
+    text = str(raw).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d_%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(str(raw), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _build_result_range_warning(per_symbol: list[dict], start_date: str, end_date: str) -> str | None:
+    try:
+        requested_start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        requested_end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    required_start = requested_start
+    while required_start.weekday() >= 5:
+        required_start += timedelta(days=1)
+
+    required_end = min(requested_end, datetime.now().date())
+    while required_end.weekday() >= 5:
+        required_end -= timedelta(days=1)
+
+    mismatched: list[str] = []
+    for item in per_symbol or []:
+        ohlcv = item.get("ohlcv") or []
+        if not ohlcv:
+            continue
+        first_dt = _extract_result_bar_date(ohlcv[0])
+        last_dt = _extract_result_bar_date(ohlcv[-1])
+        if first_dt is None or last_dt is None:
+            continue
+        if first_dt > (required_start + timedelta(days=3)) or (last_dt + timedelta(days=3)) < required_end:
+            mismatched.append(f"{item.get('symbol')}: {first_dt.isoformat()} to {last_dt.isoformat()}")
+
+    if not mismatched:
+        return None
+
+    suffix = "." if len(mismatched) <= 8 else f"; +{len(mismatched) - 8} more."
+    return (
+        "Saved result data does not fully cover the requested range. Actual cached bars used were: "
+        + "; ".join(mismatched[:8])
+        + suffix
+    )
+
+
+def _raise_if_backtest_fully_failed(symbols_run: int, errors: dict[str, object] | None, data_source: DataSource) -> None:
+    if symbols_run > 0:
+        return
+    error_map = errors or {}
+    message = "Sandbox backtest produced no runnable symbols."
+    if error_map:
+        first_error = next(iter(error_map.values()))
+        if first_error:
+            message = str(first_error)
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "message": message,
+            "data_source": data_source,
+            "errors": error_map,
+        },
+    )
 
 
 class BacktestRequest(BaseModel):
@@ -411,6 +526,14 @@ async def intraday_history_cache_coverage(
 ):
     """Inspect local intraday cache coverage for a symbol/source."""
     return get_intraday_cache_coverage(symbol, data_source)
+
+
+@router.get("/cache/ib-verification-status")
+async def ib_intraday_verification_status(
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    """Return current/recent queued IB verification jobs for intraday cache."""
+    return get_ib_verification_status(limit=limit)
 
 
 class SentimentBacktestRequest(BaseModel):
@@ -973,7 +1096,9 @@ async def run_sandbox_backtest_endpoint(
 
     # Sandbox PM backtests are fixed to PM sentiment routing + day-trade mode.
     # Keep request fields for backwards compatibility with older frontend payloads.
-    req = req.model_copy(update={"day_trade": True, "use_sentiment_routing": True})
+    requested_data_source = req.data_source
+    effective_data_source: DataSource = "auto" if requested_data_source == "ib" else req.data_source
+    req = req.model_copy(update={"day_trade": True, "use_sentiment_routing": True, "data_source": effective_data_source})
 
     if req.allocation_mode not in ("proportional", "equal"):
         raise HTTPException(status_code=400, detail="allocation_mode must be 'proportional' or 'equal'.")
@@ -994,8 +1119,14 @@ async def run_sandbox_backtest_endpoint(
             detail="No watchlist symbols found in sandbox. Add positions or pass `symbols`.",
         )
 
+    verification_info: dict[str, object] = {}
     if req.day_trade:
-        await _ensure_watchlist_intraday_cache(symbols, req.start_date, req.end_date, req.data_source)
+        verification_info = await _ensure_watchlist_intraday_cache(
+            symbols,
+            req.start_date,
+            req.end_date,
+            effective_data_source,
+        )
 
     pm = get_manager_settings()
     sentiment_strategies, sentiment_strategy_source = _resolve_backtest_sentiment_strategies(pm)
@@ -1179,7 +1310,7 @@ async def run_sandbox_backtest_endpoint(
                 end_date=req.end_date,
                 initial_capital=req.initial_capital,
                 commission=req.commission,
-                data_source=req.data_source,
+                data_source=effective_data_source,
                 day_trade=req.day_trade,
                 sentiment_strategies=sentiment_strategies,
                 sentiment_warmup=sentiment_warmup,
@@ -1269,6 +1400,11 @@ async def run_sandbox_backtest_endpoint(
             "symbols_run": metrics_co["symbols_run"],
             "symbols_failed": metrics_co["symbols_failed"],
         }
+        _raise_if_backtest_fully_failed(
+            metrics_out["symbols_run"],
+            coord.get("errors") or {},
+            effective_data_source,
+        )
         report_symbol = _summarize_report_symbols(symbols)
         aggregated_trades = _flatten_per_symbol_trades(per_symbol_summary)
 
@@ -1278,6 +1414,8 @@ async def run_sandbox_backtest_endpoint(
         )
         parameters_payload = {
             "symbols": symbols,
+            "data_source": effective_data_source,
+            "requested_data_source": requested_data_source,
             "use_sentiment_routing": req.use_sentiment_routing,
             "allocation_mode": req.allocation_mode,
             "use_shared_pool": True,
@@ -1301,7 +1439,13 @@ async def run_sandbox_backtest_endpoint(
             "pool_final": coord.get("pool_final"),
             "pm_settings": pm_settings_snapshot,
             "errors": coord.get("errors") or {},
+            "verification_warning": verification_info.get("verification_warning"),
+            "verification_unverified_symbols": verification_info.get("verification_unverified_symbols") or [],
+            "verification_queued_symbols": verification_info.get("verification_queued_symbols") or [],
         }
+        data_warning = _build_result_range_warning(per_symbol_summary, req.start_date, req.end_date)
+        if data_warning:
+            result_data_payload["data_warning"] = data_warning
         report = BacktestReport(
             name=name,
             symbol=report_symbol,
@@ -1353,7 +1497,15 @@ async def run_sandbox_backtest_endpoint(
                 "use_shared_pool": True,
                 "activity_log": result_data_payload["activity_log"],
                 "errors": result_data_payload["errors"],
+                "verification_warning": result_data_payload.get("verification_warning"),
+                "verification_unverified_symbols": result_data_payload.get("verification_unverified_symbols") or [],
+                "verification_queued_symbols": result_data_payload.get("verification_queued_symbols") or [],
+                "data_warning": result_data_payload.get("data_warning"),
             },
+            "verification_warning": result_data_payload.get("verification_warning"),
+            "verification_unverified_symbols": result_data_payload.get("verification_unverified_symbols") or [],
+            "verification_queued_symbols": result_data_payload.get("verification_queued_symbols") or [],
+            "data_warning": result_data_payload.get("data_warning"),
         }
 
     # Run all per-symbol backtests in parallel.
@@ -1370,7 +1522,7 @@ async def run_sandbox_backtest_endpoint(
                     end_date=req.end_date,
                     initial_capital=cap,
                     commission=req.commission,
-                    data_source=req.data_source,
+                    data_source=effective_data_source,
                     day_trade=req.day_trade,
                     sentiment_strategies=sentiment_strategies,
                     sentiment_warmup=sentiment_warmup,
@@ -1404,7 +1556,7 @@ async def run_sandbox_backtest_endpoint(
                     initial_capital=cap,
                     commission=req.commission,
                     script_code=script_code,
-                    data_source=req.data_source,
+                    data_source=effective_data_source,
                     day_trade=req.day_trade,
                     hold_positions_overnight=hold_overnight,
                     eod_sell_window_minutes=eod_window,
@@ -1593,6 +1745,11 @@ async def run_sandbox_backtest_endpoint(
         "symbols_run": sum(1 for r in per_results if not r.get("error") and not r.get("skipped")),
         "symbols_failed": sum(1 for r in per_results if r.get("error")),
     }
+    _raise_if_backtest_fully_failed(
+        metrics["symbols_run"],
+        {str(entry.get("symbol") or ""): entry.get("error") for entry in per_results if entry.get("error")},
+        effective_data_source,
+    )
     report_symbol = _summarize_report_symbols(symbols)
     aggregated_trades = _flatten_per_symbol_trades(per_symbol_summary)
 
@@ -1603,6 +1760,8 @@ async def run_sandbox_backtest_endpoint(
     )
     parameters_payload = {
         "symbols": symbols,
+        "data_source": effective_data_source,
+        "requested_data_source": requested_data_source,
         "use_sentiment_routing": req.use_sentiment_routing,
         "allocation_mode": req.allocation_mode,
         "pm_settings": pm_settings_snapshot,
@@ -1618,7 +1777,13 @@ async def run_sandbox_backtest_endpoint(
         "per_symbol_capital": per_symbol_capital,
         "use_sentiment_routing": req.use_sentiment_routing,
         "pm_settings": pm_settings_snapshot,
+        "verification_warning": verification_info.get("verification_warning"),
+        "verification_unverified_symbols": verification_info.get("verification_unverified_symbols") or [],
+        "verification_queued_symbols": verification_info.get("verification_queued_symbols") or [],
     }
+    data_warning = _build_result_range_warning(per_symbol_summary, req.start_date, req.end_date)
+    if data_warning:
+        result_data_payload["data_warning"] = data_warning
     report = BacktestReport(
         name=name,
         symbol=report_symbol,
@@ -1666,7 +1831,15 @@ async def run_sandbox_backtest_endpoint(
             "pm_settings": parameters_payload["pm_settings"],
             "use_sentiment_routing": req.use_sentiment_routing,
             "activity_log": result_data_payload["activity_log"],
+            "verification_warning": result_data_payload.get("verification_warning"),
+            "verification_unverified_symbols": result_data_payload.get("verification_unverified_symbols") or [],
+            "verification_queued_symbols": result_data_payload.get("verification_queued_symbols") or [],
+            "data_warning": result_data_payload.get("data_warning"),
         },
+        "verification_warning": result_data_payload.get("verification_warning"),
+        "verification_unverified_symbols": result_data_payload.get("verification_unverified_symbols") or [],
+        "verification_queued_symbols": result_data_payload.get("verification_queued_symbols") or [],
+        "data_warning": result_data_payload.get("data_warning"),
     }
 
 
@@ -1768,6 +1941,14 @@ async def get_report(report_id: int, db: AsyncSession = Depends(get_db)):
             "Detailed trade/ohlcv payload is unavailable for this historical report. "
             "New scripted backtests now persist traceable local logs."
         )
+    elif isinstance(result_data, dict):
+        range_warning = _build_result_range_warning(
+            result_data.get("per_symbol") or [],
+            r.start_date,
+            r.end_date,
+        )
+        if range_warning:
+            data_warning = range_warning if not data_warning else f"{data_warning} {range_warning}"
 
     return {
         "id": r.id,

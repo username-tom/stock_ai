@@ -147,6 +147,20 @@ def save_portfolio_activities_json(
     return str(path)
 
 
+def append_portfolio_activity_entry(
+    entry: dict[str, Any],
+    filename_prefix: str = "portfolio_manager_activity",
+) -> str:
+    """Append a single portfolio activity entry to a daily JSONL debug log."""
+    _PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.utcnow().strftime("%Y%m%d")
+    filename = f"{filename_prefix}_{stamp}.jsonl"
+    path = _PORTFOLIO_DIR / filename
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, default=str) + "\n")
+    return str(path)
+
+
 def list_portfolio_activity_files() -> list[dict[str, Any]]:
     """List all saved portfolio activity files."""
     files = []

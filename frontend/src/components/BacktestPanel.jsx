@@ -5,6 +5,7 @@ import {
   runBacktest,
   runSentimentBacktest,
   runSandboxBacktest,
+  getBacktestIbVerificationStatus,
   getScripts,
   getBuiltinTemplates,
   getSandboxPositions,
@@ -191,7 +192,7 @@ export default function BacktestPanel() {
   }, [])
 
   // ── Advanced / Sentiment mode ──────────────────────────────────────────── //
-  const [mode, setMode] = useState('standard') // 'standard' | 'sentiment'
+  const [mode, setMode] = useState('sandbox') // 'standard' | 'sentiment' | 'sandbox'
   const [sentForm, setSentForm] = useState({
     symbol: 'AAPL',
     start_date: defaultStartDate,
@@ -280,7 +281,12 @@ export default function BacktestPanel() {
   const sandboxProgressRef = useRef(null)
   const [pmSettingsOpen, setPmSettingsOpen] = useState(false)
 
-  const { data: sandboxPositionsData, isLoading: sandboxPositionsLoading } = useQuery({
+  const {
+    data: sandboxPositionsData,
+    isLoading: sandboxPositionsLoading,
+    isError: sandboxPositionsError,
+    error: sandboxPositionsErrorObj,
+  } = useQuery({
     queryKey: ['sandbox-positions'],
     queryFn: getSandboxPositions,
     refetchOnWindowFocus: false,
@@ -292,6 +298,13 @@ export default function BacktestPanel() {
     refetchOnMount: 'always',
     staleTime: 0,
     refetchInterval: 10_000,
+  })
+  const { data: ibVerificationStatus } = useQuery({
+    queryKey: ['backtest-ib-verification-status'],
+    queryFn: () => getBacktestIbVerificationStatus(20),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    staleTime: 2_500,
   })
 
   const sandboxMutation = useMutation({
@@ -311,6 +324,29 @@ export default function BacktestPanel() {
 
   useEffect(() => () => clearInterval(sandboxProgressRef.current), [])
 
+  const getEffectiveSandboxSymbols = () => {
+    const overrideSymbols = sandboxForm.symbols_override
+      .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+    if (overrideSymbols.length > 0) {
+      return Array.from(new Set(overrideSymbols))
+    }
+
+    const positions = sandboxPositionsData?.positions ?? []
+    const sandboxWatchlistSymbols = positions
+      .filter(p => p?.is_on_watchlist !== false)
+      .map(p => String(p?.symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+
+    if (sandboxWatchlistSymbols.length > 0) {
+      return Array.from(new Set(sandboxWatchlistSymbols))
+    }
+
+    const localWatchlistSymbols = (watchlist || [])
+      .map(s => String(s || '').trim().toUpperCase())
+      .filter(Boolean)
+    return Array.from(new Set(localWatchlistSymbols))
+  }
+
   const handleSandboxSubmit = (e) => {
     e.preventDefault()
     setSandboxProgress(0)
@@ -323,8 +359,7 @@ export default function BacktestPanel() {
       setSandboxProgress(Math.min(cur, 99))
       if (cur >= 99) clearInterval(sandboxProgressRef.current)
     }, tickMs)
-    const overrideSymbols = sandboxForm.symbols_override
-      .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+    const effectiveSymbols = getEffectiveSandboxSymbols()
     sandboxMutation.mutate({
       start_date: sandboxForm.start_date,
       end_date: sandboxForm.end_date,
@@ -334,7 +369,7 @@ export default function BacktestPanel() {
       use_shared_pool: sandboxForm.use_shared_pool,
       per_position_min_pct: sandboxForm.per_position_min_pct,
       per_position_max_pct: sandboxForm.per_position_max_pct,
-      ...(overrideSymbols.length > 0 ? { symbols: overrideSymbols } : {}),
+      ...(effectiveSymbols.length > 0 ? { symbols: effectiveSymbols } : {}),
     })
   }
 
@@ -1439,11 +1474,7 @@ export default function BacktestPanel() {
           const positions = sandboxPositionsData?.positions ?? []
           const watchlistPositions = positions.filter(p => p.is_on_watchlist !== false)
           const pmSettings = pmData?.settings ?? {}
-          const symbolsOverride = sandboxForm.symbols_override
-            .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
-          const effectiveSymbols = symbolsOverride.length > 0
-            ? symbolsOverride
-            : watchlistPositions.map(p => p.symbol)
+          const effectiveSymbols = getEffectiveSandboxSymbols()
           const totalAllocated = watchlistPositions.reduce(
             (s, p) => s + Math.max(0, Number(p.allocated_funds) || 0), 0
           )
@@ -1643,6 +1674,42 @@ export default function BacktestPanel() {
                   </div>
                 </div>
 
+                <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium text-slate-200">IB Verification Queue</div>
+                    {ibVerificationStatus?.active_jobs > 0 ? (
+                      <span className="text-[11px] px-2 py-0.5 rounded border border-sky-700/50 bg-sky-900/20 text-sky-300">
+                        {ibVerificationStatus.active_jobs} active
+                      </span>
+                    ) : (
+                      <span className="text-[11px] px-2 py-0.5 rounded border border-emerald-700/40 bg-emerald-900/20 text-emerald-300">
+                        idle
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    {ibVerificationStatus?.ib_connected
+                      ? 'IB connected: cache verification runs continuously for watchlist symbols.'
+                      : 'IB not connected: queued IB verification will resume after IB reconnects.'}
+                  </div>
+                  {!!(ibVerificationStatus?.jobs?.length) && (
+                    <div className="mt-2 max-h-20 overflow-y-auto space-y-1 text-[11px]">
+                      {ibVerificationStatus.jobs.slice(0, 3).map(job => (
+                        <div key={job.key} className="flex items-center justify-between text-slate-400">
+                          <span className="font-mono text-slate-300">{job.symbol}</span>
+                          <span className={
+                            job.status === 'failed'
+                              ? 'text-red-300'
+                              : job.status === 'completed'
+                                ? 'text-emerald-300'
+                                : 'text-sky-300'
+                          }>{String(job.status || 'queued')}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div>
                   <label className="label">Override Symbols (optional)</label>
                   <input
@@ -1781,8 +1848,13 @@ export default function BacktestPanel() {
                   </div>
                 )}
 
-                {sandboxPositionsLoading && (
+                {sandboxPositionsLoading && !sandboxPositionsError && (
                   <div className="text-xs text-slate-500">Loading sandbox positions…</div>
+                )}
+                {sandboxPositionsError && (
+                  <div className="text-xs text-amber-400/80">
+                    Could not load sandbox positions ({sandboxPositionsErrorObj?.message || 'request failed'}). Using dashboard watchlist fallback.
+                  </div>
                 )}
 
                 {/* Progress bar */}
@@ -1835,7 +1907,28 @@ export default function BacktestPanel() {
               {/* Sandbox Results */}
               <div className="xl:col-span-2 space-y-5">
                 {sandboxResult ? (
-                  <SandboxResultsView result={r} metrics={m} />
+                  <>
+                    {(sandboxResult?.verification_warning || r?.verification_warning) && (
+                      <div className="flex items-start gap-2 p-3 bg-amber-900/20 border border-amber-700/30 rounded-lg text-sm text-amber-300">
+                        <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 shrink-0" />
+                        <div>
+                          <div>{sandboxResult?.verification_warning || r?.verification_warning}</div>
+                          {(sandboxResult?.verification_queued_symbols?.length || r?.verification_queued_symbols?.length) > 0 && (
+                            <div className="text-xs text-amber-200/80 mt-1">
+                              Background IB verification queued for: {(sandboxResult?.verification_queued_symbols || r?.verification_queued_symbols || []).join(', ')}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {(sandboxResult?.data_warning || r?.data_warning) && (
+                      <div className="flex items-start gap-2 p-3 bg-amber-950/20 border border-amber-800/30 rounded-lg text-sm text-amber-200">
+                        <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 shrink-0" />
+                        <div>{sandboxResult?.data_warning || r?.data_warning}</div>
+                      </div>
+                    )}
+                    <SandboxResultsView result={r} metrics={m} />
+                  </>
                 ) : sandboxMutation.isPending ? (
                   <div className="card flex flex-col items-center justify-center h-64 gap-3 text-slate-400">
                     <ArrowPathIcon className="h-8 w-8 animate-spin text-amber-400" />

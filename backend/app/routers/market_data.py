@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from app.services import market_service, sentiment_aggregator, symbol_registry
+from app.services.top_of_book import get_ib_top_of_book, simulate_top_of_book_from_quote
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,19 @@ async def get_quote(symbol: str):
     except Exception as exc:
         logger.error("quote failed for %s: %s", symbol.upper(), exc)
         raise HTTPException(status_code=400, detail=f"Could not fetch quote for {symbol.upper()}: {exc}")
+
+
+@router.get("/top-of-book/{symbol}")
+async def get_top_of_book(symbol: str):
+    """Return selected symbol top-of-book, preferring live IB touch when available."""
+    sym = symbol.upper()
+    try:
+        quote = await market_service.get_quote(sym)
+        book = await get_ib_top_of_book(sym)
+        return book or simulate_top_of_book_from_quote(sym, quote)
+    except Exception as exc:
+        logger.error("top-of-book failed for %s: %s", sym, exc)
+        raise HTTPException(status_code=400, detail=f"Could not fetch top-of-book for {sym}: {exc}")
 
 
 @router.get("/bulk-quotes")

@@ -5,6 +5,15 @@ export const fmt = n => n == null ? '—' : n >= 0 ? `+$${n.toFixed(2)}` : `-$${
 export const fmtMoney = n => n == null ? '—' : `$${Number(n).toFixed(2)}`
 export const stratLabel = t => t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 export const defaultParams = type => Object.fromEntries((STRATEGY_PARAM_UI[type] || []).map(f => [f.key, f.default]))
+export function getVisibleTradePnl(tradeLike) {
+  const pnl = Number(tradeLike?.pnl)
+  if (!Number.isFinite(pnl)) return null
+  const side = String(tradeLike?.side ?? '').trim().toUpperCase()
+  if (side !== 'SELL') return null
+  const status = String(tradeLike?.status ?? '').trim().toUpperCase()
+  if (status && status !== 'FILLED') return null
+  return pnl
+}
 
 export function encodeStrategy(type, params, scriptId, templateFilename) {
   if (type === TEMPLATE_SCRIPT_KEY) return templateFilename ? `template:${templateFilename}` : null
