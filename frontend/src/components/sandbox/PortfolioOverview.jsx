@@ -1357,20 +1357,55 @@ export default function PortfolioOverview({
               <table className="w-full text-xs">
                 <thead className="sticky top-0 z-10 bg-dark-800">
                   <tr className="text-slate-500 border-b border-dark-600">
-                    <th className="text-left pb-2 font-medium">Time</th>
-                    <th className="text-left pb-2 font-medium">Type</th>
-                    <th className="text-left pb-2 font-medium">Details</th>
-                    <th className="text-right pb-2 font-medium">Shares</th>
-                    <th className="text-right pb-2 font-medium">Avg Price</th>
-                    <th className="text-right pb-2 font-medium">Price</th>
-                    <th className="text-right pb-2 font-medium">Amount</th>
-                    <th className="text-right pb-2 font-medium">P&amp;L</th>
-                    <th className="text-left pb-2 font-medium">Note</th>
+                    <th className="w-36 text-left pb-2 font-medium">Time</th>
+                    <th className="w-20 text-left pb-2 font-medium">Type</th>
+                    <th className="w-20 text-left pb-2 font-medium">Details</th>
+                    <th className="w-16 text-right pb-2 font-medium">Shares</th>
+                    <th className="w-20 text-right pb-2 font-medium">Avg Price</th>
+                    <th className="w-24 text-right pb-2 font-medium">Price</th>
+                    <th className="w-20 text-right pb-2 font-medium">Amount</th>
+                    <th className="w-16 text-right pb-2 font-medium">P&amp;L</th>
+                    <th className="min-w-[360px] text-left pb-2 font-medium">Note</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-dark-700">
                   {pageItems.map(entry => {
                     const ts = entry.date ? new Date(entry.date) : null
+                    const tradeStatus = String(entry.status ?? '').toUpperCase()
+                    const isFilledTrade = entry.kind === 'trade' && tradeStatus === 'FILLED'
+                    const hasOrderPrice = entry.kind === 'trade' && Number.isFinite(Number(entry.price))
+                    const rawReason = String(entry.reason ?? '').trim()
+                    const noteText = (() => {
+                      if (entry.kind !== 'trade') return rawReason || ''
+
+                      const summary = []
+                      if (tradeStatus) summary.push(tradeStatus)
+                      if (entry.shares != null && entry.symbol) {
+                        summary.push(`${Number(entry.shares).toFixed(3)} ${entry.symbol}`)
+                      } else if (entry.symbol) {
+                        summary.push(entry.symbol)
+                      }
+                      if (hasOrderPrice) {
+                        summary.push(`${isFilledTrade ? 'fill' : 'order'} $${Number(entry.price).toFixed(2)}`)
+                      }
+
+                      const summaryText = summary.join(' · ')
+                      if (!rawReason) return summaryText
+                      if (!summaryText) return rawReason
+
+                      const normalize = (text) => String(text ?? '')
+                        .toLowerCase()
+                        .replace(/[^a-z0-9.\s]/g, ' ')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                      const normalizedReason = normalize(rawReason)
+                      const dedupedSummary = summary.filter(part => {
+                        const normalizedPart = normalize(part)
+                        return normalizedPart && !normalizedReason.includes(normalizedPart)
+                      })
+                      if (dedupedSummary.length === 0) return rawReason
+                      return `${dedupedSummary.join(' · ')} · ${rawReason}`
+                    })()
                     // Use system/browser timezone (no timeZone option specified)
                     const timeStr = ts ? ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
                     return (
@@ -1411,17 +1446,25 @@ export default function PortfolioOverview({
                             : '—'}
                         </td>
                         <td className="py-1.5 text-right font-mono text-slate-300">
-                          {entry.price != null ? `$${entry.price.toFixed(2)}` : '—'}
+                          {isFilledTrade && hasOrderPrice
+                            ? `$${Number(entry.price).toFixed(2)}`
+                            : hasOrderPrice
+                              ? <span className="text-slate-500" title="Order price (not filled)"> ${Number(entry.price).toFixed(2)} (order)</span>
+                              : '—'}
                         </td>
-                        <td className="py-1.5 text-right font-mono text-slate-200">${entry.total.toFixed(2)}</td>
+                        <td className="py-1.5 text-right font-mono text-slate-200">
+                          {entry.kind === 'trade' && !isFilledTrade
+                            ? <span className="text-slate-600">—</span>
+                            : `$${entry.total.toFixed(2)}`}
+                        </td>
                         <td className="py-1.5 text-right font-mono">
                           {entry.displayPnl != null
                             ? <span className={entry.displayPnl > 0 ? 'text-emerald-400' : entry.displayPnl < 0 ? 'text-red-400' : 'text-slate-400'}>{entry.displayPnl > 0 ? '+' : ''}{entry.displayPnl.toFixed(2)}</span>
                             : <span className="text-slate-600">—</span>}
                         </td>
-                        <td className="py-1.5 text-slate-400 max-w-[200px] truncate">
-                          {entry.reason
-                            ? <span className="px-1.5 py-0.5 rounded border text-[10px] bg-slate-700/50 text-slate-300 border-slate-600/40 font-mono">{entry.reason}</span>
+                        <td className="py-1.5 text-slate-400 min-w-[360px] whitespace-normal break-words" title={noteText || ''}>
+                          {noteText
+                            ? <span className="inline-block w-full px-1.5 py-0.5 rounded border text-[10px] leading-5 whitespace-normal break-words bg-slate-700/50 text-slate-300 border-slate-600/40 font-mono">{noteText}</span>
                             : <span className="text-slate-600">—</span>}
                         </td>
                       </tr>

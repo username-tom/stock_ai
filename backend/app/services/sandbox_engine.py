@@ -474,6 +474,7 @@ async def _process_symbol(
     status: dict[str, Any] = {
         "last_run_at": datetime.now(timezone.utc).isoformat(),
         "last_signal": None,
+        "last_signal_source": prev_status.get("last_signal_source"),
         "error": None,
         "pending_reroll_active": bool(prev_status.get("pending_reroll_active", False)),
         "pending_reroll_side": prev_status.get("pending_reroll_side"),
@@ -624,6 +625,7 @@ async def _process_symbol(
         signal_source = ""
         if ref_idx is not None and "signal_source" in df_sig.columns:
             signal_source = str(df_sig.loc[ref_idx, "signal_source"]).strip()
+        status["last_signal_source"] = signal_source or None
 
         # In IB mode, PM consumes SandboxPosition.last_signal. Persist the
         # actionable signal so event-based strategies (where last bar signal

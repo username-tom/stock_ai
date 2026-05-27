@@ -2139,6 +2139,7 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                 "quantity": max(0.0, qty),
                 "price": max(0.0, limit_price),
                 "ib_order_id": oid,
+                "reason_tag": "pm_ib_pending_cancel_drift",
             })
 
     if cancel_events:
@@ -2157,7 +2158,7 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                         status=OrderStatus.CANCELLED,
                         mode=mode,
                         ib_order_id=ev["ib_order_id"],
-                        strategy_name="pm_ib_pending_cancel",
+                        strategy_name=str(ev.get("reason_tag") or "pm_ib_pending_cancel"),
                         filled_at=None,
                     ))
                 await db.commit()
@@ -2442,6 +2443,49 @@ async def _process_ib_engine_signals() -> None:
     buy_signal_rows: list[tuple[SandboxPosition, str, float, str, str]] = []
     sell_signal_rows: list[tuple[str, float, float, str, str]] = []
     quote_price_map: dict[str, float] = {}
+    engine_signal_source_by_symbol: dict[str, str] = {}
+
+    def _slug(text: str) -> str:
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return ""
+        out = []
+        prev_us = False
+        for ch in raw:
+            if ch.isalnum():
+                out.append(ch)
+                prev_us = False
+            else:
+                if not prev_us:
+                    out.append("_")
+                    prev_us = True
+        return "".join(out).strip("_")
+
+    def _make_pm_signal_reason(side: str, score: float, tag: str, source: str) -> str:
+        side_u = "buy" if str(side).upper() == "BUY" else "sell"
+        src = _slug(source)
+        if src:
+            return f"pm_engine_signal_{side_u}:{src} (score={score:+.3f}, tag={tag or 'WATCH'})"
+        return f"pm_engine_signal_{side_u} (score={score:+.3f}, tag={tag or 'WATCH'})"
+
+    def _strategy_tag_from_reason(reason: str, default_tag: str) -> str:
+        tag = _slug(reason)
+        if not tag:
+            return default_tag
+        return tag[:100]
+
+    try:
+        from app.services.sandbox_engine import get_engine_state
+        engine_state = get_engine_state() or {}
+        for sym, state in (engine_state.get("symbols") or {}).items():
+            key = str(sym or "").upper()
+            if not key or not isinstance(state, dict):
+                continue
+            src = str(state.get("last_signal_source") or "").strip()
+            if src:
+                engine_signal_source_by_symbol[key] = src
+    except Exception as exc:
+        logger.debug("PM IB signal source lookup unavailable: %s", exc)
 
     def _auto_limit_price_from_reference(reference_price: float, side: str) -> float:
         if reference_price <= 0:
@@ -2476,6 +2520,7 @@ async def _process_ib_engine_signals() -> None:
         tag = str((_state.get("ai_tags", {}).get(symbol, {}).get("learner_tag") or "")).upper()
         score = float((_state.get("scores", {}).get(symbol, {}).get("score") or 0.0))
         ib_qty = float(ib_by_symbol.get(symbol, {}).get("qty", 0.0))
+        signal_source = engine_signal_source_by_symbol.get(symbol, "")
 
         logger.info(
             "PM IB signal observed (symbol=%s signal=%s run_at=%s tag=%s score=%+.3f ib_qty=%.4f)",
@@ -2621,7 +2666,7 @@ async def _process_ib_engine_signals() -> None:
                 "top_size": float((book.get("ask_size") if isinstance(book, dict) else 0.0) or 0.0),
                 "price_source": price_source,
                 "top_of_book_source": tob_source,
-                "reason": f"pm_engine_signal_buy (signal=1, score={score:+.3f}, tag={tag or 'WATCH'})",
+                "reason": _make_pm_signal_reason("BUY", score, tag, signal_source),
                 "processed_key": process_key,
             })
             _log_ib_trigger(
@@ -2649,7 +2694,7 @@ async def _process_ib_engine_signals() -> None:
                 "top_size": float((book.get("bid_size") if isinstance(book, dict) else 0.0) or 0.0),
                 "price_source": price_source,
                 "top_of_book_source": tob_source,
-                "reason": f"pm_engine_signal_sell (signal=-1, score={score:+.3f}, tag={tag or 'WATCH'})",
+                "reason": _make_pm_signal_reason("SELL", score, tag, signal_source),
                 "processed_key": process_key,
             })
             signal_sell_symbols.add(symbol)
@@ -2771,6 +2816,7 @@ async def _process_ib_engine_signals() -> None:
             avg_cost = float(ib_avg_cost_by_symbol.get(symbol, 0.0) or 0.0)
             if avg_cost > 0:
                 est_pnl = round((submitted_price - avg_cost) * qty_to_submit, 4)
+        reason_text = str(order.get("reason") or "")
         async with AsyncSessionLocal() as db:
             db.add(Trade(
                 symbol=symbol,
@@ -2780,7 +2826,7 @@ async def _process_ib_engine_signals() -> None:
                 status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
                 mode=mode,
                 ib_order_id=result.get("ib_order_id"),
-                strategy_name="pm_engine_signal",
+                strategy_name=_strategy_tag_from_reason(reason_text, "pm_engine_signal"),
                 pnl=est_pnl,
                 filled_at=datetime.now(timezone.utc) if is_filled else None,
             ))

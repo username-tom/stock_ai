@@ -113,7 +113,19 @@ function compactStrategyLabel(strategyName) {
     const id = raw.slice(7)
     return id ? `custom#${id}` : 'custom'
   }
-  return raw.split(':')[0]
+  if (raw.startsWith('pm_engine_signal_buy:')) {
+    return `pm buy (${raw.slice('pm_engine_signal_buy:'.length).replace(/_/g, ' ')})`
+  }
+  if (raw.startsWith('pm_engine_signal_sell:')) {
+    return `pm sell (${raw.slice('pm_engine_signal_sell:'.length).replace(/_/g, ' ')})`
+  }
+  if (raw.startsWith('pm_engine_signal_buy')) return 'pm buy (engine signal)'
+  if (raw.startsWith('pm_engine_signal_sell')) return 'pm sell (engine signal)'
+  if (raw.startsWith('pm_risk_stop_loss')) return 'pm sell (stop-loss)'
+  if (raw.startsWith('pm_risk_take_profit')) return 'pm sell (take-profit)'
+  if (raw.startsWith('pm_ib_pending_cancel_drift')) return 'pm cancel (price drift)'
+  if (raw.endsWith('_timeout_cancel')) return 'cancelled (timeout)'
+  return raw
 }
 
 function buildIbTradeNote(tradeLike) {
@@ -619,7 +631,7 @@ export default function SandboxPanel() {
             status: d.status,
             order_type: d.order_type,
             limit_price: d.limit_price,
-            strategy_name: selectedPos?.strategy_name,
+            strategy_name: null,
             reason: enteredReason,
           }),
           time: new Date().toLocaleTimeString(),
@@ -849,7 +861,7 @@ export default function SandboxPanel() {
       side: tradeForm.side,
       quantity: parseFloat(tradeForm.quantity),
       price: parseFloat(tradeForm.price) || selectedPrice,
-      strategy_name: selectedPos?.strategy_name,
+      strategy_name: null,
       reason: tradeForm.reason?.trim() || 'manual',
       mode: activeProfileRef.current,
     })

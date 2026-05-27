@@ -795,7 +795,7 @@ export default function PositionDetail({
             <div>
               <SymbolDetailPanel
                 symbol={selectedSymbol}
-                quoteData={quotes[selectedSymbol] ?? null}
+                quoteData={quote}
                 isLoading={false}
                 ownedShares={selectedPos?.shares ?? null}
                 averagePrice={selectedPos?.avg_cost ?? null}
@@ -1322,7 +1322,10 @@ export default function PositionDetail({
                 const tradeQty = Number(entry.shares)
                 const hasTradeQty = Number.isFinite(tradeQty)
                 const tradePrice = Number(entry.price)
-                const tradeLabel = `${tradeAction} ${hasTradeQty ? tradeQty : ''} ${entry.symbol ?? ''}${Number.isFinite(tradePrice) ? ` @ $${tradePrice.toFixed(2)}` : ''}`.replace(/\s+/g, ' ').trim()
+                const tradePriceLabel = Number.isFinite(tradePrice)
+                  ? (tradeStatus === 'CANCELLED' ? ` @ $${tradePrice.toFixed(2)} (order)` : ` @ $${tradePrice.toFixed(2)}`)
+                  : ''
+                const tradeLabel = `${tradeAction} ${hasTradeQty ? tradeQty : ''} ${entry.symbol ?? ''}${tradePriceLabel}`.replace(/\s+/g, ' ').trim()
                 return (
                 <div key={entry.id} className="flex items-start gap-3 py-2 border-b border-dark-700 last:border-0">
                   <div className="mt-0.5 flex-shrink-0">
@@ -1346,7 +1349,7 @@ export default function PositionDetail({
                       )}
                     </div>
                     {entry.sub && <div className="text-xs text-slate-500 mt-0.5 truncate">{entry.sub}</div>}
-                    {entry.kind === 'trade' && entry.side === 'SELL' && !(entry.syncFromIb === true && String(entry.sub ?? '').startsWith('Market Value:')) && Number.isFinite(Number(entry.avgPrice)) && Number(entry.avgPrice) > 0 && (
+                    {entry.kind === 'trade' && tradeStatus === 'FILLED' && entry.side === 'SELL' && !(entry.syncFromIb === true && String(entry.sub ?? '').startsWith('Market Value:')) && Number.isFinite(Number(entry.avgPrice)) && Number(entry.avgPrice) > 0 && (
                       <div className="text-xs text-slate-500 mt-0.5">Avg sell cost basis: ${Number(entry.avgPrice).toFixed(2)}</div>
                     )}
                   </div>

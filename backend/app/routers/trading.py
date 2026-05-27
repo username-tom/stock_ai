@@ -117,6 +117,10 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
                     age_seconds = (now_utc - created_at).total_seconds()
                     if age_seconds >= 120:
                         final_status = OrderStatus.CANCELLED
+                        if not str(trade.strategy_name or "").lower().endswith("_timeout_cancel"):
+                            base = str(trade.strategy_name or "ib_order")
+                            trade.strategy_name = f"{base}_timeout_cancel"
+                            row_changed = True
                         logger.info(
                             "Pending IB trade stale timeout -> CANCELLED (ib_order_id=%s symbol=%s age=%.1fs)",
                             trade.ib_order_id,
