@@ -58,6 +58,7 @@ class _IBApiApp(EWrapper, EClient):
         self.open_order_first_seen: dict[int, str] = {}
         self.open_orders_event = threading.Event()
         self.order_status: dict[int, str] = {}
+        self.order_avg_fill_price: dict[int, float] = {}
 
         self.request_errors: dict[int, list[str]] = {}
         self.loop_error: str | None = None
@@ -227,6 +228,8 @@ class _IBApiApp(EWrapper, EClient):
     ) -> None:
         with self._lock:
             self.order_status[int(orderId)] = status
+            if float(avgFillPrice or 0.0) > 0:
+                self.order_avg_fill_price[int(orderId)] = float(avgFillPrice)
             if int(orderId) in self.open_orders:
                 self.open_orders[int(orderId)]["status"] = status
                 self.open_orders[int(orderId)]["filled"] = float(filled)
@@ -738,6 +741,17 @@ class IBService:
             return {
                 int(order_id): str(status)
                 for order_id, status in self._app.order_status.items()
+            }
+
+    def get_known_order_fill_prices(self) -> dict[int, float]:
+        """Return latest average fill prices observed from IB callbacks."""
+        if not self._app:
+            return {}
+        with self._app._lock:
+            return {
+                int(order_id): float(price)
+                for order_id, price in self._app.order_avg_fill_price.items()
+                if float(price or 0.0) > 0.0
             }
 
 

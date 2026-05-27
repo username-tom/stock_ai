@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -65,6 +66,11 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
     known_status_by_id = {
         int(oid): str(status or "").upper()
         for oid, status in ib_service.get_known_order_statuses().items()
+    }
+    known_fill_price_by_id = {
+        int(oid): float(price)
+        for oid, price in ib_service.get_known_order_fill_prices().items()
+        if float(price or 0.0) > 0.0
     }
 
     symbol_qty: dict[str, float] = {}
@@ -135,6 +141,10 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
 
         trade.status = final_status
         row_changed = True
+        if final_status == OrderStatus.FILLED:
+            fill_px = float(known_fill_price_by_id.get(oid, 0.0) or 0.0)
+            if fill_px > 0:
+                trade.price = fill_px
         if final_status != OrderStatus.FILLED:
             trade.pnl = None
         elif trade.side != OrderSide.SELL:
@@ -153,8 +163,10 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
 async def _snapshot_ib_state(mode: str) -> None:
     if not ib_service.is_connected:
         return
-    account_summary = await ib_service.get_account_summary()
-    positions = await ib_service.get_positions()
+    account_summary, positions = await asyncio.gather(
+        ib_service.get_account_summary(),
+        ib_service.get_positions(),
+    )
     save_portfolio_state(mode, {
         "source": "ib",
         "mode": mode,
@@ -489,6 +501,14 @@ async def place_order(req: OrderRequest, db: AsyncSession = Depends(get_db)):
                         reference_price = price_num
         except Exception as exc:
             logger.debug("IB quote lookup for order reference price failed (%s): %s", symbol, exc)
+
+    # If IB already reports a fill, prefer callback avgFillPrice over submit-time
+    # quote/limit references so UI activity rows match broker execution.
+    if is_filled:
+        fill_prices = ib_service.get_known_order_fill_prices()
+        fill_px = float(fill_prices.get(int(result.get("ib_order_id") or 0), 0.0) or 0.0)
+        if fill_px > 0:
+            reference_price = fill_px
 
     estimated_pnl = None
     if side == "SELL":

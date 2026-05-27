@@ -37,7 +37,6 @@ async def get_account_info(
 
     if use_ib:
         summary = await ib_service.get_account_summary()
-        ib_positions = await ib_service.get_positions()
 
         def _to_float(*tags: str) -> float | None:
             if not isinstance(summary, dict):
@@ -73,7 +72,9 @@ async def get_account_info(
             "source": "ib",
             "mode": mode,
             "account_summary": summary,
-            "positions": ib_positions,
+            # Keep account snapshots lightweight; positions are captured by
+            # /sandbox/positions and trading snapshots.
+            "positions": [],
         })
 
         return {

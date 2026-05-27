@@ -284,18 +284,35 @@ function confidenceTone(value) {
   return 'text-rose-300 border-rose-700/40 bg-rose-900/20'
 }
 
+const AUTO_TRADE_MIN_CONFIDENCE = 0.68
+const ACTIVE_ORDER_STATUSES = new Set(['PENDINGSUBMIT', 'APIPENDING', 'PRESUBMITTED', 'SUBMITTED'])
+
+function isActiveOrderStatus(status) {
+  return ACTIVE_ORDER_STATUSES.has(String(status ?? '').trim().toUpperCase())
+}
+
 export default function NextBarPredictor({
   chartData = [],
   currentPrice,
   symbol,
   topOfBook,
   refetchInterval,
+  tradeMode = 'SIMULATED',
+  tradeQuantity = 0,
+  positionShares = 0,
+  positionAvgCost = 0,
+  openOrders = [],
+  managerSettings = null,
+  onSubmitTrade = null,
+  onTogglePredictor = null,
 }) {
   const [flashCard, setFlashCard] = useState(null)
   const [animatingResolution, setAnimatingResolution] = useState(false)
   const previousConfirmedKeyRef = useRef(null)
   const previousImmediatePredictionRef = useRef(null)
   const flashTimeoutRef = useRef(null)
+  const autoTradeEntryKeyRef = useRef(null)
+  const previousPositionQtyRef = useRef(0)
 
   const liveBar = useMemo(
     () => buildLiveBar(chartData, currentPrice, topOfBook),
@@ -402,6 +419,91 @@ export default function NextBarPredictor({
   const volumeTiltPct = liveVolume > 0
     ? ((projectedVolumeAvg - liveVolume) / liveVolume) * 100
     : 0
+  const takeProfitPct = Math.max(0, Number(managerSettings?.take_profit_pct ?? 1.25) || 0)
+  const predictorEnabled = Boolean(managerSettings?.bar_predictor_enabled)
+  const normalizedTradeMode = String(tradeMode || 'simulated').trim().toLowerCase()
+  const positionQty = Math.max(0, Number(positionShares) || 0)
+  const requestedQty = Math.max(0, Number(tradeQuantity) || 0)
+  const activeBuyOrder = openOrders.some(order => {
+    const side = String(order?.side ?? '').trim().toUpperCase()
+    const remaining = Number(order?.remaining ?? order?.quantity ?? 0)
+    return side === 'BUY' && remaining > 0 && isActiveOrderStatus(order?.status)
+  })
+  const activeSellOrder = openOrders.some(order => {
+    const side = String(order?.side ?? '').trim().toUpperCase()
+    const remaining = Number(order?.remaining ?? order?.quantity ?? 0)
+    return side === 'SELL' && remaining > 0 && isActiveOrderStatus(order?.status)
+  })
+  const immediateConfidence = projectionState.headline?.immediateConfidence ?? 0
+  const predictedGainPct = Number.isFinite(liveBar?.close) && Number.isFinite(immediateBar?.close) && Number(liveBar.close) > 0
+    ? ((Number(immediateBar.close) - Number(liveBar.close)) / Number(liveBar.close)) * 100
+    : null
+  const bullishEnough = Boolean(
+    managerSettings?.bar_predictor_enabled
+      && Number.isFinite(predictedGainPct)
+      && predictedGainPct >= takeProfitPct
+      && immediateConfidence >= AUTO_TRADE_MIN_CONFIDENCE,
+  )
+  const autoTradeKey = `${symbol || 'UNKNOWN'}:${confirmedKey || 'no-confirmed'}:${takeProfitPct.toFixed(2)}:${immediateConfidence.toFixed(2)}`
+
+  const handleTogglePredictor = async () => {
+    if (typeof onTogglePredictor !== 'function') return
+    await onTogglePredictor(!predictorEnabled)
+  }
+
+  useEffect(() => {
+    autoTradeEntryKeyRef.current = null
+    previousPositionQtyRef.current = 0
+  }, [symbol])
+
+  useEffect(() => {
+    if (typeof onSubmitTrade !== 'function') return
+    if (!symbol || !liveBar || !immediateBar || !projectionState.headline) return
+    if (!predictorEnabled) return
+
+    const buyReason = `next_bar_predictor buy (conf=${(immediateConfidence * 100).toFixed(0)}%, tp=${takeProfitPct.toFixed(2)}%)`
+
+    if (bullishEnough && positionQty <= 0 && requestedQty > 0 && !activeBuyOrder) {
+      if (autoTradeEntryKeyRef.current === autoTradeKey) return
+      autoTradeEntryKeyRef.current = autoTradeKey
+      void onSubmitTrade({
+        symbol,
+        side: 'BUY',
+        quantity: requestedQty,
+        order_type: 'MKT',
+        price: Number(Number(liveBar.close).toFixed(2)),
+        mode: normalizedTradeMode,
+        strategy_name: 'next_bar_predictor',
+        reason: buyReason,
+      }).catch(() => {
+        autoTradeEntryKeyRef.current = null
+      })
+      return
+    }
+  }, [
+    activeBuyOrder,
+    autoTradeKey,
+    bullishEnough,
+    immediateBar,
+    immediateConfidence,
+    liveBar,
+    predictorEnabled,
+    normalizedTradeMode,
+    onSubmitTrade,
+    positionAvgCost,
+    positionQty,
+    projectionState.headline,
+    requestedQty,
+    symbol,
+    takeProfitPct,
+  ])
+
+  useEffect(() => {
+    if (positionQty <= 0 && !activeBuyOrder) {
+      autoTradeEntryKeyRef.current = null
+    }
+    previousPositionQtyRef.current = positionQty
+  }, [activeBuyOrder, positionQty])
 
   return (
     <div className="rounded-2xl border border-dark-600 bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.12),_transparent_38%),linear-gradient(180deg,rgba(15,23,42,0.96),rgba(2,6,23,0.92))] p-4 shadow-[0_20px_60px_rgba(2,6,23,0.45)]">
@@ -416,7 +518,17 @@ export default function NextBarPredictor({
             The forward strip rolls left each minute. The first forecast is the next minute; the next four bars extend that path.
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {typeof onTogglePredictor === 'function' && (
+            <button
+              type="button"
+              onClick={handleTogglePredictor}
+              className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-wide transition-colors ${predictorEnabled ? 'border-emerald-700/40 bg-emerald-900/20 text-emerald-300 hover:bg-emerald-900/30' : 'border-slate-600/50 bg-slate-800/60 text-slate-300 hover:bg-slate-700/70'}`}
+              title={predictorEnabled ? 'Disable predictor-driven buy/sell' : 'Enable predictor-driven buy/sell'}
+            >
+              {predictorEnabled ? 'Predictor ON' : 'Predictor OFF'}
+            </button>
+          )}
           <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-wide ${confidenceTone(projectionState.headline?.immediateConfidence ?? 0)}`}>
             1m conf {((projectionState.headline?.immediateConfidence ?? 0) * 100).toFixed(0)}%
           </span>

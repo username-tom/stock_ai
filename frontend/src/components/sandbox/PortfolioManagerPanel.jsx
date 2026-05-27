@@ -300,6 +300,7 @@ function buildDraftFromSettings(settings) {
     risk_exit_mode: valueRiskActive && !pctRiskActive ? 'value' : 'percent',
     stop_loss_pct: stopLossPct,
     take_profit_pct: takeProfitPct,
+    stop_loss_sell_market_enabled: settings.stop_loss_sell_market_enabled ?? true,
     stop_loss_value: stopLossValue,
     take_profit_value: takeProfitValue,
     default_strategy_name: settings.default_strategy_name ?? INTRADAY_1M_TEMPLATE,
@@ -1079,6 +1080,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       sentiment_strategy_enabled: draft.sentiment_strategy_enabled,
       stop_loss_pct: stopLossPct,
       take_profit_pct: takeProfitPct,
+      stop_loss_sell_market_enabled: draft.stop_loss_sell_market_enabled,
       stop_loss_value: stopLossValue,
       take_profit_value: takeProfitValue,
       hold_positions_overnight: draft.hold_positions_overnight,
@@ -1507,6 +1509,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           {((Number(settings.stop_loss_value ?? 0) > 0) || (Number(settings.take_profit_value ?? 0) > 0))
             ? `Risk exits ($): SL $${Number(settings.stop_loss_value ?? 0).toFixed(2)} | TP $${Number(settings.take_profit_value ?? 0).toFixed(2)}`
             : `Risk exits (%): SL ${Number(settings.stop_loss_pct ?? 0).toFixed(1)}% | TP ${Number(settings.take_profit_pct ?? 0).toFixed(1)}%`}
+        </span>
+        <span className="flex items-center gap-1">
+          <ChartBarIcon className="h-3.5 w-3.5" />
+          SL sell execution: {(settings.stop_loss_sell_market_enabled ?? true) ? 'Market (fast)' : 'Limit (auto-priced)'}
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
@@ -2740,6 +2746,27 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     {(draft.risk_exit_mode ?? 'percent') !== 'value' && <span className="text-slate-400 text-sm">%</span>}
                   </div>
                 </div>
+              </SettingRow>
+
+              <SettingRow
+                label="Stop-Loss Sell Execution"
+                hint="For IB mode exits triggered by stop loss: Market sells act faster in sharp moves; Limit sells use the auto-pricing offset."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${(draft.stop_loss_sell_market_enabled ?? true) ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({
+                        ...d,
+                        stop_loss_sell_market_enabled: !(d.stop_loss_sell_market_enabled ?? true),
+                      }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(draft.stop_loss_sell_market_enabled ?? true) ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{(draft.stop_loss_sell_market_enabled ?? true) ? 'Market (enabled)' : 'Limit (disabled)'}</span>
+                </label>
               </SettingRow>
 
               <SettingRow

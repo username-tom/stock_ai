@@ -20,7 +20,6 @@ from app.routers.sandbox_router._helpers import (
     ensure_sandbox_write_allowed,
     offload_simulated_state,
 )
-from app.services import market_service
 from app.services.ib_service import ib_service
 from app.services.local_storage import save_portfolio_state
 
@@ -110,21 +109,6 @@ async def get_positions(
                     market_price = ib_market_price
                 elif quantity != 0 and ib_market_value != 0:
                     market_price = abs(ib_market_value / quantity)
-
-                try:
-                    quote = await market_service.get_quote(symbol, source_preference="ib")
-                    if isinstance(quote, dict) and "error" not in quote:
-                        market_price = float(
-                            quote.get("last_price")
-                            or quote.get("last")
-                            or quote.get("close")
-                            or market_price
-                            or avg_cost
-                            or 0.0
-                        )
-                except Exception as exc:
-                    # Avoid failing /sandbox/positions when IB quote service has gaps.
-                    logger.warning("IB quote unavailable for %s in positions endpoint: %s", symbol, exc)
 
             market_value = quantity * market_price
             unrealized = (market_price - avg_cost) * quantity

@@ -111,6 +111,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     sentiment_strategy_enabled: Optional[bool] = None
     stop_loss_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     take_profit_pct: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    stop_loss_sell_market_enabled: Optional[bool] = None
     stop_loss_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     take_profit_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     hold_positions_overnight: Optional[bool] = None
@@ -134,6 +135,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_no_loss_sell: Optional[bool] = None
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     pending_cancel_after_bars: Optional[int] = Field(default=None, ge=0, le=120)
+    pending_repost_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     sim_buy_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     auto_trade_buy_price_offset_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")

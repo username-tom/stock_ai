@@ -261,7 +261,28 @@ export default function PortfolioOverview({
   const ibCashValue = numOrNull(accountData?.cash_value)
   const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
   const ibRealizedPnl = numOrNull(accountData?.realized_pnl)
-  const headlineUnrealized = isSimulated ? totalUnrealizedPnl : (ibUnrealizedPnl ?? totalUnrealizedPnl)
+  const breakdownUnrealizedPnl = useMemo(() => {
+    let sum = 0
+    let hasAny = false
+    for (const pos of breakdownPositions) {
+      const shares = Number(pos._effShares ?? 0)
+      if (shares === 0) continue
+      const avgCost = Number(pos._effAvgCost ?? 0)
+      const q = quotes[pos.symbol]
+      const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
+      const marketValuePrice = Math.abs(shares) > 0 && Number.isFinite(Number(pos.market_value)) && Math.abs(Number(pos.market_value)) > 0
+        ? Math.abs(Number(pos.market_value) / shares)
+        : null
+      const mp = q?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
+      const unreal = (mp - avgCost) * shares
+      if (Number.isFinite(unreal)) {
+        sum += unreal
+        hasAny = true
+      }
+    }
+    return hasAny ? sum : null
+  }, [breakdownPositions, quotes])
+  const headlineUnrealized = breakdownUnrealizedPnl ?? (isSimulated ? totalUnrealizedPnl : (ibUnrealizedPnl ?? totalUnrealizedPnl))
   const headlineRealized = isSimulated ? totalRealizedPnl : ibRealizedPnl
 
   // Fallback period metrics from cumulative curve if backend metrics are temporarily unavailable.
@@ -316,6 +337,7 @@ export default function PortfolioOverview({
 
     return backfillTradeAvgPrice(rawRows)
       .map((row) => {
+        const symbol = String(row.symbol ?? '').trim().toUpperCase()
         const status = String(row.status ?? '').toUpperCase()
         const side = String(row.side ?? '').toUpperCase()
         const explicit = getVisibleTradePnl(row)
@@ -329,18 +351,29 @@ export default function PortfolioOverview({
           }
         }
         if (!isSimulated && Number.isFinite(explicit) && Math.abs(explicit) < 1e-9 && Number.isFinite(derived)) {
-          return { pnl: derived, date: parsePointDate(row.date) }
+          return { symbol, pnl: derived, date: parsePointDate(row.date) }
         }
         if (Number.isFinite(explicit)) {
-          return { pnl: explicit, date: parsePointDate(row.date) }
+          return { symbol, pnl: explicit, date: parsePointDate(row.date) }
         }
         if (Number.isFinite(derived)) {
-          return { pnl: derived, date: parsePointDate(row.date) }
+          return { symbol, pnl: derived, date: parsePointDate(row.date) }
         }
         return null
       })
       .filter(v => v && v.date)
   }, [allTrades, isSimulated])
+  const ibRealizedBySymbol = (() => {
+    const map = new Map()
+    if (isSimulated) return map
+    for (const row of realizedTradeLog) {
+      const symbol = String(row?.symbol ?? '').trim().toUpperCase()
+      const pnl = Number(row?.pnl)
+      if (!symbol || !Number.isFinite(pnl)) continue
+      map.set(symbol, (map.get(symbol) ?? 0) + pnl)
+    }
+    return map
+  })()
   const realizedTradeDaysFallback = new Set(realizedTradeLog.map(t => t.date.toISOString().slice(0, 10))).size
   const realizedPnlSumFallback = realizedTradeLog.reduce((sum, t) => sum + t.pnl, 0)
   const firstRealizedDateFallback = realizedTradeLog.length > 0 ? realizedTradeLog[0].date : null
@@ -466,6 +499,20 @@ export default function PortfolioOverview({
   const avgDailyRealizedPnl = avgDailyRealizedPnlServer ?? avgDailyRealizedPnlFallback
   const realizedTradeDays = realizedTradeDaysServer ?? realizedTradeDaysFallback
   const elapsedDays = elapsedTradingDaysServer ?? elapsedTradingDaysFallback
+  let breakdownRealizedTotal = 0
+  for (const pos of breakdownPositions) {
+    const symbol = String(pos.symbol ?? '').trim().toUpperCase()
+    const stored = Number(pos.realized_pnl ?? 0)
+    const fallback = Number(ibRealizedBySymbol.get(symbol) ?? 0)
+    const realized = isSimulated ? stored : (Math.abs(stored) > 1e-9 ? stored : fallback)
+    if (Number.isFinite(realized)) breakdownRealizedTotal += realized
+  }
+  const footerRealizedValue = isSimulated
+    ? totalRealizedPnl
+    : (headlineRealized ?? breakdownRealizedTotal)
+  const footerRealizedPct = isSimulated
+    ? realizedPnlPct
+    : (totalEquity > 0 ? (footerRealizedValue / totalEquity) * 100 : null)
 
   useEffect(() => {
     if (!gainLossChartRef.current) return undefined
@@ -785,7 +832,14 @@ export default function PortfolioOverview({
                       : null
                     const unreal = mv - costBasis
                     const unrealPct = Math.abs(costBasis) > 0 ? (unreal / Math.abs(costBasis)) * 100 : null
-                    const realizedPct = pos.total_invested > 0.01 ? ((pos.realized_pnl ?? 0) / pos.total_invested) * 100 : null
+                    const symbolKey = String(pos.symbol ?? '').trim().toUpperCase()
+                    const storedRealized = Number(pos.realized_pnl ?? 0)
+                    const fallbackRealized = Number(ibRealizedBySymbol.get(symbolKey) ?? 0)
+                    const realizedValue = isSimulated
+                      ? storedRealized
+                      : (Math.abs(storedRealized) > 1e-9 ? storedRealized : fallbackRealized)
+                    const realizedPctBase = isSimulated ? Number(pos.total_invested ?? 0) : Math.abs(costBasis)
+                    const realizedPct = realizedPctBase > 0.01 ? (realizedValue / realizedPctBase) * 100 : null
                     const pd = effectivePieData.find(d => d.symbol === pos.symbol)
                     const priceColor = priceColors[pos.symbol]
                     const aiTag = (pos.learner_tag || '—').toUpperCase()
@@ -854,8 +908,8 @@ export default function PortfolioOverview({
                             ? `${fmt(unreal)} (${unrealPct == null ? '—' : `${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%`})`
                             : '—'}
                         </td>
-                        <td className={`text-right font-semibold font-mono ${pos.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {`${fmt(pos.realized_pnl)} (${realizedPct == null ? '—' : `${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%`})`}
+                        <td className={`text-right font-semibold font-mono ${realizedValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {`${fmt(realizedValue)} (${realizedPct == null ? '—' : `${realizedPct >= 0 ? '+' : ''}${realizedPct.toFixed(2)}%`})`}
                         </td>
                       </tr>
                     )
@@ -873,11 +927,11 @@ export default function PortfolioOverview({
                     <td className="text-right pt-2 font-mono text-slate-200">{fmtMoney(totalEquity)}</td>
                     <td />
                     <td className="text-right pt-2">100%</td>
-                    <td className={`text-right pt-2 font-mono ${totalUnrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {`${fmt(totalUnrealizedPnl)} (${totalEquity > 0 ? `${totalUnrealizedPnl >= 0 ? '+' : ''}${((totalUnrealizedPnl / totalEquity) * 100).toFixed(2)}%` : '—'})`}
+                    <td className={`text-right pt-2 font-mono ${headlineUnrealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {`${fmt(headlineUnrealized)} (${totalEquity > 0 ? `${headlineUnrealized >= 0 ? '+' : ''}${((headlineUnrealized / totalEquity) * 100).toFixed(2)}%` : '—'})`}
                     </td>
-                    <td className={`text-right pt-2 font-mono ${realizedPnlPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {`${fmt(totalRealizedPnl)} (${totalDeposited > 0 && realizedPnlPct != null ? `${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(2)}%` : '—'})`}
+                    <td className={`text-right pt-2 font-mono ${footerRealizedValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {`${fmt(footerRealizedValue)} (${footerRealizedPct != null ? `${footerRealizedPct >= 0 ? '+' : ''}${footerRealizedPct.toFixed(2)}%` : '—'})`}
                     </td>
                   </tr>
                 </tfoot>
@@ -1289,6 +1343,7 @@ export default function PortfolioOverview({
             price: a.price,
             marketValue: a.marketValue,
             label: a.label,
+            strategy_name: a.strategy_name ?? null,
             total: (a.shares ?? 0) * (a.price ?? 0),
             pnl: a.pnl,
             reason: a.reason ?? a.sub ?? null,

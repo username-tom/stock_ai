@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import pandas as pd
@@ -167,8 +167,9 @@ _settings: dict[str, Any] = {
     "ai_tag_long_tp_value": 0.0,          # take profit $ for long-hold positions (0 = disabled)
     "ai_tag_long_sl_value": 0.0,          # stop loss  $ for long-hold positions (0 = disabled)
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
-    "pending_price_drift_cancel_pct": 0.25,  # cancel pending BUY when market drifts >= this % from pending fill/limit
+    "pending_price_drift_cancel_pct": 0.25,  # cancel/repost pending IB LMT orders when market drifts >= this % from pending limit
     "pending_cancel_after_bars": 3,       # cancel pending orders after N sentiment bars even without price drift
+    "pending_repost_cooldown_seconds": 60,  # minimum wait before another drift-driven repost for the same symbol/side
     # Bar predictor (momentum gating): gate BUY/SELL signals using 1m momentum bias
     "bar_predictor_enabled": False,
     "bar_predictor_buy_min_bias": 0.3,   # min bias (>0) required to allow a new buy (-1..+1 scale)
@@ -196,6 +197,7 @@ _settings: dict[str, Any] = {
     "pm_hold_trailing_pct": 3.0,         # trailing stop % for `advanced_hold:trailing` cells
     "stop_loss_pct": 0.5,
     "take_profit_pct": 1.25,
+    "stop_loss_sell_market_enabled": True,  # in IB mode, submit SL exits as market SELL for fastest protection
     "stop_loss_value": 0.0,
     "take_profit_value": 0.0,
     "hold_positions_overnight": False,    # strict day-trade default: flatten before close
@@ -244,6 +246,7 @@ def _interval_to_minutes(interval: str) -> float:
 _ib_profit_take_last_attempt: dict[str, datetime] = {}
 _ib_eod_liq_last_attempt: dict[str, datetime] = {}
 _ib_signal_last_processed_at: dict[str, str] = {}
+_ib_pending_repost_cooldown_until: dict[str, datetime] = {}
 
 
 def get_manager_settings() -> dict:
@@ -397,6 +400,7 @@ async def _load_settings_from_db() -> None:
             _row_take_profit_pct = getattr(row, "take_profit_pct", None)
             _settings["stop_loss_pct"] = 0.5 if _row_stop_loss_pct is None else float(_row_stop_loss_pct)
             _settings["take_profit_pct"] = 1.25 if _row_take_profit_pct is None else float(_row_take_profit_pct)
+            _settings["stop_loss_sell_market_enabled"] = bool(getattr(row, "stop_loss_sell_market_enabled", True))
             _settings["stop_loss_value"] = float(getattr(row, "stop_loss_value", 0.0) or 0.0)
             _settings["take_profit_value"] = float(getattr(row, "take_profit_value", 0.0) or 0.0)
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", False))
@@ -430,6 +434,7 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.25) or 0.25)
             _settings["pending_cancel_after_bars"] = int(max(0, getattr(row, "pending_cancel_after_bars", 3) or 3))
+            _settings["pending_repost_cooldown_seconds"] = int(max(0, getattr(row, "pending_repost_cooldown_seconds", 60) or 60))
             _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 80.0) or 0.0)))
             _settings["bar_predictor_enabled"] = bool(getattr(row, "bar_predictor_enabled", False))
             _settings["bar_predictor_buy_min_bias"] = max(0.0, min(1.0, float(getattr(row, "bar_predictor_buy_min_bias", 0.3) or 0.0)))
@@ -536,6 +541,7 @@ async def _save_settings_to_db() -> None:
         _take_profit_pct = _settings.get("take_profit_pct", 1.25)
         row.stop_loss_pct = float(0.5 if _stop_loss_pct is None else _stop_loss_pct)
         row.take_profit_pct = float(1.25 if _take_profit_pct is None else _take_profit_pct)
+        row.stop_loss_sell_market_enabled = bool(_settings.get("stop_loss_sell_market_enabled", True))
         row.stop_loss_value = float(_settings.get("stop_loss_value", 0.0) or 0.0)
         row.take_profit_value = float(_settings.get("take_profit_value", 0.0) or 0.0)
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", False)
@@ -567,6 +573,7 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.25)
         row.pending_cancel_after_bars = int(max(0, _settings.get("pending_cancel_after_bars", 3) or 3))
+        row.pending_repost_cooldown_seconds = int(max(0, _settings.get("pending_repost_cooldown_seconds", 60) or 60))
         row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 80.0) or 0.0)))
         row.bar_predictor_enabled = bool(_settings.get("bar_predictor_enabled", False))
         row.bar_predictor_buy_min_bias = max(0.0, min(1.0, float(_settings.get("bar_predictor_buy_min_bias", 0.3) or 0.0)))
@@ -601,6 +608,7 @@ def update_manager_settings(new: dict) -> dict:
               "default_strategy_name", "intraday_1m_template_params", "position_overrides",
               "sentiment_strategy_enabled", "sentiment_lookback_days", "sentiment_data_points", "sentiment_interval", "sentiment_bucket_persistence",
               "stop_loss_pct", "take_profit_pct",
+              "stop_loss_sell_market_enabled",
               "stop_loss_value", "take_profit_value",
               "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
@@ -609,6 +617,7 @@ def update_manager_settings(new: dict) -> dict:
               "ai_tag_long_tp_value", "ai_tag_long_sl_value",
               "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
               "pending_cancel_after_bars",
+              "pending_repost_cooldown_seconds",
               "sim_buy_fill_rate_pct", "sim_sell_fill_rate_pct",
               "auto_trade_buy_price_offset_mode", "auto_trade_sell_price_offset_mode",
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct",
@@ -629,6 +638,11 @@ def update_manager_settings(new: dict) -> dict:
         _settings["sentiment_bucket_persistence"] = max(
             1,
             min(20, int(_settings.get("sentiment_bucket_persistence", 3) or 3)),
+        )
+    if "pending_repost_cooldown_seconds" in new:
+        _settings["pending_repost_cooldown_seconds"] = max(
+            0,
+            int(_settings.get("pending_repost_cooldown_seconds", 60) or 60),
         )
     if "default_strategy_name" in new:
         _settings["default_strategy_name"] = str(_settings.get("default_strategy_name") or _INTRADAY_1M_TEMPLATE)
@@ -2053,10 +2067,11 @@ async def _attempt_ib_eod_liquidation() -> None:
 
 
 async def _cancel_ib_pending_orders_price_moved() -> None:
-    """Cancel open IB BUY limit orders when market price has moved below limit.
+    """Cancel/repost open IB LMT orders when market drifts from pending price.
 
-    Mirrors sandbox pending-cancel behavior where a BUY is cancelled if current
-    price has already dropped below the intended pending fill price.
+    Applies to both BUY and SELL pending limit orders. If the market has moved
+    beyond the configured drift threshold, cancel the current order and repost
+    a fresh limit using current-bar reference price + side-specific offsets.
     """
     from app.services.ib_service import ib_service
 
@@ -2076,7 +2091,7 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         limit_price = float(o.get("limit_price") or 0.0)
         symbol = str(o.get("symbol") or "").upper()
         if (
-            side == "BUY"
+            side in {"BUY", "SELL"}
             and order_type == "LMT"
             and status in active_status
             and remaining > 0
@@ -2102,9 +2117,51 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         logger.warning("PM IB pending-cancel price fetch failed: %s", exc)
         return
 
+    def _auto_limit_price_from_reference(reference_price: float, side: str) -> float:
+        if reference_price <= 0:
+            return 0.0
+        side_u = str(side or "").upper()
+        if side_u == "BUY":
+            mode = str(_settings.get("auto_trade_buy_price_offset_mode", "percent") or "percent").strip().lower()
+            offset = max(0.0, float(_settings.get("auto_trade_buy_price_offset_pct", 0.01) or 0.0))
+            if mode == "dollar":
+                return round(reference_price + offset, 4)
+            return round(reference_price * (1.0 + offset / 100.0), 4)
+        mode = str(_settings.get("auto_trade_sell_price_offset_mode", "percent") or "percent").strip().lower()
+        offset = max(0.0, float(_settings.get("auto_trade_sell_price_offset_pct", 0.01) or 0.0))
+        if mode == "dollar":
+            return round(max(0.01, reference_price - offset), 4)
+        return round(reference_price * (1.0 - offset / 100.0), 4)
+
     cancelled: list[str] = []
+    reposted: list[str] = []
+    cooldown_skipped: list[str] = []
     cancel_events: list[dict[str, Any]] = []
+    repost_events: list[dict[str, Any]] = []
     drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
+    pending_cancel_after_bars = max(0, int(_settings.get("pending_cancel_after_bars", 3) or 3))
+    bar_minutes = _interval_to_minutes(str(_settings.get("sentiment_interval", "1m") or "1m"))
+    pending_cancel_after_minutes = pending_cancel_after_bars * bar_minutes
+    repost_cooldown_seconds = max(0, int(_settings.get("pending_repost_cooldown_seconds", 60) or 60))
+    now_utc = datetime.now(timezone.utc)
+
+    def _parse_order_created_at(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except Exception:
+                return None
+        else:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
     for o in candidates:
         symbol = str(o.get("symbol") or "").upper()
         side_raw = str(o.get("side") or "BUY").upper()
@@ -2115,9 +2172,26 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         if cp <= 0 or limit_price <= 0:
             continue
 
+        order_key = f"{symbol}:{side}"
+
+        pending_expired = False
+        created_at = _parse_order_created_at(o.get("created_at"))
+        if created_at is not None and pending_cancel_after_minutes > 0:
+            elapsed_min = max(0.0, (now_utc - created_at).total_seconds() / 60.0)
+            pending_expired = elapsed_min >= pending_cancel_after_minutes
+
         # Cancel if market has drifted materially from the pending limit.
         drift_pct = abs(cp - limit_price) / limit_price * 100.0
-        if drift_pct < drift_threshold_pct:
+        drifted = drift_pct >= drift_threshold_pct
+        if not drifted and not pending_expired:
+            continue
+
+        cooldown_until = _ib_pending_repost_cooldown_until.get(order_key)
+        cooldown_active = bool(cooldown_until and cooldown_until > now_utc)
+        if cooldown_active and not pending_expired:
+            cooldown_skipped.append(
+                f"{symbol} {side} (cooldown until {cooldown_until.astimezone().isoformat(timespec='seconds')})"
+            )
             continue
 
         oid = int(o.get("ib_order_id") or 0)
@@ -2127,11 +2201,16 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         result = await ib_service.cancel_order(oid)
         if result.get("error"):
             _log_activity(
-                f"IB PM pending BUY cancel failed {symbol} id={oid}: {result['error']}"
+                f"IB PM pending {side} cancel failed {symbol} id={oid}: {result['error']}"
             )
         else:
+            cancel_reason = (
+                f"timeout {pending_cancel_after_bars} bars"
+                if pending_expired
+                else f"drift {drift_pct:.2f}%: ${cp:.2f} vs ${limit_price:.2f}"
+            )
             cancelled.append(
-                f"{symbol} id={oid} (drift {drift_pct:.2f}%: ${cp:.2f} vs ${limit_price:.2f})"
+                f"{symbol} {side} id={oid} ({cancel_reason})"
             )
             cancel_events.append({
                 "symbol": symbol,
@@ -2139,10 +2218,50 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                 "quantity": max(0.0, qty),
                 "price": max(0.0, limit_price),
                 "ib_order_id": oid,
-                "reason_tag": "pm_ib_pending_cancel_drift",
+                "reason_tag": ("pm_ib_pending_cancel_timeout" if pending_expired else "pm_ib_pending_cancel_drift"),
             })
 
-    if cancel_events:
+            if pending_expired:
+                # Timeout has precedence: cancel stale order and do not repost.
+                continue
+
+            repost_qty = max(0.0, qty)
+            repost_price = _auto_limit_price_from_reference(cp, side)
+            if repost_qty <= 0.0 or repost_price <= 0.0:
+                _log_activity(
+                    f"IB PM pending {side} repost skipped {symbol}: qty={repost_qty:.4f}, ref=${cp:.4f}"
+                )
+                continue
+
+            repost_result = await ib_service.place_order(
+                symbol=symbol,
+                side=side,
+                quantity=repost_qty,
+                order_type="LMT",
+                limit_price=repost_price,
+            )
+            if repost_result.get("error"):
+                _log_activity(
+                    f"IB PM pending {side} repost failed {symbol}: {repost_result['error']}"
+                )
+            else:
+                repost_status = str(repost_result.get("status") or "").upper()
+                reposted.append(
+                    f"{symbol} {side} id={repost_result.get('ib_order_id')} @ ${repost_price:.2f}"
+                )
+                repost_events.append({
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": repost_qty,
+                    "price": repost_price,
+                    "ib_order_id": repost_result.get("ib_order_id"),
+                    "status": repost_status,
+                    "reason_tag": "pm_ib_pending_repost_drift",
+                })
+                if repost_cooldown_seconds > 0:
+                    _ib_pending_repost_cooldown_until[order_key] = now_utc + timedelta(seconds=repost_cooldown_seconds)
+
+    if cancel_events or repost_events:
         try:
             from app.config import settings
             from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
@@ -2161,13 +2280,34 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                         strategy_name=str(ev.get("reason_tag") or "pm_ib_pending_cancel"),
                         filled_at=None,
                     ))
+                for ev in repost_events:
+                    status = OrderStatus.FILLED if str(ev.get("status") or "").upper() == "FILLED" else OrderStatus.PENDING
+                    db.add(Trade(
+                        symbol=ev["symbol"],
+                        side=OrderSide.SELL if ev["side"] == "SELL" else OrderSide.BUY,
+                        quantity=ev["quantity"],
+                        price=ev["price"],
+                        status=status,
+                        mode=mode,
+                        ib_order_id=ev.get("ib_order_id"),
+                        strategy_name=str(ev.get("reason_tag") or "pm_ib_pending_repost"),
+                        filled_at=(datetime.now(timezone.utc) if status == OrderStatus.FILLED else None),
+                    ))
                 await db.commit()
         except Exception as exc:
             logger.warning("PM IB pending-cancel event persistence failed: %s", exc)
 
     if cancelled:
         _log_activity(
-            f"IB PM cancelled pending BUY(s) price moved away: {', '.join(cancelled)}"
+            f"IB PM cancelled pending order(s) price moved away: {', '.join(cancelled)}"
+        )
+    if reposted:
+        _log_activity(
+            f"IB PM reposted pending order(s) at refreshed price: {', '.join(reposted)}"
+        )
+    if cooldown_skipped:
+        _log_activity(
+            f"IB PM drift repost cooldown active, kept pending order(s): {', '.join(cooldown_skipped)}"
         )
 
 
@@ -2503,6 +2643,20 @@ async def _process_ib_engine_signals() -> None:
             return round(max(0.01, reference_price - offset), 4)
         return round(reference_price * (1.0 - offset / 100.0), 4)
 
+    # Always evaluate risk exits for all held IB longs, even without fresh
+    # engine signals, so SL/TP protection is PM-owned and continuously active.
+    for symbol, info in ib_by_symbol.items():
+        ib_qty = float(info.get("qty") or 0.0)
+        ib_avg_cost = float(info.get("avg_cost") or 0.0)
+        if (
+            ib_qty > 0
+            and ib_avg_cost > 0
+            and symbol not in pending_sell_symbols
+            and (stop_loss_pct > 0.0 or take_profit_pct > 0.0)
+        ):
+            risk_symbols_needing_quote.add(symbol)
+            risk_rows.append((symbol, ib_qty, ib_avg_cost))
+
     for pos in positions:
         symbol = str(pos.symbol or "").upper()
         if not symbol:
@@ -2565,14 +2719,6 @@ async def _process_ib_engine_signals() -> None:
             _log_ib_trigger(f"BUY candidate queued symbol={symbol}")
 
         elif signal < 0:
-            if _settings.get("bar_predictor_enabled", False):
-                bp_min = float(_settings.get("bar_predictor_sell_min_bias", 0.3))
-                bp_bias = float(_state.get("scores", {}).get(symbol, {}).get("bar_predictor_bias", 0.0))
-                if bp_bias > -bp_min:
-                    _log_activity(f"IB signal SELL blocked for {symbol}: bar_predictor_bias={bp_bias:.3f} > -{bp_min:.3f}")
-                    _log_ib_trigger(f"SELL blocked symbol={symbol} reason=bar_predictor:{bp_bias:.3f}")
-                    _ib_signal_last_processed_at[symbol] = process_key
-                    continue
             if ib_qty <= 0 or symbol in pending_sell_symbols:
                 reason = "no_position" if ib_qty <= 0 else "pending_sell"
                 _log_ib_trigger(f"SELL skipped symbol={symbol} reason={reason}")
@@ -2583,19 +2729,6 @@ async def _process_ib_engine_signals() -> None:
             _log_ib_trigger(
                 f"SELL candidate symbol={symbol} qty={float(abs(ib_qty)):.4f} reason=pm_engine_signal_sell"
             )
-
-        if (
-            ib_qty > 0
-            and float(ib_by_symbol.get(symbol, {}).get("avg_cost") or 0.0) > 0
-            and symbol not in pending_sell_symbols
-            and (stop_loss_pct > 0.0 or take_profit_pct > 0.0)
-        ):
-            risk_symbols_needing_quote.add(symbol)
-            risk_rows.append((
-                symbol,
-                ib_qty,
-                float(ib_by_symbol.get(symbol, {}).get("avg_cost") or 0.0),
-            ))
 
     quote_symbols = set(buy_symbols_needing_quote) | set(risk_symbols_needing_quote)
     book_map: dict[str, dict[str, Any]] = {}
@@ -2748,12 +2881,31 @@ async def _process_ib_engine_signals() -> None:
     for order in order_candidates:
         symbol = order["symbol"]
         side = order["side"]
+        reason_text = str(order.get("reason") or "")
+        reason_l = reason_text.strip().lower()
+        sl_mkt_enabled = bool(_settings.get("stop_loss_sell_market_enabled", True))
+        is_stop_loss_exit = side == "SELL" and ("stop_loss" in reason_l) and sl_mkt_enabled
+        # Keep predictor SELL gating for discretionary SELLs, but never block
+        # hard-risk stop-loss exits.
+        if side == "SELL" and not ("stop_loss" in reason_l):
+            if _settings.get("bar_predictor_enabled", False):
+                bp_min = float(_settings.get("bar_predictor_sell_min_bias", 0.3))
+                bp_bias = float(_state.get("scores", {}).get(symbol, {}).get("bar_predictor_bias", 0.0))
+                if bp_bias > -bp_min:
+                    _log_activity(
+                        f"IB signal SELL blocked for {symbol}: bar_predictor_bias={bp_bias:.3f} > -{bp_min:.3f}"
+                    )
+                    _log_ib_trigger(f"SELL blocked symbol={symbol} reason=bar_predictor:{bp_bias:.3f}")
+                    processed_key = order.get("processed_key")
+                    if processed_key:
+                        _ib_signal_last_processed_at[symbol] = str(processed_key)
+                    continue
         logger.info(
             "PM IB signal dispatch (symbol=%s side=%s qty=%.4f reason=%s)",
             symbol,
             side,
             float(order["quantity"]),
-            order.get("reason", ""),
+            reason_text,
         )
         reference_price = float(
             order.get("reference_price")
@@ -2766,7 +2918,8 @@ async def _process_ib_engine_signals() -> None:
             f"ref=${reference_price:.4f} src={order.get('price_source') or 'n/a'} tob={order.get('top_of_book_source') or '-'}"
         )
         limit_price = _auto_limit_price_from_reference(reference_price, side)
-        if limit_price <= 0.0:
+        order_type = "MKT" if is_stop_loss_exit else "LMT"
+        if order_type == "LMT" and limit_price <= 0.0:
             _log_activity(f"IB PM {side} skipped for {symbol}: no reference price")
             _log_ib_trigger(f"{side} skipped symbol={symbol} reason=no_reference_price")
             processed_key = order.get("processed_key")
@@ -2779,7 +2932,7 @@ async def _process_ib_engine_signals() -> None:
             cap_budget = float(order.get("alloc") or 0.0)
             if cap_budget > 0.0:
                 qty_to_submit = float(math.floor(cap_budget / limit_price))
-        elif side == "SELL":
+        elif side == "SELL" and not is_stop_loss_exit:
             # Match top-of-book quantity on exits so submitted size aligns with
             # visible touch liquidity and avoids crossing deeper levels.
             top_size = float(order.get("top_size") or 0.0)
@@ -2797,8 +2950,8 @@ async def _process_ib_engine_signals() -> None:
             symbol=symbol,
             side=side,
             quantity=qty_to_submit,
-            order_type="LMT",
-            limit_price=limit_price,
+            order_type=order_type,
+            limit_price=limit_price if order_type == "LMT" else None,
         )
         if result.get("error"):
             _log_activity(f"IB PM {side} failed for {symbol}: {result['error']}")
@@ -2810,13 +2963,12 @@ async def _process_ib_engine_signals() -> None:
 
         ib_status = str(result.get("status") or "").upper()
         is_filled = ib_status == "FILLED"
-        submitted_price = float(limit_price)
+        submitted_price = float(limit_price if order_type == "LMT" else (reference_price or 0.0))
         est_pnl = None
         if side == "SELL" and submitted_price > 0:
             avg_cost = float(ib_avg_cost_by_symbol.get(symbol, 0.0) or 0.0)
             if avg_cost > 0:
                 est_pnl = round((submitted_price - avg_cost) * qty_to_submit, 4)
-        reason_text = str(order.get("reason") or "")
         async with AsyncSessionLocal() as db:
             db.add(Trade(
                 symbol=symbol,
@@ -2833,10 +2985,12 @@ async def _process_ib_engine_signals() -> None:
             await db.commit()
 
         _log_activity(
-            f"IB PM {side} submitted from engine signal for {symbol} x{qty_to_submit:.4f} @ ${submitted_price:.4f}"
+            f"IB PM {side} submitted from engine signal for {symbol} x{qty_to_submit:.4f} "
+            f"({order_type}{f' @ ${submitted_price:.4f}' if submitted_price > 0 else ''})"
         )
         _log_ib_trigger(
-            f"{side} submitted symbol={symbol} qty={qty_to_submit:.4f} limit=${submitted_price:.4f} "
+            f"{side} submitted symbol={symbol} qty={qty_to_submit:.4f} order_type={order_type} "
+            f"ref=${reference_price:.4f} submit_px=${submitted_price:.4f} "
             f"status={ib_status or 'UNKNOWN'} ib_order_id={result.get('ib_order_id')}"
         )
         processed_key = order.get("processed_key")
@@ -2952,7 +3106,7 @@ async def run_portfolio_manager() -> None:
         except Exception as exc:
             logger.warning("PM pending cancel check error: %s", exc)
 
-        # Cancel open IB pending BUYs when price has moved away from limit.
+        # Cancel/repost open IB pending LMT orders when price has drifted from limit.
         try:
             await _cancel_ib_pending_orders_price_moved()
         except Exception as exc:

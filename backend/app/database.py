@@ -114,6 +114,7 @@ async def _migrate(conn):
         # portfolio_manager_settings global risk exits (sandbox engine)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_pct REAL NOT NULL DEFAULT 0.8",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN take_profit_pct REAL NOT NULL DEFAULT 2.5",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_sell_market_enabled BOOLEAN NOT NULL DEFAULT 1",
         # portfolio_manager_settings AI tag strategy routing
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_strategy_enabled BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_strategies TEXT NOT NULL DEFAULT '{}'",
@@ -131,6 +132,7 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_no_loss_sell BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_price_drift_cancel_pct REAL NOT NULL DEFAULT 0.75",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_cancel_after_bars INTEGER NOT NULL DEFAULT 3",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN pending_repost_cooldown_seconds INTEGER NOT NULL DEFAULT 60",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_buy_fill_rate_pct REAL NOT NULL DEFAULT 80.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN sim_sell_fill_rate_pct REAL NOT NULL DEFAULT 90.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN auto_trade_buy_price_offset_mode VARCHAR(20) NOT NULL DEFAULT 'percent'",

@@ -19,6 +19,7 @@ import {
   getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
   getSandboxAnalytics, getSandboxRealizedMetrics,
   getPortfolioManagerState, togglePortfolioManager,
+  updatePortfolioManagerSettings,
   bulkUpdateSandboxStrategy,
   bulkUpdateSandboxAllocationCap,
   cancelOrder,
@@ -106,6 +107,7 @@ function getIbOrderExpiryLabel(order) {
 function compactStrategyLabel(strategyName) {
   const raw = String(strategyName ?? '').trim()
   if (!raw) return null
+  if (raw === 'next_bar_predictor') return 'predictor auto-trade'
   if (raw.startsWith('template:')) {
     return raw.slice(9).replace(/\.py$/i, '')
   }
@@ -126,6 +128,15 @@ function compactStrategyLabel(strategyName) {
   if (raw.startsWith('pm_ib_pending_cancel_drift')) return 'pm cancel (price drift)'
   if (raw.endsWith('_timeout_cancel')) return 'cancelled (timeout)'
   return raw
+}
+
+function buildStrategyReasonNote(strategyName, reasonText) {
+  const strategy = compactStrategyLabel(strategyName)
+  const reason = String(reasonText ?? '').trim()
+  if (strategy && reason) return `via ${strategy} · ${reason}`
+  if (strategy) return `via ${strategy}`
+  if (reason) return reason
+  return undefined
 }
 
 function buildIbTradeNote(tradeLike) {
@@ -154,7 +165,7 @@ export default function SandboxPanel() {
   const importInputRef = useRef(null)
 
   const [searchParams, setSearchParams] = useSearchParams()
-  const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get('symbol') || readDashboardWatchlist()[0] || null)
+  const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get('symbol') || null)
   const [editingStrategy, setEditingStrategy] = useState(false)
   const [editStratType, setEditStratType] = useState('sma_crossover')
   const [editScriptId, setEditScriptId] = useState(null)
@@ -202,6 +213,7 @@ export default function SandboxPanel() {
   const [bulkStratParams, setBulkStratParams] = useState({})
   const [activeMainTab, setActiveMainTab] = useState('summary')
   const [portfolioView, setPortfolioView] = useState('simulated')
+  const showOverview = activeMainTab === 'summary' && !selectedSymbol
 
   // IB status
   const { data: ibStatus } = useQuery({ queryKey: ['ib-status'], queryFn: getIBStatus, refetchInterval: appSettings.trading_status_ms })
@@ -239,6 +251,7 @@ export default function SandboxPanel() {
     refetchInterval: appSettings.sandbox_account_ms,
     placeholderData: (prev) => prev,
   })
+  const hasPrimaryData = Boolean(accountData) && Boolean(posData)
   const rawPositions = posData?.positions ?? []
 
   // Force-refresh table/account payloads immediately on profile transition
@@ -287,10 +300,23 @@ export default function SandboxPanel() {
     return [...new Set(merged.filter(Boolean))]
   }, [ibConnected, rawPositions, ibWatchlistSymbols, ibPositionsData])
 
+  const quoteSymbols = useMemo(() => {
+    if (hasPrimaryData) return symbols
+    // Keep startup quote workload small so account/positions render first.
+    const owned = rawPositions
+      .filter(p => Number(p?.shares ?? 0) > 0 || Number(p?.allocated_funds ?? 0) > 0)
+      .map(p => p.symbol)
+    return normalizeSymbolList([
+      selectedSymbol,
+      ...owned,
+      ...ibWatchlistSymbols.slice(0, 4),
+    ]).slice(0, 8)
+  }, [hasPrimaryData, symbols, rawPositions, selectedSymbol, ibWatchlistSymbols])
+
   const { data: learnerData } = useQuery({
     queryKey: ['sandbox-learner-insights', symbols.join(',')],
     queryFn: () => symbols.length ? getSandboxLearnerInsights(symbols) : Promise.resolve({ insights: {} }),
-    enabled: symbols.length > 0,
+    enabled: hasPrimaryData && symbols.length > 0,
     staleTime: 90_000,
   })
 
@@ -328,9 +354,9 @@ export default function SandboxPanel() {
     return merged
   }, [rawPositions, ibWatchlistSymbols, learnerData?.insights])
   const { data: quotesData } = useQuery({
-    queryKey: ['sandbox-quotes', symbols.join(',')],
-    queryFn: () => symbols.length ? getBulkQuotes(symbols) : Promise.resolve({}),
-    enabled: symbols.length > 0,
+    queryKey: ['sandbox-quotes', quoteSymbols.join(',')],
+    queryFn: () => quoteSymbols.length ? getBulkQuotes(quoteSymbols) : Promise.resolve({}),
+    enabled: quoteSymbols.length > 0,
     refetchInterval: appSettings.sandbox_quotes_ms,
   })
   const quotes = quotesData ?? {}
@@ -347,7 +373,7 @@ export default function SandboxPanel() {
   const { data: sectorsData } = useQuery({
     queryKey: ['sandbox-sectors', symbols.join(',')],
     queryFn: () => symbols.length ? getSymbolSectors(symbols) : Promise.resolve({}),
-    enabled: symbols.length > 0,
+    enabled: hasPrimaryData && symbols.length > 0,
     staleTime: 3_600_000,
   })
   const sectors = sectorsData ?? {}
@@ -421,19 +447,28 @@ export default function SandboxPanel() {
   const { data: analytics } = useQuery({
     queryKey: ['sandbox-analytics', activeProfile],
     queryFn: () => getSandboxAnalytics(activeProfile),
+    enabled: hasPrimaryData && showOverview,
     refetchInterval: appSettings.sandbox_quotes_ms,
   })
   const { data: realizedMetrics } = useQuery({
     queryKey: ['sandbox-realized-metrics', activeProfile],
     queryFn: () => getSandboxRealizedMetrics(activeProfile),
+    enabled: hasPrimaryData && showOverview,
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const { data: managerState } = useQuery({ queryKey: ['portfolio-manager-state'], queryFn: getPortfolioManagerState, refetchInterval: appSettings.sandbox_engine_ms })
+  const togglePredictorMut = useMutation({
+    mutationFn: (enabled) => updatePortfolioManagerSettings({ bar_predictor_enabled: Boolean(enabled) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] })
+    },
+  })
 
   // all recent trades (for notification + activity log)
   const { data: allTradesData } = useQuery({
     queryKey: ['sandbox-trades-all', activeProfile],
     queryFn: () => getSandboxTrades(undefined, 200, activeProfile),
+    enabled: hasPrimaryData && activeProfile === 'simulated',
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const allTrades = allTradesData?.trades ?? []
@@ -443,7 +478,7 @@ export default function SandboxPanel() {
   const { data: ibTradeHistoryData } = useQuery({
     queryKey: ['ib-trade-history', ibMode ?? 'paper'],
     queryFn: () => getTradeHistory(200, (ibMode ?? 'paper').toUpperCase()),
-    enabled: ibConnected,
+    enabled: ibConnected && hasPrimaryData,
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const ibTradeHistory = ibTradeHistoryData?.trades ?? []
@@ -528,7 +563,7 @@ export default function SandboxPanel() {
           const ts = Number.isFinite(createdTs) && createdTs > 0 ? createdTs : firstSeen[fallbackKey]
           const sub = activeProfile !== 'simulated'
             ? buildIbTradeNote(t)
-            : (t.strategy_name ? `via ${t.strategy_name.split(':')[0]}${t.reason ? ' — ' + t.reason : ''}` : t.reason || undefined)
+            : buildStrategyReasonNote(t.strategy_name, t.reason)
           return {
             type: 'trade',
             profile,
@@ -536,6 +571,7 @@ export default function SandboxPanel() {
             side: t.side,
             status,
             symbol: t.symbol,
+            strategy_name: t.strategy_name ?? null,
             shares: t.quantity ?? null,
             price: t.price ?? null,
             pnl: visiblePnl,
@@ -610,11 +646,11 @@ export default function SandboxPanel() {
         strategy_name: p.strategy_name,
       })
     },
-    onSuccess: d => {
+    onSuccess: (d, p) => {
       if (d.trade_id != null) {
         setTradeMsg({ type: 'success', text: `${d.side} ${d.quantity} ${d.symbol} @ $${d.price.toFixed(2)}${d.pnl != null ? ` — PnL: ${fmt(d.pnl)}` : ''}` })
       } else {
-        const enteredReason = tradeForm.reason?.trim() || ''
+        const enteredReason = String(p?.reason ?? tradeForm.reason ?? '').trim()
         setTradeMsg({
           type: 'success',
           text: `${d.side} ${d.quantity} ${d.symbol} submitted to ${activeProfileRef.current.toUpperCase()} IB (${d.order_type ?? 'MKT'}${d.limit_price != null ? ` @ $${Number(d.limit_price).toFixed(2)}` : ''})${d.ib_order_id != null ? ` · Order #${d.ib_order_id}` : ''}`,
@@ -624,6 +660,7 @@ export default function SandboxPanel() {
           profile: activeProfileRef.current,
           tradeId: d.id,
           side: d.side,
+          strategy_name: p?.strategy_name ?? null,
           label: `Order submitted ${d.side} ${d.quantity} ${d.symbol}`,
           reason: enteredReason || null,
           sub: buildIbTradeNote({
@@ -631,7 +668,7 @@ export default function SandboxPanel() {
             status: d.status,
             order_type: d.order_type,
             limit_price: d.limit_price,
-            strategy_name: null,
+            strategy_name: p?.strategy_name ?? null,
             reason: enteredReason,
           }),
           time: new Date().toLocaleTimeString(),
@@ -865,6 +902,33 @@ export default function SandboxPanel() {
       reason: tradeForm.reason?.trim() || 'manual',
       mode: activeProfileRef.current,
     })
+  }
+  function handlePredictorSellCancelled(payload = {}) {
+    const symbol = String(payload.symbol ?? '').trim().toUpperCase()
+    if (!symbol) return
+    const qty = Number(payload.quantity)
+    const targetPrice = Number(payload.targetPrice)
+    const reason = String(payload.reason ?? '').trim() || 'predictor sell cancelled'
+    const details = String(payload.details ?? '').trim()
+    const note = details ? `${reason} · ${details}` : reason
+
+    setActivities(prev => [{
+      type: 'trade',
+      profile: activeProfileRef.current,
+      tradeId: null,
+      side: 'SELL',
+      status: 'CANCELLED',
+      symbol,
+      strategy_name: 'next_bar_predictor',
+      shares: Number.isFinite(qty) && qty > 0 ? qty : null,
+      price: Number.isFinite(targetPrice) && targetPrice > 0 ? targetPrice : null,
+      reason: note,
+      label: `CANCEL ${Number.isFinite(qty) && qty > 0 ? qty : ''} ${symbol}`.replace(/\s+/g, ' ').trim(),
+      sub: buildStrategyReasonNote('next_bar_predictor', note),
+      syncFromIb: true,
+      time: new Date().toLocaleTimeString(),
+      ts: Date.now(),
+    }, ...prev].slice(0, 500))
   }
   function handleIbWatchlistAdd(symbol) {
     const sym = (symbol || '').trim().toUpperCase()
@@ -1326,6 +1390,9 @@ export default function SandboxPanel() {
               tradeMut={tradeMut}
               cancelOrderMut={cancelOrderMut}
               managerSettings={managerState?.settings ?? null}
+              defaultTradeQuantity={1}
+              onTogglePredictor={togglePredictorMut.mutateAsync}
+              onPredictorSellCancelled={handlePredictorSellCancelled}
             />
           )}
         </div>

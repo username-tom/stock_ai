@@ -58,6 +58,9 @@ export default function PositionDetail({
   cancelOrderMut,
   accountData,
   managerSettings = null,
+  defaultTradeQuantity = 1,
+  onTogglePredictor = null,
+  onPredictorSellCancelled = null,
 }) {
   const navigate = useNavigate()
   const appSettings = useAppSettings()
@@ -771,7 +774,16 @@ export default function PositionDetail({
           <div className={`text-xl font-bold ${(selectedPos.realized_pnl + selectedUnrealised) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(selectedPos.realized_pnl + selectedUnrealised)}</div>
           <div className="text-xs text-slate-500 mt-0.5">
             {ibMode
-              ? 'Realised: — (not provided per-position by IB endpoint)'
+              ? (
+                <>
+                  Realised: {fmt(selectedPos.realized_pnl)}
+                  {Math.abs(Number(selectedPos.avg_cost ?? 0) * Math.abs(Number(selectedPos.shares ?? 0))) > 0.01 && (
+                    <span className={selectedPos.realized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {' '}({((selectedPos.realized_pnl / Math.abs(Number(selectedPos.avg_cost ?? 0) * Math.abs(Number(selectedPos.shares ?? 0)))) * 100).toFixed(2)}%)
+                    </span>
+                  )}
+                </>
+              )
               : (
                 <>
                   Realised: {fmt(selectedPos.realized_pnl)}
@@ -991,6 +1003,15 @@ export default function PositionDetail({
                     symbol={selectedSymbol}
                     topOfBook={topOfBook}
                     refetchInterval={appSettings.portfolio_detail_ms}
+                    tradeMode={isSimulated ? 'SIMULATED' : String(ibMode ?? 'paper').toUpperCase()}
+                    tradeQuantity={Number.parseFloat(tradeForm.quantity || String(defaultTradeQuantity || 1))}
+                    positionShares={selectedShares}
+                    positionAvgCost={Number(selectedPos?.avg_cost ?? 0)}
+                    openOrders={pendingOrdersForSymbol}
+                    managerSettings={managerSettings}
+                    onSubmitTrade={tradeMut?.mutateAsync}
+                    onTogglePredictor={onTogglePredictor}
+                    onPredictorSellCancelled={onPredictorSellCancelled}
                   />
                 </div>
               </div>
@@ -1224,6 +1245,8 @@ export default function PositionDetail({
             shares: a.shares,
             price: a.price,
             marketValue: a.marketValue,
+            strategy_name: a.strategy_name ?? null,
+            reason: a.reason ?? null,
             ts: a.ts,
             date: a.ts != null ? new Date(a.ts).toISOString() : null,
             label: a.label,
