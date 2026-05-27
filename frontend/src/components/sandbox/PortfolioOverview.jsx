@@ -155,7 +155,6 @@ export default function PortfolioOverview({
   const totalDeposited = isSimulated
     ? (accountData?.total_deposited ?? netDepositedFromEvents)
     : null
-  const realizedPnlPct = totalDeposited > 0 ? (totalRealizedPnl / totalDeposited) * 100 : null
 
   const cumulativeSeries = analytics?.cumulative_pnl ?? []
   const ibPositionsBySymbol = useMemo(() => {
@@ -261,6 +260,22 @@ export default function PortfolioOverview({
   const ibCashValue = numOrNull(accountData?.cash_value)
   const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
   const ibRealizedPnl = numOrNull(accountData?.realized_pnl)
+  const performanceBase = (() => {
+    if (isSimulated) {
+      const deposited = numOrNull(totalDeposited)
+      if (deposited != null && deposited > 0) return deposited
+      const funds = numOrNull(accountData?.total_funds)
+      return (funds != null && funds > 0) ? funds : null
+    }
+    const netLiq = numOrNull(accountData?.total_funds)
+    if (netLiq != null && netLiq > 0) return netLiq
+    const cash = numOrNull(ibCashValue)
+    return (cash != null && cash > 0) ? cash : null
+  })()
+  const performanceBaseLabel = isSimulated ? 'deposited' : 'net liq'
+  const realizedPnlPct = performanceBase > 0 && totalRealizedPnl != null
+    ? (totalRealizedPnl / performanceBase) * 100
+    : null
   const breakdownUnrealizedPnl = useMemo(() => {
     let sum = 0
     let hasAny = false
@@ -295,13 +310,24 @@ export default function PortfolioOverview({
 
   const dailyPnl = numOrNull(realizedMetrics?.daily_realized_pnl) ?? (cumulativeSeries.length > 0 ? dailyPnlFallback : null)
   const dailyPnlPct = numOrNull(realizedMetrics?.daily_realized_pnl_pct)
-    ?? ((totalDeposited > 0 && dailyPnl != null) ? (dailyPnl / totalDeposited) * 100 : null)
+    ?? ((performanceBase > 0 && dailyPnl != null) ? (dailyPnl / performanceBase) * 100 : null)
   const weeklyPnl = numOrNull(realizedMetrics?.weekly_realized_pnl) ?? (cumulativeSeries.length > 0 ? weeklyPnlFallback : null)
   const weeklyPnlPct = numOrNull(realizedMetrics?.weekly_realized_pnl_pct)
-    ?? ((totalDeposited > 0 && weeklyPnl != null) ? (weeklyPnl / totalDeposited) * 100 : null)
+    ?? ((performanceBase > 0 && weeklyPnl != null) ? (weeklyPnl / performanceBase) * 100 : null)
   const monthlyPnl = numOrNull(realizedMetrics?.monthly_realized_pnl) ?? (cumulativeSeries.length > 0 ? monthlyPnlFallback : null)
   const monthlyPnlPct = numOrNull(realizedMetrics?.monthly_realized_pnl_pct)
-    ?? ((totalDeposited > 0 && monthlyPnl != null) ? (monthlyPnl / totalDeposited) * 100 : null)
+    ?? ((performanceBase > 0 && monthlyPnl != null) ? (monthlyPnl / performanceBase) * 100 : null)
+
+  const annualizePnlForPeriod = (pnlValue, periodTradingDays) => {
+    if (performanceBase == null || performanceBase <= 0) return null
+    if (pnlValue == null || !Number.isFinite(Number(pnlValue))) return null
+    const r = Number(pnlValue) / performanceBase
+    if (r <= -1 || periodTradingDays <= 0) return null
+    return (Math.pow(1 + r, 252 / periodTradingDays) - 1) * 100
+  }
+  const dailyAnnualizedPct = annualizePnlForPeriod(dailyPnl, 1)
+  const weeklyAnnualizedPct = annualizePnlForPeriod(weeklyPnl, 5)
+  const monthlyAnnualizedPct = annualizePnlForPeriod(monthlyPnl, 21)
 
   const annualizedReturnPctServer = numOrNull(realizedMetrics?.annualized_return_pct)
   const avgDailyRealizedPnlServer = numOrNull(realizedMetrics?.avg_daily_realized_pnl)
@@ -460,8 +486,7 @@ export default function PortfolioOverview({
   const annualizationCapitalBase = (() => {
     const candidates = [
       totalDepositedServer,
-      numOrNull(totalDeposited),
-      numOrNull(accountData?.total_funds),
+      performanceBase,
     ]
     for (const v of candidates) {
       if (v != null && v > 0) return v
@@ -654,8 +679,8 @@ export default function PortfolioOverview({
       if (dd > maxDrawdown) maxDrawdown = dd
     }
   }
-  const maxGainPct = totalDeposited > 0 ? (maxGain / totalDeposited) * 100 : null
-  const maxDrawdownPct = totalDeposited > 0 ? (maxDrawdown / totalDeposited) * 100 : null
+  const maxGainPct = performanceBase > 0 ? (maxGain / performanceBase) * 100 : null
+  const maxDrawdownPct = performanceBase > 0 ? (maxDrawdown / performanceBase) * 100 : null
 
   const marketShareData = effectivePieData.map((entry, i) => ({
     ...entry,
@@ -706,55 +731,77 @@ export default function PortfolioOverview({
         <div className={`card ${headlineRealized != null && headlineRealized >= 0 ? 'border-emerald-700/20' : headlineRealized != null ? 'border-red-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Realised P&amp;L</div>
           <div className={`text-xl font-bold ${headlineRealized == null ? 'text-slate-400' : headlineRealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{headlineRealized == null ? '—' : fmt(headlineRealized)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{isSimulated ? (realizedPnlPct == null ? '—' : `${realizedPnlPct.toFixed(2)}% of deposited funds`) : (headlineRealized == null ? 'Not provided by IB summary' : 'From IB account summary')}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{realizedPnlPct == null ? '—' : `${realizedPnlPct.toFixed(2)}% of ${performanceBaseLabel}`}</div>
         </div>
       </div>
 
       {/* Secondary stat cards: performance metrics */}
-      {isSimulated && (
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
         <div className={`card ${maxGain > 0 ? 'border-emerald-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Max Gain</div>
           <div className={`text-xl font-bold ${maxGain > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{maxGain > 0 ? fmt(maxGain) : '—'}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{maxGainPct != null && maxGain > 0 ? `${maxGainPct.toFixed(2)}% of deposited` : 'No closed trades yet'}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{maxGainPct != null && maxGain > 0 ? `${maxGainPct.toFixed(2)}% of ${performanceBaseLabel}` : 'No realised trades yet'}</div>
         </div>
         <div className={`card ${maxDrawdown > 0 ? 'border-red-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Max Drawdown</div>
           <div className={`text-xl font-bold ${maxDrawdown > 0 ? 'text-red-400' : 'text-slate-400'}`}>{maxDrawdown > 0 ? fmt(-maxDrawdown) : '—'}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{maxDrawdownPct != null && maxDrawdown > 0 ? `${maxDrawdownPct.toFixed(2)}% peak-to-trough` : 'No drawdown recorded'}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{maxDrawdownPct != null && maxDrawdown > 0 ? `${maxDrawdownPct.toFixed(2)}% of ${performanceBaseLabel}` : 'No drawdown recorded'}</div>
         </div>
-        <div className={`card ${dailyPnl != null && dailyPnl !== 0 ? (dailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
-          <div className="text-xs text-slate-500 mb-1">Today&apos;s P&amp;L</div>
-          <div className={`text-xl font-bold ${dailyPnl == null ? 'text-slate-400' : dailyPnl > 0 ? 'text-emerald-400' : dailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-            {dailyPnl == null ? '—' : fmt(dailyPnl)}
+        <div className={`card ${avgDailyRealizedPnl != null ? (avgDailyRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Avg Daily Realised</div>
+          <div className={`text-xl font-bold ${avgDailyRealizedPnl == null ? 'text-slate-400' : avgDailyRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {avgDailyRealizedPnl == null ? '—' : fmt(avgDailyRealizedPnl)}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {dailyPnlPct != null ? `${dailyPnlPct >= 0 ? '+' : ''}${dailyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
-          </div>
-        </div>
-        <div className={`card ${weeklyPnl != null && weeklyPnl !== 0 ? (weeklyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
-          <div className="text-xs text-slate-500 mb-1">This Week&apos;s P&amp;L</div>
-          <div className={`text-xl font-bold ${weeklyPnl == null ? 'text-slate-400' : weeklyPnl > 0 ? 'text-emerald-400' : weeklyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-            {weeklyPnl == null ? '—' : fmt(weeklyPnl)}
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">
-            {weeklyPnlPct != null ? `${weeklyPnlPct >= 0 ? '+' : ''}${weeklyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+            {realizedTradeDays > 0 ? `${realizedTradeDays} realised trade day${realizedTradeDays !== 1 ? 's' : ''}` : 'No realised history yet'}
           </div>
         </div>
       </div>
-      )}
 
-      {/* Tertiary stat cards: long-horizon performance */}
-      {isSimulated && (
-      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+      {/* Tertiary stat cards: period and long-horizon performance */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className={`card ${dailyPnl != null && dailyPnl !== 0 ? (dailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">Today&apos;s P&amp;L</div>
+          <div className="flex items-baseline justify-between gap-3">
+            <div className={`text-xl font-bold ${dailyPnl == null ? 'text-slate-400' : dailyPnl > 0 ? 'text-emerald-400' : dailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+              {dailyPnl == null ? '—' : fmt(dailyPnl)}
+            </div>
+            <div className={`text-sm font-semibold ${dailyAnnualizedPct == null ? 'text-slate-500' : dailyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {dailyAnnualizedPct == null ? '—' : `${dailyAnnualizedPct >= 0 ? '+' : ''}${dailyAnnualizedPct.toFixed(2)}%`}
+            </div>
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {dailyPnlPct != null ? `${dailyPnlPct >= 0 ? '+' : ''}${dailyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
+          </div>
+        </div>
+
+        <div className={`card ${weeklyPnl != null && weeklyPnl !== 0 ? (weeklyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+          <div className="text-xs text-slate-500 mb-1">This Week&apos;s P&amp;L</div>
+          <div className="flex items-baseline justify-between gap-3">
+            <div className={`text-xl font-bold ${weeklyPnl == null ? 'text-slate-400' : weeklyPnl > 0 ? 'text-emerald-400' : weeklyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+              {weeklyPnl == null ? '—' : fmt(weeklyPnl)}
+            </div>
+            <div className={`text-sm font-semibold ${weeklyAnnualizedPct == null ? 'text-slate-500' : weeklyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {weeklyAnnualizedPct == null ? '—' : `${weeklyAnnualizedPct >= 0 ? '+' : ''}${weeklyAnnualizedPct.toFixed(2)}%`}
+            </div>
+          </div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            {weeklyPnlPct != null ? `${weeklyPnlPct >= 0 ? '+' : ''}${weeklyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
+          </div>
+        </div>
 
         <div className={`card ${monthlyPnl != null && monthlyPnl !== 0 ? (monthlyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Month-to-Date P&amp;L</div>
-          <div className={`text-xl font-bold ${monthlyPnl == null ? 'text-slate-400' : monthlyPnl > 0 ? 'text-emerald-400' : monthlyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-            {monthlyPnl == null ? '—' : fmt(monthlyPnl)}
+          <div className="flex items-baseline justify-between gap-3">
+            <div className={`text-xl font-bold ${monthlyPnl == null ? 'text-slate-400' : monthlyPnl > 0 ? 'text-emerald-400' : monthlyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+              {monthlyPnl == null ? '—' : fmt(monthlyPnl)}
+            </div>
+            <div className={`text-sm font-semibold ${monthlyAnnualizedPct == null ? 'text-slate-500' : monthlyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {monthlyAnnualizedPct == null ? '—' : `${monthlyAnnualizedPct >= 0 ? '+' : ''}${monthlyAnnualizedPct.toFixed(2)}%`}
+            </div>
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {monthlyPnlPct != null ? `${monthlyPnlPct >= 0 ? '+' : ''}${monthlyPnlPct.toFixed(2)}% of deposited` : 'No realised trades yet'}
+            {monthlyPnlPct != null ? `${monthlyPnlPct >= 0 ? '+' : ''}${monthlyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
           </div>
         </div>
 
@@ -771,18 +818,7 @@ export default function PortfolioOverview({
             {annualizedReturnSource !== 'unavailable' ? ` · ${annualizedReturnSource}` : ''}
           </div>
         </div>
-
-        <div className={`card ${avgDailyRealizedPnl != null ? (avgDailyRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
-          <div className="text-xs text-slate-500 mb-1">Avg Daily Realised</div>
-          <div className={`text-xl font-bold ${avgDailyRealizedPnl == null ? 'text-slate-400' : avgDailyRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {avgDailyRealizedPnl == null ? '—' : fmt(avgDailyRealizedPnl)}
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">
-            {realizedTradeDays > 0 ? `${realizedTradeDays} realised trade day${realizedTradeDays !== 1 ? 's' : ''}` : 'No realised history yet'}
-          </div>
-        </div>
       </div>
-      )}
 
       {/* Per-position breakdown table */}
       {breakdownPositions.length > 0 ? (
