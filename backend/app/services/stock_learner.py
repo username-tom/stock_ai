@@ -10,6 +10,7 @@ LONG, SHORT, STRONG LONG, STRONG SHORT, or WATCH.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import time
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ import pandas as pd
 from app.services.market_service import get_history
 
 _CACHE_TTL_S = 2 * 60  # refresh every 2 minutes — intraday data changes quickly
+_EXTERNAL_SENTIMENT_TIMEOUT_S = 1.5
 _MIN_HISTORY_ROWS = 40
 _LEARNER_PERIOD = "2d"  # 2 days of 1-minute bars for intraday day-trading context
 _TAG_SCORE_THRESHOLD = 0.18
@@ -426,15 +428,22 @@ async def classify_symbols(
         learner_task = asyncio.gather(
             *(classify_symbol(sym, period=period) for sym in unique_symbols)
         )
-        sentiment_task = sentiment_aggregator.get_bulk_sentiment(unique_symbols)
+        sentiment_task = asyncio.create_task(
+            sentiment_aggregator.get_bulk_sentiment(unique_symbols)
+        )
+        sentiment_map: dict[str, dict[str, Any]] = {}
         try:
-            learner_results, sentiment_map = await asyncio.gather(
-                learner_task, sentiment_task
+            sentiment_map = await asyncio.wait_for(
+                sentiment_task,
+                timeout=_EXTERNAL_SENTIMENT_TIMEOUT_S,
             )
         except Exception:
-            # Fall back to pure learner output if sentiment fetch blows up.
-            learner_results = await learner_task
-            sentiment_map = {}
+            # Don't block learner output on external/news feed delays.
+            if not sentiment_task.done():
+                sentiment_task.cancel()
+                with contextlib.suppress(Exception):
+                    await sentiment_task
+        learner_results = await learner_task
         if not isinstance(sentiment_map, dict):
             sentiment_map = {}
         return {

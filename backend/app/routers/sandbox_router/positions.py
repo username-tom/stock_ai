@@ -27,6 +27,66 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _fallback_ai_insights(symbols: list[str]) -> dict[str, dict]:
+    """Use PM-cached AI tags when live classification is slow/unavailable."""
+    try:
+        from app.services.portfolio_manager import get_manager_state
+
+        ai_tags = (get_manager_state() or {}).get("ai_tags", {})
+        out: dict[str, dict] = {}
+        for symbol in symbols:
+            info = ai_tags.get(symbol) or ai_tags.get(symbol.upper()) or {}
+            if not isinstance(info, dict):
+                continue
+            out[symbol] = {
+                "learner_tag": info.get("learner_tag", "WATCH"),
+                "learner_direction": info.get("learner_direction", "neutral"),
+                "learner_confidence": float(info.get("learner_confidence", 0.0) or 0.0),
+                "learner_model": "portfolio_manager_cache",
+            }
+        return out
+    except Exception:
+        return {}
+
+
+async def _load_ai_insights(symbols: list[str]) -> dict[str, dict]:
+    requested = [str(s or "").upper().strip() for s in symbols if str(s or "").strip()]
+    if not requested:
+        return {}
+    unique_symbols = list(dict.fromkeys(requested))
+    try:
+        from app.services.stock_learner import classify_symbols
+        from app.services.portfolio_manager import get_manager_settings, get_manager_state
+
+        manager_settings = get_manager_settings()
+        matrix_mode = bool(
+            manager_settings.get("sentiment_strategy_enabled", True)
+            and manager_settings.get("ai_tag_strategy_enabled", False)
+            and manager_settings.get("ai_sentiment_change_enabled", True)
+        )
+        if matrix_mode:
+            pm_ai_tags = (get_manager_state() or {}).get("ai_tags", {})
+            out: dict[str, dict] = {}
+            for symbol in unique_symbols:
+                info = pm_ai_tags.get(symbol) or pm_ai_tags.get(symbol.upper()) or {}
+                out[symbol] = {
+                    "learner_tag": info.get("learner_tag", "WATCH"),
+                    "learner_direction": info.get("learner_direction", "neutral"),
+                    "learner_confidence": float(info.get("learner_confidence", 0.0) or 0.0),
+                    "learner_model": "portfolio_manager_cache",
+                }
+            return out
+
+        ext_w = float(manager_settings.get("ai_external_sentiment_weight", 0.0) or 0.0)
+        return await asyncio.wait_for(
+            classify_symbols(unique_symbols, external_sentiment_weight=ext_w),
+            timeout=2.0,
+        )
+    except Exception as exc:
+        logger.debug("positions insight classification fallback: %s", exc)
+        return _fallback_ai_insights(unique_symbols)
+
+
 def _should_force_engine_off_for_position(pos: SandboxPosition) -> bool:
     from app.services.portfolio_manager import get_manager_settings
     from app.services.sandbox_engine import should_force_engine_off_without_position
@@ -161,16 +221,7 @@ async def get_positions(
         )
         enriched.sort(key=lambda p: p["symbol"])
 
-        try:
-            from app.services.stock_learner import classify_symbols
-            from app.services.portfolio_manager import get_manager_settings
-            ext_w = float(get_manager_settings().get("ai_external_sentiment_weight", 0.0) or 0.0)
-            insights = await classify_symbols(
-                list({p["symbol"] for p in enriched}),
-                external_sentiment_weight=ext_w,
-            )
-        except Exception:
-            insights = {}
+        insights = await _load_ai_insights([p["symbol"] for p in enriched])
         enriched = [{**p, **insights.get(p["symbol"], {})} for p in enriched]
 
         mode = requested_profile if requested_profile in {"paper", "live"} else "paper"
@@ -184,13 +235,7 @@ async def get_positions(
     result = await db.execute(select(SandboxPosition).order_by(SandboxPosition.symbol))
     positions = result.scalars().all()
     pos_dicts = [position_dict(p) for p in positions]
-    try:
-        from app.services.stock_learner import classify_symbols
-        from app.services.portfolio_manager import get_manager_settings
-        ext_w = float(get_manager_settings().get("ai_external_sentiment_weight", 0.0) or 0.0)
-        insights = await classify_symbols([p["symbol"] for p in pos_dicts], external_sentiment_weight=ext_w)
-    except Exception:
-        insights = {}
+    insights = await _load_ai_insights([p["symbol"] for p in pos_dicts])
     return {"positions": [{**p, **insights.get(p["symbol"], {})} for p in pos_dicts]}
 
 

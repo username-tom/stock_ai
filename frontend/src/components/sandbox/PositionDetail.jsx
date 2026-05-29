@@ -113,6 +113,33 @@ export default function PositionDetail({
   const sliderPrice = hasDayRange
     ? Math.min(dayHigh, Math.max(dayLow, resolvedTradePrice ?? dayLow))
     : null
+  const parsedTradeQty = Number.parseFloat(tradeForm.quantity)
+  const hasManualTradeQty = Number.isFinite(parsedTradeQty) && parsedTradeQty > 0
+  const fallbackTradeQty = Math.max(1, Number.parseFloat(String(defaultTradeQuantity || 1)) || 1)
+  const predictorAutoQty = (() => {
+    if (hasManualTradeQty) return parsedTradeQty
+    if (isSimulated) return fallbackTradeQty
+
+    const capMode = String(selectedPos?.max_allocation_mode ?? 'dollar').toLowerCase()
+    const capValue = Number(selectedPos?.max_allocation_value)
+    const refPrice = Number.isFinite(resolvedTradePrice) && resolvedTradePrice > 0
+      ? resolvedTradePrice
+      : Number(selectedPrice)
+
+    if (!Number.isFinite(capValue) || capValue <= 0 || !Number.isFinite(refPrice) || refPrice <= 0) {
+      return fallbackTradeQty
+    }
+
+    let capBudget = capValue
+    if (capMode === 'percent') {
+      const totalFunds = Number(accountData?.total_funds)
+      if (!Number.isFinite(totalFunds) || totalFunds <= 0) return fallbackTradeQty
+      capBudget = (totalFunds * capValue) / 100
+    }
+
+    const derivedQty = Math.floor(capBudget / refPrice)
+    return derivedQty > 0 ? derivedQty : fallbackTradeQty
+  })()
   const openOrdersForSymbol = useMemo(
     () => {
       const symbol = String(selectedSymbol ?? '').toUpperCase()
@@ -1004,7 +1031,7 @@ export default function PositionDetail({
                     topOfBook={topOfBook}
                     refetchInterval={appSettings.portfolio_detail_ms}
                     tradeMode={isSimulated ? 'SIMULATED' : String(ibMode ?? 'paper').toUpperCase()}
-                    tradeQuantity={Number.parseFloat(tradeForm.quantity || String(defaultTradeQuantity || 1))}
+                    tradeQuantity={predictorAutoQty}
                     positionShares={selectedShares}
                     positionAvgCost={Number(selectedPos?.avg_cost ?? 0)}
                     openOrders={pendingOrdersForSymbol}

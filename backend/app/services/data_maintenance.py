@@ -49,14 +49,17 @@ def _intraday_cache_covers_range(coverage: dict, start_date: str, end_date: str)
     return oldest_dt <= start_dt and (newest_dt + timedelta(days=3)) >= required_end
 
 
-async def _watchlist_symbols() -> list[str]:
-    """Return active watchlist symbols, with a small fallback list."""
+async def _tracked_symbols() -> list[str]:
+    """Return all tracked sandbox symbols (watchlist + non-watchlist).
+
+    This keeps background warmup active for positions that are not highlighted
+    in the sidebar so downstream predictor inputs stay fresh.
+    """
     async with AsyncSessionLocal() as db:
         rows = (
             await db.execute(
                 select(SandboxPosition.symbol).where(
                     SandboxPosition.symbol.is_not(None),
-                    SandboxPosition.is_on_watchlist == True,  # noqa: E712
                 )
             )
         ).all()
@@ -215,7 +218,7 @@ def enqueue_ib_verification(
 
 
 async def run_data_manager_maintenance() -> None:
-    """Background loop that keeps intraday cache warm for watchlist symbols."""
+    """Background loop that keeps intraday cache warm for tracked symbols."""
     logger.info("Data manager maintenance loop started")
 
     while True:
@@ -224,11 +227,11 @@ async def run_data_manager_maintenance() -> None:
             interval_s = max(60, int(settings.DATA_MANAGER_AUTO_WARM_INTERVAL_MIN) * 60)
 
             if enabled:
-                symbols = await _watchlist_symbols()
+                symbols = await _tracked_symbols()
                 if symbols:
                     ib_connected = bool(IB_AVAILABLE and ib_service.is_connected)
                     if ib_connected:
-                        # While IB is connected, continuously verify watchlist history
+                        # While IB is connected, continuously verify tracked symbol history
                         # against broker data. Keep about one year hot in app cache.
                         verify_days = max(365, int(settings.DATA_MANAGER_AUTO_WARM_LOOKBACK_DAYS))
                         end_date = datetime.now().date().isoformat()
@@ -274,7 +277,7 @@ async def run_data_manager_maintenance() -> None:
                         )
                     else:
                         logger.info(
-                            "Data manager warm cycle refreshed %d/%d watchlist symbols (source=%s)",
+                            "Data manager warm cycle refreshed %d/%d tracked symbols (source=%s)",
                             len(targets),
                             len(symbols),
                             source,

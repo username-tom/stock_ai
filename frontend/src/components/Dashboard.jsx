@@ -151,6 +151,40 @@ function getHistoryCacheTTL(period) {
     : HISTORY_CACHE_LONG_TTL_MS
 }
 
+function trimIntradayRowsToRecentDays(rows, daysToKeep) {
+  if (!Array.isArray(rows) || !rows.length) return rows
+  if (!Number.isFinite(daysToKeep) || daysToKeep <= 0) return rows
+
+  const withDay = rows
+    .map((row, idx) => ({
+      row,
+      idx,
+      day: (typeof row?.date === 'string' ? row.date.slice(0, 5) : ''),
+    }))
+    .filter(item => /^\d{2}\/\d{2}$/.test(item.day))
+
+  if (!withDay.length) return rows
+
+  const distinctDays = []
+  for (const item of withDay) {
+    if (!distinctDays.includes(item.day)) distinctDays.push(item.day)
+  }
+  const keepDays = new Set(distinctDays.slice(-daysToKeep))
+  const kept = withDay.filter(item => keepDays.has(item.day)).map(item => item.row)
+  return kept.length ? kept : rows
+}
+
+function sanitizeCachedHistoryByPeriod(data, period) {
+  if (!data || !Array.isArray(data.data)) return data
+  if (period === '1d') {
+    return { ...data, data: trimIntradayRowsToRecentDays(data.data, 1) }
+  }
+  if (period === '2d') {
+    return { ...data, data: trimIntradayRowsToRecentDays(data.data, 2) }
+  }
+  return data
+}
+
 function historyCacheKey(symbol, period, interval) {
   return `${symbol || ''}|${period || ''}|${interval || ''}`
 }
@@ -167,7 +201,7 @@ function getCachedHistory(symbol, period, interval) {
     return undefined
   }
 
-  return entry.data
+  return sanitizeCachedHistoryByPeriod(entry.data, period)
 }
 
 /**
@@ -211,7 +245,8 @@ function writeHistoryCache(symbol, period, interval, data) {
   const now = Date.now()
   const cache = readHistoryCache()
   const existing = cache[historyCacheKey(symbol, period, interval)]?.data
-  const merged   = mergeHistoryData(existing, data)
+  const shouldMerge = !['1d', '2d'].includes(period)
+  const merged = shouldMerge ? mergeHistoryData(existing, data) : data
   cache[historyCacheKey(symbol, period, interval)] = { ts: now, data: merged }
 
   for (const [key, entry] of Object.entries(cache)) {

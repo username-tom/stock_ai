@@ -564,12 +564,15 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_long_tp_pct: Optional[float] = None
     ai_tag_long_sl_pct: Optional[float] = None
     ai_tag_no_loss_sell: Optional[bool] = None
+    premarket_order_placement_enabled: Optional[bool] = None
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     pending_cancel_after_bars: Optional[int] = Field(default=None, ge=1, le=120)
     sim_buy_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     auto_trade_buy_price_offset_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
     auto_trade_sell_price_offset_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
+    sentiment_matrix_strategies: Optional[dict[str, dict[str, str]]] = None
+    sentiment_matrix_actions: Optional[dict[str, dict[str, str]]] = None
 
 
 @router.get("/manager/state")

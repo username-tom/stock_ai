@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import threading
@@ -272,6 +273,26 @@ class IBService:
         contract.exchange = "SMART"
         contract.currency = "USD"
         return contract
+
+    def _snap_stock_limit_price(self, raw_price: float, side: str) -> float:
+        """Snap stock LMT prices to common IB-valid increments.
+
+        For US equities routed via SMART this avoids IB error 110 by
+        conforming to penny ticks (or sub-penny for sub-$1 names).
+        """
+        price = float(raw_price or 0.0)
+        if price <= 0.0:
+            return 0.0
+        tick = 0.01 if price >= 1.0 else 0.0001
+        scaled = price / tick
+        side_u = str(side or "").upper()
+        if side_u == "BUY":
+            snapped_ticks = math.ceil(scaled - 1e-12)
+        else:
+            snapped_ticks = math.floor(scaled + 1e-12)
+        snapped = max(tick, snapped_ticks * tick)
+        decimals = 2 if tick >= 0.01 else 4
+        return round(snapped, decimals)
 
     def _pop_req_error(self, req_id: int) -> str | None:
         if not self._app:
@@ -654,7 +675,20 @@ class IBService:
             if hasattr(order, "firmQuoteOnly"):
                 order.firmQuoteOnly = False
             if kind == "LMT" and limit_price is not None:
-                order.lmtPrice = float(limit_price)
+                requested_limit = float(limit_price)
+                snapped_limit = self._snap_stock_limit_price(requested_limit, action)
+                if snapped_limit <= 0.0:
+                    return {"error": f"Invalid limit price for {symbol.upper()}: {requested_limit}"}
+                if abs(snapped_limit - requested_limit) > 1e-9:
+                    logger.info(
+                        "IB LMT price snapped (symbol=%s side=%s requested=%.6f snapped=%.6f)",
+                        symbol.upper(),
+                        action,
+                        requested_limit,
+                        snapped_limit,
+                    )
+                limit_price = snapped_limit
+                order.lmtPrice = snapped_limit
 
             with self._app._lock:
                 if self._app.next_order_id is None:

@@ -118,6 +118,7 @@ class PortfolioManagerSettings(Base):
     stop_loss_value = Column(Float, default=0.0, nullable=False)
     take_profit_value = Column(Float, default=0.0, nullable=False)
     hold_positions_overnight = Column(Boolean, default=True, nullable=False)
+    premarket_order_placement_enabled = Column(Boolean, default=False, nullable=False)
     eod_engine_shutoff_minutes_before_sell = Column(Integer, default=120, nullable=False)
     eod_sell_window_minutes = Column(Integer, default=30, nullable=False)
     sentiment_lookback_days = Column(Integer, default=5, nullable=False)

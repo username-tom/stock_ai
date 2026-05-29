@@ -160,7 +160,7 @@ _settings: dict[str, Any] = {
     },
     "ai_tag_allow_overnight": True,        # LONG/STRONG LONG positions skip EOD liquidation
     "ai_tag_action_mode": "strategy_override",  # strategy_override | direct
-    "ai_external_sentiment_weight": 0.35,  # 0..1 weight blending external news/social sentiment into AI learner score
+    "ai_external_sentiment_weight": 0.0,  # 0..1 weight blending external news/social sentiment into AI learner score
     "ai_tag_long_engine_off": True,        # disable engine after buy for LONG/STRONG LONG (hold mode)
     "ai_tag_long_tp_pct": 0.0,            # take profit % for long-hold positions (0 = disabled)
     "ai_tag_long_sl_pct": 0.0,            # stop loss  % for long-hold positions (0 = disabled)
@@ -201,6 +201,7 @@ _settings: dict[str, Any] = {
     "stop_loss_value": 0.0,
     "take_profit_value": 0.0,
     "hold_positions_overnight": False,    # strict day-trade default: flatten before close
+    "premarket_order_placement_enabled": False,  # allow IB order placement outside regular session
     "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
     "eod_sell_window_minutes": 5,         # minutes before market close to start sell-only mode
     "sentiment_lookback_days": 5,         # days of historical data for sentiment calc
@@ -241,6 +242,38 @@ def _interval_to_minutes(interval: str) -> float:
         "daily": 390.0,
     }
     return float(mapping.get(value, 1.0))
+
+
+def _use_matrix_sentiment_routing() -> bool:
+    """Return True when PM strategy routing should be driven by the 5x5 matrix."""
+    return bool(
+        _settings.get("sentiment_strategy_enabled", True)
+        and _settings.get("ai_tag_strategy_enabled", False)
+        and _settings.get("ai_sentiment_change_enabled", True)
+    )
+
+
+def _use_pm_sentiment_writer_only() -> bool:
+    """Return True when PM sentiment should route strategy without AI matrix blending."""
+    return bool(_settings.get("sentiment_strategy_enabled", True)) and not _use_matrix_sentiment_routing()
+
+
+def _ib_regular_session_is_open() -> bool:
+    """Return True only during regular cash-session hours for IB order submission."""
+    try:
+        from app.services.sandbox_engine import _regular_session_is_open
+
+        return bool(_regular_session_is_open())
+    except Exception as exc:
+        logger.warning("PM regular-session check failed; blocking IB order submissions: %s", exc)
+        return False
+
+
+def _ib_order_placement_allowed_now() -> bool:
+    """Return True when PM may submit IB orders at the current time."""
+    if bool(_settings.get("premarket_order_placement_enabled", False)):
+        return True
+    return _ib_regular_session_is_open()
 
 # Prevent repeated IB profit-take submissions every PM loop tick.
 _ib_profit_take_last_attempt: dict[str, datetime] = {}
@@ -404,6 +437,7 @@ async def _load_settings_from_db() -> None:
             _settings["stop_loss_value"] = float(getattr(row, "stop_loss_value", 0.0) or 0.0)
             _settings["take_profit_value"] = float(getattr(row, "take_profit_value", 0.0) or 0.0)
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", False))
+            _settings["premarket_order_placement_enabled"] = bool(getattr(row, "premarket_order_placement_enabled", False))
             _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
             _settings["eod_sell_window_minutes"] = int(getattr(row, "eod_sell_window_minutes", 5) or 5)
             _settings["sentiment_lookback_days"] = int(getattr(row, "sentiment_lookback_days", 5) or 5)
@@ -545,6 +579,7 @@ async def _save_settings_to_db() -> None:
         row.stop_loss_value = float(_settings.get("stop_loss_value", 0.0) or 0.0)
         row.take_profit_value = float(_settings.get("take_profit_value", 0.0) or 0.0)
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", False)
+        row.premarket_order_placement_enabled = bool(_settings.get("premarket_order_placement_enabled", False))
         row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
         row.eod_sell_window_minutes = int(_settings.get("eod_sell_window_minutes", 5) or 5)
         row.sentiment_lookback_days = int(_settings.get("sentiment_lookback_days", 5) or 5)
@@ -610,7 +645,7 @@ def update_manager_settings(new: dict) -> dict:
               "stop_loss_pct", "take_profit_pct",
               "stop_loss_sell_market_enabled",
               "stop_loss_value", "take_profit_value",
-              "hold_positions_overnight", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
+              "hold_positions_overnight", "premarket_order_placement_enabled", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
               "ai_tag_action_mode", "ai_external_sentiment_weight",
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
@@ -692,12 +727,18 @@ def update_manager_settings(new: dict) -> dict:
                     syms = list({p.symbol for p in _res.scalars().all()})
                 if syms:
                     await _refresh_scores(syms)
-                await _apply_sentiment_strategies()
-                if _settings.get("ai_tag_strategy_enabled", False) and _settings.get("ai_sentiment_change_enabled", True):
+                if not _use_matrix_sentiment_routing():
+                    await _apply_sentiment_strategies()
+                if _use_matrix_sentiment_routing():
                     await _apply_ai_tag_strategies()
             loop.create_task(_refresh_and_apply())
-        if any(key in new for key in ("ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies")):
-            loop.create_task(_apply_ai_tag_strategies())
+        if any(key in new for key in ("ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "sentiment_strategy_enabled")):
+            async def _apply_routing_mode_now() -> None:
+                if _use_matrix_sentiment_routing():
+                    await _apply_ai_tag_strategies()
+                elif _use_pm_sentiment_writer_only():
+                    await _apply_sentiment_strategies()
+            loop.create_task(_apply_routing_mode_now())
     return get_manager_settings()
 
 
@@ -978,7 +1019,7 @@ async def _apply_sentiment_strategies() -> None:
 async def _apply_ai_tag_strategies() -> None:
     """Apply strategy and engine changes driven by the 5×5 sentiment matrix.
 
-    For each symbol the current PM market bucket × AI learner tag determines:
+    For each symbol the current PM sentiment bucket × AI learner tag determines:
       - cell_strategy : strategy name to apply (from sentiment_matrix_strategies)
       - cell_action   : one of trade | hold | engine_off | force_sell | no_trade
                         (from sentiment_matrix_actions)
@@ -993,17 +1034,24 @@ async def _apply_ai_tag_strategies() -> None:
     force_sell   – Immediately liquidate position and re-enable engine.
     no_trade     – No action this cycle.
     """
-    if not _settings.get("ai_tag_strategy_enabled", False):
+    if not _use_matrix_sentiment_routing():
         return
-    if not _settings.get("ai_sentiment_change_enabled", True):
-        return
+
+    # In IB mode, do not execute matrix trade actions (especially SELL paths)
+    # outside regular session hours.
+    try:
+        from app.services.ib_service import ib_service
+
+        if ib_service.is_connected and not _ib_order_placement_allowed_now():
+            logger.debug("Skipping AI tag matrix trade actions outside regular session in IB mode")
+            return
+    except Exception:
+        pass
 
     matrix_strategies: dict[str, dict[str, str]] = _settings.get("sentiment_matrix_strategies", {})
     matrix_actions: dict[str, dict[str, str]] = _settings.get("sentiment_matrix_actions", {})
     # Fall back to the flat ai_tag_strategies map if no matrix row is configured yet.
     flat_tag_strategies: dict[str, str] = _settings.get("ai_tag_strategies", {})
-
-    pm_bucket: str = ((_state.get("market_classification") or {}).get("bucket") or "neutral").lower()
 
     long_tp = float(_settings.get("ai_tag_long_tp_pct", 0.0) or 0.0)
     long_sl = float(_settings.get("ai_tag_long_sl_pct", 0.0) or 0.0)
@@ -1015,6 +1063,18 @@ async def _apply_ai_tag_strategies() -> None:
     hold_trailing_pct = max(0.0, float(_settings.get("pm_hold_trailing_pct", 3.0) or 0.0))
     bar_minutes = max(1e-9, _interval_to_minutes(_settings.get("sentiment_interval", "1m")))
     symbol_overrides = _settings.get("position_overrides", {}) if isinstance(_settings.get("position_overrides"), dict) else {}
+
+    def _matrix_tag_for_ai(raw_tag: str) -> str:
+        tag = str(raw_tag or "WATCH").upper()
+        return "NEUTRAL" if tag == "WATCH" else tag
+
+    def _pm_bucket_for_symbol(symbol: str) -> str:
+        sym = str(symbol or "").upper()
+        score_info = (_state.get("scores") or {}).get(sym, {})
+        bucket = str(score_info.get("classification") or "").strip().lower()
+        if bucket:
+            return bucket
+        return str(((_state.get("market_classification") or {}).get("bucket") or "neutral")).lower()
 
     def _is_frenzy_period() -> bool:
         from app.services.sandbox_engine import _ET
@@ -1111,9 +1171,11 @@ async def _apply_ai_tag_strategies() -> None:
     needs_price_set: set[str] = set()
     for p in snap:
         new_tag = (insights.get(p.symbol, {}).get("learner_tag") or "WATCH").upper()
+        matrix_tag = _matrix_tag_for_ai(new_tag)
+        pm_bucket = _pm_bucket_for_symbol(p.symbol)
         ib_qty = float(ib_pos_map.get(p.symbol.upper(), {}).get("qty", 0.0))
         has_pos = p.shares > 0 or p.pending_shares > 0 or ib_qty > 0
-        cell_action = matrix_actions.get(pm_bucket, {}).get(new_tag, "trade")
+        cell_action = matrix_actions.get(pm_bucket, {}).get(matrix_tag, "trade")
         # Treat any advanced_hold:* variant as a hold for price-fetch purposes.
         if cell_action.startswith("advanced_hold"):
             cell_action = "hold"
@@ -1152,6 +1214,8 @@ async def _apply_ai_tag_strategies() -> None:
         for pos in positions:
             info = insights.get(pos.symbol, {})
             new_tag = (info.get("learner_tag") or "WATCH").upper()
+            matrix_tag = _matrix_tag_for_ai(new_tag)
+            pm_bucket = _pm_bucket_for_symbol(pos.symbol)
             ib_info = ib_pos_map.get(pos.symbol.upper(), {})
             ib_qty = float(ib_info.get("qty", 0.0))
             ib_avg_cost = float(ib_info.get("avg_cost", 0.0))
@@ -1159,10 +1223,10 @@ async def _apply_ai_tag_strategies() -> None:
 
             # Resolve cell strategy + action (fallback to flat map when no matrix row)
             cell_strategy: str = (
-                matrix_strategies.get(pm_bucket, {}).get(new_tag)
-                or flat_tag_strategies.get(new_tag, "")
+                matrix_strategies.get(pm_bucket, {}).get(matrix_tag)
+                or flat_tag_strategies.get(matrix_tag, "")
             )
-            raw_action: str = matrix_actions.get(pm_bucket, {}).get(new_tag, "trade")
+            raw_action: str = matrix_actions.get(pm_bucket, {}).get(matrix_tag, "trade")
             # Parse advanced-hold variant: "advanced_hold:trailing" → ("advanced_hold", "trailing")
             if ":" in raw_action:
                 base_action, hold_variant = raw_action.split(":", 1)
@@ -1181,7 +1245,7 @@ async def _apply_ai_tag_strategies() -> None:
 
             # ── trade: normal strategy routing, engine runs ────────────────
             if cell_action == "trade":
-                if new_tag != "WATCH" and cell_strategy and pos.strategy_name != cell_strategy:
+                if cell_strategy and pos.strategy_name != cell_strategy:
                     old_strat = pos.strategy_name or "none"
                     pos.strategy_name = cell_strategy
                     db_changed = True
@@ -1201,7 +1265,7 @@ async def _apply_ai_tag_strategies() -> None:
 
             # ── engine_off: pause engine, no buy/sell ──────────────────────
             if cell_action == "engine_off":
-                if new_tag != "WATCH" and cell_strategy and pos.strategy_name != cell_strategy:
+                if cell_strategy and pos.strategy_name != cell_strategy:
                     old_strat = pos.strategy_name or "none"
                     pos.strategy_name = cell_strategy
                     db_changed = True
@@ -1209,7 +1273,7 @@ async def _apply_ai_tag_strategies() -> None:
                 if pos.strategy_enabled:
                     pos.strategy_enabled = False
                     db_changed = True
-                    engine_changes.append(f"{pos.symbol}: engine off (matrix {pm_bucket}×{new_tag})")
+                    engine_changes.append(f"{pos.symbol}: engine off (matrix {pm_bucket}×{matrix_tag})")
                 continue
 
             # ── force_sell: liquidate immediately, re-enable engine ────────
@@ -1916,6 +1980,8 @@ async def _attempt_ib_profit_take_for_unwatched_owned() -> None:
 
     if not ib_service.is_connected:
         return
+    if not _ib_order_placement_allowed_now():
+        return
 
     ib_positions = await ib_service.get_positions()
     owned = [p for p in ib_positions if float(p.get("quantity") or 0.0) > 0]
@@ -2117,6 +2183,20 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         logger.warning("PM IB pending-cancel price fetch failed: %s", exc)
         return
 
+    # Fetch IB avg costs to detect if a pending SELL has crossed the SL level.
+    ib_avg_cost_map: dict[str, float] = {}
+    try:
+        ib_positions = await ib_service.get_positions()
+        for _row in ib_positions:
+            _sym = str(_row.get("symbol") or "").upper()
+            _avg = float(_row.get("avg_cost") or 0.0)
+            if _sym and _avg > 0:
+                ib_avg_cost_map[_sym] = _avg
+    except Exception:
+        pass
+    _sl_pct_drift = max(0.0, float(_settings.get("stop_loss_pct", 0.5) or 0.0))
+    _sl_mkt_enabled_drift = bool(_settings.get("stop_loss_sell_market_enabled", True))
+
     def _auto_limit_price_from_reference(reference_price: float, side: str) -> float:
         if reference_price <= 0:
             return 0.0
@@ -2144,6 +2224,7 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
     pending_cancel_after_minutes = pending_cancel_after_bars * bar_minutes
     repost_cooldown_seconds = max(0, int(_settings.get("pending_repost_cooldown_seconds", 60) or 60))
     now_utc = datetime.now(timezone.utc)
+    allow_order_reposts = _ib_order_placement_allowed_now()
 
     def _parse_order_created_at(value: Any) -> datetime | None:
         if isinstance(value, datetime):
@@ -2166,6 +2247,9 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         symbol = str(o.get("symbol") or "").upper()
         side_raw = str(o.get("side") or "BUY").upper()
         side = "SELL" if side_raw == "SELL" else "BUY"
+        if not allow_order_reposts:
+            # Keep pending IB orders untouched until order placement is allowed.
+            continue
         qty = float(o.get("remaining") or o.get("quantity") or 0.0)
         limit_price = float(o.get("limit_price") or 0.0)
         cp = float(price_map.get(symbol, 0.0))
@@ -2233,12 +2317,34 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                 )
                 continue
 
+            # Upgrade a pending SELL to MKT if price has already crossed the SL level.
+            # This makes the drift-cancel loop the SL execution vehicle when a
+            # limit sell is stuck in a drift-repost cycle past the loss threshold.
+            repost_order_type = "LMT"
+            repost_reason_tag = "pm_ib_pending_repost_drift"
+            if (
+                side == "SELL"
+                and _sl_mkt_enabled_drift
+                and _sl_pct_drift > 0.0
+                and cp > 0.0
+            ):
+                _avg_c = float(ib_avg_cost_map.get(symbol, 0.0))
+                if _avg_c > 0.0 and cp <= _avg_c * (1.0 - _sl_pct_drift / 100.0):
+                    repost_order_type = "MKT"
+                    repost_reason_tag = "pm_ib_pending_repost_stop_loss"
+                    _log_activity(
+                        f"IB PM SELL repost upgraded to MKT for {symbol}: "
+                        f"price ${cp:.2f} <= SL threshold "
+                        f"${_avg_c * (1.0 - _sl_pct_drift / 100.0):.2f} "
+                        f"({_sl_pct_drift:.2f}% below avg ${_avg_c:.2f})"
+                    )
+
             repost_result = await ib_service.place_order(
                 symbol=symbol,
                 side=side,
                 quantity=repost_qty,
-                order_type="LMT",
-                limit_price=repost_price,
+                order_type=repost_order_type,
+                limit_price=repost_price if repost_order_type == "LMT" else None,
             )
             if repost_result.get("error"):
                 _log_activity(
@@ -2253,10 +2359,10 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                     "symbol": symbol,
                     "side": side,
                     "quantity": repost_qty,
-                    "price": repost_price,
+                    "price": repost_price if repost_order_type == "LMT" else cp,
                     "ib_order_id": repost_result.get("ib_order_id"),
                     "status": repost_status,
-                    "reason_tag": "pm_ib_pending_repost_drift",
+                    "reason_tag": repost_reason_tag,
                 })
                 if repost_cooldown_seconds > 0:
                     _ib_pending_repost_cooldown_until[order_key] = now_utc + timedelta(seconds=repost_cooldown_seconds)
@@ -2575,6 +2681,7 @@ async def _process_ib_engine_signals() -> None:
     stop_loss_pct = float(0.8 if _stop_loss_pct is None else _stop_loss_pct)
     take_profit_pct = float(2.5 if _take_profit_pct is None else _take_profit_pct)
     ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
+    allow_order_placement = _ib_order_placement_allowed_now()
 
     order_candidates: list[dict[str, Any]] = []
     buy_symbols_needing_quote: set[str] = set()
@@ -2693,11 +2800,6 @@ async def _process_ib_engine_signals() -> None:
             if ai_enabled and tag in {"SHORT", "STRONG SHORT"}:
                 _log_activity(f"IB signal BUY blocked for {symbol}: ai_tag={tag}")
                 _log_ib_trigger(f"BUY blocked symbol={symbol} reason=ai_tag:{tag}")
-                _ib_signal_last_processed_at[symbol] = process_key
-                continue
-            if score < -0.2:
-                _log_activity(f"IB signal BUY blocked for {symbol}: score={score:+.3f}")
-                _log_ib_trigger(f"BUY blocked symbol={symbol} reason=score:{score:+.3f}")
                 _ib_signal_last_processed_at[symbol] = process_key
                 continue
             # Bar predictor momentum gate
@@ -2881,13 +2983,18 @@ async def _process_ib_engine_signals() -> None:
     for order in order_candidates:
         symbol = order["symbol"]
         side = order["side"]
+        if not allow_order_placement:
+            # Retry next tick; do not mark processed yet.
+            _log_ib_trigger(f"{side} deferred until order placement allowed symbol={symbol}")
+            continue
         reason_text = str(order.get("reason") or "")
         reason_l = reason_text.strip().lower()
         sl_mkt_enabled = bool(_settings.get("stop_loss_sell_market_enabled", True))
         is_stop_loss_exit = side == "SELL" and ("stop_loss" in reason_l) and sl_mkt_enabled
         # Keep predictor SELL gating for discretionary SELLs, but never block
-        # hard-risk stop-loss exits.
-        if side == "SELL" and not ("stop_loss" in reason_l):
+        # risk exits (stop-loss or take-profit).
+        is_risk_exit = side == "SELL" and (("stop_loss" in reason_l) or ("take_profit" in reason_l))
+        if side == "SELL" and not is_risk_exit:
             if _settings.get("bar_predictor_enabled", False):
                 bp_min = float(_settings.get("bar_predictor_sell_min_bias", 0.3))
                 bp_bias = float(_state.get("scores", {}).get(symbol, {}).get("bar_predictor_bias", 0.0))
@@ -3021,8 +3128,9 @@ async def refresh_sentiment_routing() -> None:
     # If scores are already populated, apply strategies immediately so a
     # routing-mode change takes effect without waiting for the next PM tick.
     if _state.get("scores"):
-        await _apply_sentiment_strategies()
-        if _settings.get("ai_tag_strategy_enabled", False):
+        if not _use_matrix_sentiment_routing():
+            await _apply_sentiment_strategies()
+        if _use_matrix_sentiment_routing():
             await _apply_ai_tag_strategies()
 
 
@@ -3047,7 +3155,8 @@ async def run_portfolio_manager() -> None:
                 syms = [p.symbol for p in res.scalars().all()]
             if syms:
                 await _refresh_scores(syms)
-                await _apply_sentiment_strategies()
+                if not _use_matrix_sentiment_routing():
+                    await _apply_sentiment_strategies()
                 await _apply_ai_tag_strategies()
         except Exception as exc:
             logger.warning("PM startup score error: %s", exc)
@@ -3076,7 +3185,8 @@ async def run_portfolio_manager() -> None:
                     syms = [p.symbol for p in res.scalars().all()]
                 if syms:
                     await _refresh_scores(syms)
-                    await _apply_sentiment_strategies()
+                    if not _use_matrix_sentiment_routing():
+                        await _apply_sentiment_strategies()
                     await _apply_ai_tag_strategies()
             except Exception as exc:
                 logger.warning("PM score refresh error: %s", exc)

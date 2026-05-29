@@ -297,7 +297,12 @@ export default function PortfolioOverview({
     }
     return hasAny ? sum : null
   }, [breakdownPositions, quotes])
-  const headlineUnrealized = breakdownUnrealizedPnl ?? (isSimulated ? totalUnrealizedPnl : (ibUnrealizedPnl ?? totalUnrealizedPnl))
+  // For IB mode, IB's own UnrealizedPnL (from account summary) is authoritative.
+  // The frontend recalculation (breakdownUnrealizedPnl) is only a fallback when
+  // IB hasn't reported a value yet, to avoid showing a stale or mismatched total.
+  const headlineUnrealized = isSimulated
+    ? (breakdownUnrealizedPnl ?? totalUnrealizedPnl)
+    : (ibUnrealizedPnl ?? breakdownUnrealizedPnl ?? totalUnrealizedPnl)
   const headlineRealized = isSimulated ? totalRealizedPnl : ibRealizedPnl
 
   // Fallback period metrics from cumulative curve if backend metrics are temporarily unavailable.

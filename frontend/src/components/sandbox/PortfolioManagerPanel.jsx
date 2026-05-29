@@ -315,6 +315,7 @@ function buildDraftFromSettings(settings) {
     },
     position_overrides: settings.position_overrides ?? {},
     hold_positions_overnight: settings.hold_positions_overnight ?? false,
+    premarket_order_placement_enabled: settings.premarket_order_placement_enabled ?? false,
     eod_engine_shutoff_minutes_before_sell: settings.eod_engine_shutoff_minutes_before_sell ?? 120,
     eod_sell_window_minutes: settings.eod_sell_window_minutes ?? 5,
     sentiment_lookback_days: settings.sentiment_lookback_days ?? 5,
@@ -1084,6 +1085,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       stop_loss_value: stopLossValue,
       take_profit_value: takeProfitValue,
       hold_positions_overnight: draft.hold_positions_overnight,
+      premarket_order_placement_enabled: draft.premarket_order_placement_enabled,
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
       sentiment_lookback_days: Number(draft.sentiment_lookback_days),
       sentiment_data_points: Number(draft.sentiment_data_points),
@@ -1140,11 +1142,24 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
   function handleApplyPreset() {
     if (!selectedPreset?.draft) return
+    const appliedDraft = cloneJson(selectedPreset.draft)
     setSentimentError(null)
     setImportNotice(null)
     setPresetNotice(`Applied preset: ${selectedPreset.name}`)
     setEditSettings(true)
-    updateDraft(cloneJson(selectedPreset.draft))
+    setDraft(appliedDraft)
+    setSavedStates(prev => {
+      const next = {
+        ...prev,
+        [activeProfile]: {
+          draft: appliedDraft,
+          editSettings: true,
+          updatedAt: new Date().toISOString(),
+        },
+      }
+      saveSavedStates(next)
+      return next
+    })
   }
 
   function handleSavePreset() {
@@ -1258,8 +1273,21 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       setSentimentError(null)
       setImportNotice(null)
       setPresetNotice(`Imported preset from ${file.name}. Review and click Save to apply.`)
+      const appliedDraft = cloneJson(importedDraft)
       setEditSettings(true)
-      updateDraft(cloneJson(importedDraft))
+      setDraft(appliedDraft)
+      setSavedStates(prev => {
+        const next = {
+          ...prev,
+          [activeProfile]: {
+            draft: appliedDraft,
+            editSettings: true,
+            updatedAt: new Date().toISOString(),
+          },
+        }
+        saveSavedStates(next)
+        return next
+      })
     } catch {
       setSentimentError('Unable to import preset file. Please select a valid JSON export.')
       setImportNotice(null)
@@ -1536,6 +1564,12 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           {settings.hold_positions_overnight
             ? 'Hold positions overnight'
             : `Engine shutdown: ${settings.eod_engine_shutoff_minutes_before_sell ?? 120}min before sell | EOD liquidation: ${settings.eod_sell_window_minutes}min before close`}
+        </span>
+        <span className={`flex items-center gap-1 ${(settings.premarket_order_placement_enabled ?? false) ? 'text-emerald-400' : 'text-slate-600'}`}>
+          <ClockIcon className="h-3.5 w-3.5" />
+          {(settings.premarket_order_placement_enabled ?? false)
+            ? 'Premarket IB order placement enabled'
+            : 'Premarket IB order placement disabled'}
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
@@ -2844,6 +2878,24 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.hold_positions_overnight ? 'translate-x-4' : ''}`} />
                   </div>
                   <span className="text-xs text-slate-300">{draft.hold_positions_overnight ? 'Hold Overnight' : 'Liquidate at EOD'}</span>
+                </label>
+              </SettingRow>
+
+              <SettingRow
+                label="Premarket IB Order Placement"
+                hint="Allow PM to place IB orders outside regular session hours. When disabled, PM defers premarket orders until regular session opens."
+              >
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <div
+                    className={`relative w-9 h-5 rounded-full transition-colors ${draft.premarket_order_placement_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                    onClick={() => {
+                      if (!editSettings) return
+                      updateDraft(d => ({ ...d, premarket_order_placement_enabled: !d.premarket_order_placement_enabled }))
+                    }}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.premarket_order_placement_enabled ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-xs text-slate-300">{draft.premarket_order_placement_enabled ? 'Enabled' : 'Disabled'}</span>
                 </label>
               </SettingRow>
 

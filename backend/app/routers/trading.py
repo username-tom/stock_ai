@@ -74,12 +74,14 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
     }
 
     symbol_qty: dict[str, float] = {}
+    symbol_avg_cost: dict[str, float] = {}
     try:
         for row in await ib_service.get_positions():
             sym = str(row.get("symbol") or "").upper()
             if not sym:
                 continue
             symbol_qty[sym] = float(row.get("quantity") or 0.0)
+            symbol_avg_cost[sym] = float(row.get("avg_cost") or 0.0)
     except Exception as exc:
         logger.debug("Pending-trade reconciliation position lookup failed: %s", exc)
 
@@ -143,6 +145,13 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
         row_changed = True
         if final_status == OrderStatus.FILLED:
             fill_px = float(known_fill_price_by_id.get(oid, 0.0) or 0.0)
+            # Keep BUY activity price aligned to IB position avg_cost so
+            # position table/detail and inline logs report a consistent basis.
+            if trade.side == OrderSide.BUY:
+                sym = str(trade.symbol or "").upper()
+                ib_avg = float(symbol_avg_cost.get(sym, 0.0) or 0.0)
+                if ib_avg > 0.0:
+                    fill_px = ib_avg
             if fill_px > 0:
                 trade.price = fill_px
         if final_status != OrderStatus.FILLED:
@@ -153,6 +162,47 @@ async def _reconcile_pending_ib_trades(db: AsyncSession, trades: list[Trade]) ->
             trade.filled_at = now_utc
             row_changed = True
         if row_changed:
+            changed += 1
+
+    # Second pass: update fill price for already-FILLED IB trades where IB has
+    # since reported the actual avg fill price (may arrive after the status sync).
+    if known_fill_price_by_id:
+        for trade in trades:
+            if (
+                trade.status == OrderStatus.FILLED
+                and trade.mode in {TradingMode.PAPER, TradingMode.LIVE}
+                and trade.ib_order_id is not None
+            ):
+                oid = int(trade.ib_order_id)
+                fill_px = float(known_fill_price_by_id.get(oid, 0.0) or 0.0)
+                if fill_px > 0.0 and abs(fill_px - float(trade.price or 0.0)) > 0.001:
+                    trade.price = fill_px
+                    changed += 1
+
+    # Third pass: keep BUY activity price aligned with IB-reported avg_cost so
+    # position cards/tables and inline BUY rows show the same basis value.
+    # Limit to recent rows to avoid rewriting deep historical executions.
+    for trade in trades:
+        if (
+            trade.status != OrderStatus.FILLED
+            or trade.side != OrderSide.BUY
+            or trade.mode not in {TradingMode.PAPER, TradingMode.LIVE}
+            or trade.ib_order_id is None
+        ):
+            continue
+        created_at = trade.created_at
+        if created_at is None:
+            continue
+        created_at_aware = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+        if (now_utc - created_at_aware).total_seconds() > 4 * 3600:
+            continue
+        sym = str(trade.symbol or "").upper()
+        ib_qty = float(symbol_qty.get(sym, 0.0) or 0.0)
+        ib_avg = float(symbol_avg_cost.get(sym, 0.0) or 0.0)
+        if ib_qty <= 0.0 or ib_avg <= 0.0:
+            continue
+        if abs(float(trade.price or 0.0) - ib_avg) > 0.001:
+            trade.price = ib_avg
             changed += 1
 
     if changed:
@@ -509,6 +559,25 @@ async def place_order(req: OrderRequest, db: AsyncSession = Depends(get_db)):
         fill_px = float(fill_prices.get(int(result.get("ib_order_id") or 0), 0.0) or 0.0)
         if fill_px > 0:
             reference_price = fill_px
+
+    # For BUY fills, align activity price to IB-reported average position cost
+    # so logs are consistent with the position table/detail average price.
+    if is_filled and side == "BUY":
+        try:
+            positions = await ib_service.get_positions()
+            position = next(
+                (
+                    p for p in positions
+                    if str(p.get("symbol") or "").upper() == symbol and float(p.get("quantity") or 0.0) > 0
+                ),
+                None,
+            )
+            if position is not None:
+                avg_cost = float(position.get("avg_cost") or 0.0)
+                if avg_cost > 0:
+                    reference_price = avg_cost
+        except Exception as exc:
+            logger.debug("IB BUY avg-cost alignment failed (%s): %s", symbol, exc)
 
     estimated_pnl = None
     if side == "SELL":

@@ -115,6 +115,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     stop_loss_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     take_profit_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     hold_positions_overnight: Optional[bool] = None
+    premarket_order_placement_enabled: Optional[bool] = None
     eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=0, le=480)
     eod_sell_window_minutes: Optional[int] = Field(default=None, ge=1, le=240)
     sentiment_lookback_days: Optional[int] = Field(default=None, ge=1, le=30)
@@ -145,6 +146,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     default_strategy_name: Optional[str] = None
     pm_hold_duration_bars: Optional[int] = Field(default=None, ge=0, le=50000)
     intraday_1m_template_params: Optional[dict[str, Any]] = None
+    sentiment_matrix_strategies: Optional[dict[str, dict[str, str]]] = None
+    sentiment_matrix_actions: Optional[dict[str, dict[str, str]]] = None
     bar_predictor_enabled: Optional[bool] = None
     bar_predictor_buy_min_bias: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     bar_predictor_sell_min_bias: Optional[float] = Field(default=None, ge=0.0, le=1.0)
