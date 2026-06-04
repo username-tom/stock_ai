@@ -96,6 +96,103 @@ export default function PositionDetail({
     ? (((Number(selectedPrice) - Number(selectedPos.avg_cost)) / Number(selectedPos.avg_cost)) * 100) * (isLongPosition ? 1 : -1)
     : null
 
+  const chartOverlays = useMemo(() => {
+    const avgCost = Number(selectedPos?.avg_cost)
+    if (!(selectedShares > 0) || !Number.isFinite(avgCost) || avgCost <= 0) {
+      return { priceLines: [], tradeFlags: [] }
+    }
+
+    const parseOverrides = (value) => {
+      if (!value) return {}
+      if (typeof value === 'object') return value
+      if (typeof value !== 'string') return {}
+      try {
+        const parsed = JSON.parse(value)
+        return parsed && typeof parsed === 'object' ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
+
+    const settingsOverrides = parseOverrides(managerSettings?.position_overrides)
+    const symbolKey = String(selectedSymbol ?? '').toUpperCase()
+    const perSymbolOverride = (
+      settingsOverrides?.[symbolKey]
+      ?? Object.entries(settingsOverrides ?? {}).find(([k]) => String(k).toUpperCase() === symbolKey)?.[1]
+      ?? {}
+    )
+
+    const stopLossPct = Number(perSymbolOverride?.stop_loss_pct ?? managerSettings?.stop_loss_pct ?? 0)
+    const takeProfitPct = Number(perSymbolOverride?.take_profit_pct ?? managerSettings?.take_profit_pct ?? 0)
+    const stopLossValue = Number(perSymbolOverride?.stop_loss_value ?? managerSettings?.stop_loss_value ?? 0)
+    const takeProfitValue = Number(perSymbolOverride?.take_profit_value ?? managerSettings?.take_profit_value ?? 0)
+
+    const slTargets = []
+    const tpTargets = []
+
+    if (Number.isFinite(stopLossPct) && stopLossPct > 0) slTargets.push(avgCost * (1 - stopLossPct / 100))
+    if (Number.isFinite(stopLossValue) && stopLossValue > 0) slTargets.push(avgCost - stopLossValue)
+    if (Number.isFinite(takeProfitPct) && takeProfitPct > 0) tpTargets.push(avgCost * (1 + takeProfitPct / 100))
+    if (Number.isFinite(takeProfitValue) && takeProfitValue > 0) tpTargets.push(avgCost + takeProfitValue)
+
+    const slPrice = slTargets.length ? Math.max(...slTargets) : null
+    const tpPrice = tpTargets.length ? Math.min(...tpTargets) : null
+
+    const priceLines = [
+      { id: 'avg-cost', label: 'Avg', price: avgCost, color: '#f59e0b', dash: '5 3' },
+      ...(Number.isFinite(tpPrice) && tpPrice > 0
+        ? [{ id: 'take-profit', label: 'TP', price: tpPrice, color: '#34d399', dash: '3 3' }]
+        : []),
+      ...(Number.isFinite(slPrice) && slPrice > 0
+        ? [{ id: 'stop-loss', label: 'SL', price: slPrice, color: '#f87171', dash: '3 3' }]
+        : []),
+    ]
+
+    const fmtChartDate = (dateValue) => {
+      const dt = dateValue != null ? new Date(dateValue) : null
+      if (!dt || Number.isNaN(dt.getTime())) return null
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(dt)
+      const month = parts.find(p => p.type === 'month')?.value
+      const day = parts.find(p => p.type === 'day')?.value
+      const hour = parts.find(p => p.type === 'hour')?.value
+      const minute = parts.find(p => p.type === 'minute')?.value
+      if (!month || !day || !hour || !minute) return null
+      return `${month}/${day} ${hour}:${minute}`
+    }
+
+    const tradeFlags = (activities ?? [])
+      .filter(a => a?.type === 'trade' && String(a?.symbol ?? '').toUpperCase() === symbolKey)
+      .filter(a => String(a?.status ?? '').toUpperCase() === 'FILLED')
+      .filter(a => {
+        const side = String(a?.side ?? '').toUpperCase()
+        return side === 'BUY' || side === 'SELL'
+      })
+      .map((a, index) => {
+        const tsNum = Number(a?.ts)
+        const fallbackDate = a?.date ?? a?.created_at ?? null
+        const tsMs = Number.isFinite(tsNum)
+          ? (tsNum > 1e12 ? tsNum : (tsNum > 1e9 ? tsNum * 1000 : null))
+          : (fallbackDate ? new Date(fallbackDate).getTime() : null)
+        const side = String(a?.side ?? '').toUpperCase()
+        const price = Number(a?.price)
+        return {
+          id: `trade-flag-${a?.tradeId ?? `${side}-${tsNum}-${index}`}`,
+          side,
+          price: Number.isFinite(price) && price > 0 ? price : null,
+          chartDate: fmtChartDate(tsMs),
+        }
+      })
+
+    return { priceLines, tradeFlags }
+  }, [activities, managerSettings, selectedPos?.avg_cost, selectedShares, selectedSymbol])
+
   const { data: fundEventsData } = useQuery({
     queryKey: ['sandbox-fund-events'],
     queryFn: getSandboxFundEvents,
@@ -864,7 +961,16 @@ export default function PositionDetail({
               </div>
               <div className="flex-1 min-h-0">
                 {chartData.length > 0
-                  ? <CandlestickChart data={chartData} prevClose={prevClose} height={undefined} className="h-full w-full" />
+                  ? (
+                    <CandlestickChart
+                      data={chartData}
+                      prevClose={prevClose}
+                      height={undefined}
+                      className="h-full w-full"
+                      priceLines={chartOverlays.priceLines}
+                      tradeFlags={chartOverlays.tradeFlags}
+                    />
+                  )
                   : <div className="flex items-center justify-center h-full text-slate-500 text-sm">Loading chart…</div>
                 }
               </div>

@@ -162,6 +162,8 @@ function CandlestickInner({
   onViewWindowChange,
   hoverState,
   onHoverStateChange,
+  priceLines = [],
+  tradeFlags = [],
 }) {
   const containerRef = useRef(null)
   const [width, setWidth] = useState(0)
@@ -249,10 +251,13 @@ function CandlestickInner({
   const visibleBars = bars.slice(safeStart, safeEnd + 1)
   const n = visibleBars.length
 
+    const safePriceLines = (priceLines ?? []).filter((line) => Number.isFinite(Number(line?.price)) && Number(line.price) > 0)
+
   /* price scale � some bars (e.g. early pre-market prints) carry only close
      and would poison Math.min/max with NaN, so filter to finite values. */
   const allP = visibleBars.flatMap(d => [d.low, d.high, d.close].filter(Number.isFinite))
   if (prevClose != null) allP.push(prevClose)
+    for (const line of safePriceLines) allP.push(Number(line.price))
   const minP = allP.length ? Math.min(...allP) : 0
   const maxP = allP.length ? Math.max(...allP) : 1
   const padP = (maxP - minP) * 0.06 || 1
@@ -349,6 +354,43 @@ function CandlestickInner({
   }, [])
 
   const activeHover = hovered
+
+  const normalizedBarDate = (value) => {
+    const text = String(value ?? '').trim()
+    if (!text) return ''
+    const intradayMinuteMatch = text.match(/^(\d{2}\/\d{2}\s\d{2}:\d{2})/)
+    if (intradayMinuteMatch) return intradayMinuteMatch[1]
+    return text
+  }
+
+  const tradeFlagPoints = (tradeFlags ?? []).map((flag, idx) => {
+    const targetDate = normalizedBarDate(flag?.chartDate)
+    if (!targetDate) return null
+    let barIndex = visibleBars.findIndex((bar) => normalizedBarDate(bar?.date) === targetDate)
+    if (barIndex < 0) {
+      barIndex = visibleBars.findIndex((bar) => String(bar?.date ?? '').startsWith(targetDate))
+    }
+    if (barIndex < 0) return null
+
+    const bar = visibleBars[barIndex]
+    const rawPrice = Number(flag?.price)
+    const fallbackPrice = Number(bar?.close)
+    const price = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : fallbackPrice
+    if (!Number.isFinite(price) || price <= 0) return null
+
+    const side = String(flag?.side ?? '').toUpperCase()
+    const isBuy = side === 'BUY'
+    if (!isBuy && side !== 'SELL') return null
+
+    return {
+      id: flag?.id ?? `trade-flag-${idx}`,
+      isBuy,
+      x: xOf(barIndex),
+      y: pToY(price),
+      label: isBuy ? 'BUY' : 'SELL',
+      color: isBuy ? '#34d399' : '#f87171',
+    }
+  }).filter(Boolean)
 
   // Resolve highlighted bar index: prefer local hover, fall back to external
   // hoverState arriving from a sibling subplot chart. The subplot may sample/
@@ -653,6 +695,70 @@ function CandlestickInner({
         {hasMA50 && renderSeries('ma_50', MA_50)}
         {hasMA100 && renderSeries('ma_100', MA_100)}
         {hasMA200 && renderSeries('ma_200', MA_200, 1.1)}
+
+        {/* Position reference lines (avg/TP/SL) */}
+        {safePriceLines.map((line, idx) => {
+          const y = pToY(Number(line.price))
+          const stroke = line.color || '#94a3b8'
+          const dash = line.dash || '4 3'
+          const label = line.label || 'Line'
+          return (
+            <g key={line.id ?? `line-${idx}`}>
+              <line
+                x1={PAD_LEFT}
+                y1={y}
+                x2={PAD_LEFT + plotW}
+                y2={y}
+                stroke={stroke}
+                strokeWidth={1.2}
+                strokeDasharray={dash}
+              />
+              <text
+                x={PAD_LEFT + plotW - 2}
+                y={y - 4 - (idx * 2)}
+                fill={stroke}
+                fontSize={9}
+                textAnchor="end"
+                fontFamily="monospace"
+              >
+                {label} ${fmt2(Number(line.price))}
+              </text>
+            </g>
+          )
+        })}
+
+        {/* Buy/sell execution flags */}
+        {tradeFlagPoints.map((point) => {
+          const poleTop = point.isBuy ? point.y - 14 : point.y - 4
+          const flagTipY = point.isBuy ? point.y - 14 : point.y + 2
+          const flagBottomY = point.isBuy ? point.y - 6 : point.y + 10
+          return (
+            <g key={point.id}>
+              <line
+                x1={point.x}
+                y1={point.y + 1}
+                x2={point.x}
+                y2={poleTop}
+                stroke={point.color}
+                strokeWidth={1.2}
+              />
+              <polygon
+                points={`${point.x},${flagTipY} ${point.x + 10},${point.isBuy ? point.y - 10 : point.y + 6} ${point.x},${flagBottomY}`}
+                fill={point.color}
+                opacity={0.95}
+              />
+              <text
+                x={point.x + 12}
+                y={point.isBuy ? point.y - 8 : point.y + 8}
+                fill={point.color}
+                fontSize={9}
+                fontFamily="monospace"
+              >
+                {point.label}
+              </text>
+            </g>
+          )
+        })}
 
         {/* X-axis labels */}
         {xTicks.map(i => (
