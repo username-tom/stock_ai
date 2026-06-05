@@ -160,6 +160,10 @@ async def _migrate(conn):
         # PM global numeric TP/SL ($ from average entry)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN stop_loss_value REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN take_profit_value REAL NOT NULL DEFAULT 0.0",
+        # PM crash protection kill switch (liquidate and pause engines for current day)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN crash_protection_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN crash_protection_mode VARCHAR(20) NOT NULL DEFAULT 'percent'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN crash_protection_value REAL NOT NULL DEFAULT 0.0",
         # PM long-hold numeric TP/SL ($ from average entry)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_tp_value REAL NOT NULL DEFAULT 0.0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_tag_long_sl_value REAL NOT NULL DEFAULT 0.0",

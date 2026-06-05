@@ -4,7 +4,7 @@ import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
   ChartBarIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getPortfolioManagerActivityLog, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandboxConstants'
 import { fmtMoney } from './sandboxHelpers'
@@ -274,6 +274,8 @@ function buildDraftFromSettings(settings) {
   const takeProfitPct = Number(settings.take_profit_pct ?? 1.25)
   const stopLossValue = Number(settings.stop_loss_value ?? 0)
   const takeProfitValue = Number(settings.take_profit_value ?? 0)
+  const crashProtectionMode = (settings.crash_protection_mode === 'dollar') ? 'dollar' : 'percent'
+  const crashProtectionValue = Number(settings.crash_protection_value ?? 0)
   const pctRiskActive = stopLossPct > 0 || takeProfitPct > 0
   const valueRiskActive = stopLossValue > 0 || takeProfitValue > 0
   const aiLongTpPct = Number(settings.ai_tag_long_tp_pct ?? 0)
@@ -303,6 +305,9 @@ function buildDraftFromSettings(settings) {
     stop_loss_sell_market_enabled: settings.stop_loss_sell_market_enabled ?? true,
     stop_loss_value: stopLossValue,
     take_profit_value: takeProfitValue,
+    crash_protection_enabled: settings.crash_protection_enabled ?? false,
+    crash_protection_mode: crashProtectionMode,
+    crash_protection_value: crashProtectionValue,
     default_strategy_name: settings.default_strategy_name ?? INTRADAY_1M_TEMPLATE,
     intraday_1m_template_params: {
       orb_bars: Number(settings.intraday_1m_template_params?.orb_bars ?? 5),
@@ -808,6 +813,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [importNotice, setImportNotice] = useState(null)
   const [presetNotice, setPresetNotice] = useState(null)
   const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, barPredictor: false, risk: false, pmValues: false })
+  const [pmTab, setPmTab] = useState('settings')
+  const [pmLogPage, setPmLogPage] = useState(1)
+  const [pmLogPageSize, setPmLogPageSize] = useState(100)
   const activePresets = Array.isArray(presetStore) ? presetStore : []
   const selectedPreset = activePresets.find(p => p.id === selectedPresetId) ?? null
 
@@ -825,6 +833,12 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     refetchInterval: appSettings.trading_status_ms,
   })
   const ibConnected = ibStatus?.connected === true
+
+  const { data: pmActivityData, isLoading: pmActivityLoading } = useQuery({
+    queryKey: ['portfolio-manager-activity-log', pmLogPage, pmLogPageSize],
+    queryFn: () => getPortfolioManagerActivityLog({ page: pmLogPage, pageSize: pmLogPageSize }),
+    refetchInterval: appSettings.portfolio_positions_ms,
+  })
 
   const { data: strategyData } = useQuery({
     queryKey: ['strategies'],
@@ -1084,6 +1098,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       stop_loss_sell_market_enabled: draft.stop_loss_sell_market_enabled,
       stop_loss_value: stopLossValue,
       take_profit_value: takeProfitValue,
+      crash_protection_enabled: !!draft.crash_protection_enabled,
+      crash_protection_mode: (draft.crash_protection_mode === 'dollar' ? 'dollar' : 'percent'),
+      crash_protection_value: Math.max(0, Number(draft.crash_protection_value ?? 0)),
       hold_positions_overnight: draft.hold_positions_overnight,
       premarket_order_placement_enabled: draft.premarket_order_placement_enabled,
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
@@ -1475,6 +1492,23 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             onChange={handleImportPreset}
           />
         </div>
+
+        <div className="inline-flex rounded-lg border border-dark-600 overflow-hidden">
+          <button
+            type="button"
+            onClick={() => setPmTab('settings')}
+            className={`px-3 py-1.5 text-xs font-semibold transition-colors ${pmTab === 'settings' ? 'bg-violet-700 text-white' : 'bg-dark-800 text-slate-400 hover:text-slate-200'}`}
+          >
+            Settings
+          </button>
+          <button
+            type="button"
+            onClick={() => setPmTab('logs')}
+            className={`px-3 py-1.5 text-xs font-semibold transition-colors border-l border-dark-600 ${pmTab === 'logs' ? 'bg-violet-700 text-white' : 'bg-dark-800 text-slate-400 hover:text-slate-200'}`}
+          >
+            Activity Log
+          </button>
+        </div>
       </div>
       {sentimentError && (
         <p className="text-xs text-red-400 -mt-2">{sentimentError}</p>
@@ -1486,6 +1520,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         <p className="text-xs text-cyan-300 -mt-2">{presetNotice}</p>
       )}
 
+      {pmTab === 'settings' && (
+        <>
       {/* Summary stats */}
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-dark-800 rounded-lg p-3">
@@ -1541,6 +1577,12 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
           SL sell execution: {(settings.stop_loss_sell_market_enabled ?? true) ? 'Market (fast)' : 'Limit (auto-priced)'}
+        </span>
+        <span className={`flex items-center gap-1 ${(settings.crash_protection_enabled ?? false) ? 'text-rose-300' : 'text-slate-600'}`}>
+          <ChartBarIcon className="h-3.5 w-3.5" />
+          {(settings.crash_protection_enabled ?? false)
+            ? `Crash protection: ${settings.crash_protection_mode === 'dollar' ? '$' : ''}${Number(settings.crash_protection_value ?? 0).toFixed(2)}${settings.crash_protection_mode === 'dollar' ? '' : '%'} drawdown`
+            : 'Crash protection off'}
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
@@ -2804,6 +2846,69 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
               </SettingRow>
 
               <SettingRow
+                label="Crash Protection (Daily Kill Switch)"
+                hint="When triggered, PM submits market sells for all held symbols and shuts down all engines for the rest of the day."
+              >
+                <div className="space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <div
+                      className={`relative w-9 h-5 rounded-full transition-colors ${(draft.crash_protection_enabled ?? false) ? 'bg-rose-600' : 'bg-dark-600'}`}
+                      onClick={() => {
+                        if (!editSettings) return
+                        updateDraft(d => ({ ...d, crash_protection_enabled: !(d.crash_protection_enabled ?? false) }))
+                      }}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(draft.crash_protection_enabled ?? false) ? 'translate-x-4' : ''}`} />
+                    </div>
+                    <span className="text-xs text-slate-300">{(draft.crash_protection_enabled ?? false) ? 'Enabled' : 'Disabled'}</span>
+                  </label>
+
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <div className="inline-flex rounded-md border border-dark-600 overflow-hidden shrink-0">
+                      <button
+                        type="button"
+                        disabled={!editSettings}
+                        onClick={() => editSettings && updateDraft(d => ({ ...d, crash_protection_mode: 'percent' }))}
+                        className={`px-2.5 py-1 text-xs transition-colors ${
+                          (draft.crash_protection_mode ?? 'percent') === 'percent'
+                            ? 'bg-rose-600 text-white'
+                            : 'bg-dark-700 text-slate-300 hover:bg-dark-600'
+                        }`}
+                      >
+                        % Drawdown
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!editSettings}
+                        onClick={() => editSettings && updateDraft(d => ({ ...d, crash_protection_mode: 'dollar' }))}
+                        className={`px-2.5 py-1 text-xs transition-colors border-l border-dark-600 ${
+                          (draft.crash_protection_mode ?? 'percent') === 'dollar'
+                            ? 'bg-rose-600 text-white'
+                            : 'bg-dark-700 text-slate-300 hover:bg-dark-600'
+                        }`}
+                      >
+                        $ Drawdown
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      {(draft.crash_protection_mode ?? 'percent') === 'dollar' && <span className="text-slate-400 text-sm">$</span>}
+                      <input
+                        type="number"
+                        min={0}
+                        max={(draft.crash_protection_mode ?? 'percent') === 'dollar' ? 1000000 : 100}
+                        step={(draft.crash_protection_mode ?? 'percent') === 'dollar' ? 0.01 : 0.1}
+                        value={draft.crash_protection_value ?? 0}
+                        onChange={e => updateDraft(d => ({ ...d, crash_protection_value: e.target.value }))}
+                        className="input w-28 text-sm py-1.5"
+                      />
+                      {(draft.crash_protection_mode ?? 'percent') !== 'dollar' && <span className="text-slate-400 text-sm">%</span>}
+                    </div>
+                  </div>
+                </div>
+              </SettingRow>
+
+              <SettingRow
                 label="Automated Price Offsets"
                 hint="Offsets from top-of-book touch price (BUY ask / SELL bid)."
               >
@@ -2937,6 +3042,87 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             </CollapsibleSection>
 
           </fieldset>
+        </div>
+      )}
+        </>
+      )}
+
+      {pmTab === 'logs' && (
+        <div className="bg-dark-800/70 border border-dark-600 rounded-xl p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-semibold text-slate-200 uppercase tracking-wider">PM Activity Log</div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-slate-500">Rows</label>
+              <select
+                className="input text-xs py-1"
+                value={pmLogPageSize}
+                onChange={(e) => {
+                  const nextSize = Number(e.target.value)
+                  setPmLogPageSize(nextSize)
+                  setPmLogPage(1)
+                }}
+              >
+                {[50, 100, 200, 500].map(n => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="border border-dark-600 rounded-lg overflow-hidden">
+            <div className="max-h-[60vh] overflow-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-dark-800 sticky top-0">
+                  <tr>
+                    <th className="text-left px-2 py-1 text-slate-400 font-semibold uppercase tracking-wide">Time</th>
+                    <th className="text-left px-2 py-1 text-slate-400 font-semibold uppercase tracking-wide">Message</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(pmActivityData?.items ?? []).map((row, idx) => (
+                    <tr key={`${row.at ?? 'na'}-${idx}`} className="border-t border-dark-700/70 align-top">
+                      <td className="px-2 py-1.5 text-slate-500 font-mono whitespace-nowrap">
+                        {row.at ? new Date(row.at).toLocaleString() : ''}
+                      </td>
+                      <td className="px-2 py-1.5 text-slate-300">{row.msg ?? ''}</td>
+                    </tr>
+                  ))}
+                  {!pmActivityLoading && (pmActivityData?.items?.length ?? 0) === 0 && (
+                    <tr>
+                      <td colSpan={2} className="px-2 py-8 text-center text-slate-500">No PM activity rows found for today.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between text-xs">
+            <div className="text-slate-500">
+              {pmActivityLoading
+                ? 'Loading…'
+                : `Showing ${(pmActivityData?.items?.length ?? 0)} of ${pmActivityData?.total ?? 0} rows (day ${pmActivityData?.day ?? '-'})`}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPmLogPage(p => Math.max(1, p - 1))}
+                disabled={pmActivityLoading || !(pmActivityData?.has_prev)}
+                className="text-xs text-slate-300 hover:text-white border border-dark-500 hover:border-dark-300 rounded-lg px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Prev
+              </button>
+              <span className="text-slate-400">Page {pmActivityData?.page ?? pmLogPage}</span>
+              <button
+                type="button"
+                onClick={() => setPmLogPage(p => p + 1)}
+                disabled={pmActivityLoading || !(pmActivityData?.has_next)}
+                className="text-xs text-slate-300 hover:text-white border border-dark-500 hover:border-dark-300 rounded-lg px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

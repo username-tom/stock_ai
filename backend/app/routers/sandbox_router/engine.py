@@ -1,7 +1,7 @@
 """Engine toggle and IB mode endpoints."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -114,6 +114,9 @@ class PortfolioManagerSettingsRequest(BaseModel):
     stop_loss_sell_market_enabled: Optional[bool] = None
     stop_loss_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     take_profit_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
+    crash_protection_enabled: Optional[bool] = None
+    crash_protection_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
+    crash_protection_value: Optional[float] = Field(default=None, ge=0.0, le=1000000.0)
     hold_positions_overnight: Optional[bool] = None
     premarket_order_placement_enabled: Optional[bool] = None
     eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=0, le=480)
@@ -158,6 +161,22 @@ class PortfolioManagerSettingsRequest(BaseModel):
 async def get_manager_state():
     from app.services.portfolio_manager import get_manager_state
     return get_manager_state()
+
+
+@router.get("/manager/activity-log")
+async def get_manager_activity_log(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
+    day: str | None = Query(default=None),
+):
+    from app.services.local_storage import read_portfolio_activity_entries
+
+    return read_portfolio_activity_entries(
+        page=page,
+        page_size=page_size,
+        day=day,
+        source="portfolio_manager",
+    )
 
 
 @router.patch("/manager/settings")

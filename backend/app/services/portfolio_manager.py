@@ -200,6 +200,9 @@ _settings: dict[str, Any] = {
     "stop_loss_sell_market_enabled": True,  # in IB mode, submit SL exits as market SELL for fastest protection
     "stop_loss_value": 0.0,
     "take_profit_value": 0.0,
+    "crash_protection_enabled": False,
+    "crash_protection_mode": "percent",   # percent | dollar
+    "crash_protection_value": 0.0,
     "hold_positions_overnight": False,    # strict day-trade default: flatten before close
     "premarket_order_placement_enabled": False,  # allow IB order placement outside regular session
     "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
@@ -226,6 +229,12 @@ _state: dict[str, Any] = {
     "ai_tags": {},   # { symbol: { learner_tag, learner_direction, learner_confidence } }
     # Per-key hysteresis state to avoid one-bar sentiment flapping.
     "bucket_debounce": {},  # { key: {active, candidate, count} }
+    # Crash protection runtime state (resets when trading day rolls).
+    "crash_baseline_day": None,
+    "crash_baseline_equity": None,
+    "crash_triggered_day": None,
+    "crash_triggered_at": None,
+    "crash_trigger_reason": None,
 }
 
 
@@ -436,6 +445,10 @@ async def _load_settings_from_db() -> None:
             _settings["stop_loss_sell_market_enabled"] = bool(getattr(row, "stop_loss_sell_market_enabled", True))
             _settings["stop_loss_value"] = float(getattr(row, "stop_loss_value", 0.0) or 0.0)
             _settings["take_profit_value"] = float(getattr(row, "take_profit_value", 0.0) or 0.0)
+            _settings["crash_protection_enabled"] = bool(getattr(row, "crash_protection_enabled", False))
+            _crash_mode = str(getattr(row, "crash_protection_mode", "percent") or "percent").strip().lower()
+            _settings["crash_protection_mode"] = _crash_mode if _crash_mode in {"percent", "dollar"} else "percent"
+            _settings["crash_protection_value"] = max(0.0, float(getattr(row, "crash_protection_value", 0.0) or 0.0))
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", False))
             _settings["premarket_order_placement_enabled"] = bool(getattr(row, "premarket_order_placement_enabled", False))
             _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
@@ -578,6 +591,11 @@ async def _save_settings_to_db() -> None:
         row.stop_loss_sell_market_enabled = bool(_settings.get("stop_loss_sell_market_enabled", True))
         row.stop_loss_value = float(_settings.get("stop_loss_value", 0.0) or 0.0)
         row.take_profit_value = float(_settings.get("take_profit_value", 0.0) or 0.0)
+        row.crash_protection_enabled = bool(_settings.get("crash_protection_enabled", False))
+        row.crash_protection_mode = (
+            "dollar" if str(_settings.get("crash_protection_mode", "percent")).strip().lower() == "dollar" else "percent"
+        )
+        row.crash_protection_value = max(0.0, float(_settings.get("crash_protection_value", 0.0) or 0.0))
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", False)
         row.premarket_order_placement_enabled = bool(_settings.get("premarket_order_placement_enabled", False))
         row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
@@ -645,6 +663,7 @@ def update_manager_settings(new: dict) -> dict:
               "stop_loss_pct", "take_profit_pct",
               "stop_loss_sell_market_enabled",
               "stop_loss_value", "take_profit_value",
+              "crash_protection_enabled", "crash_protection_mode", "crash_protection_value",
               "hold_positions_overnight", "premarket_order_placement_enabled", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
               "ai_tag_action_mode", "ai_external_sentiment_weight",
@@ -707,6 +726,12 @@ def update_manager_settings(new: dict) -> dict:
         _settings["auto_trade_sell_price_offset_mode"] = (
             "dollar" if str(_settings.get("auto_trade_sell_price_offset_mode", "percent")).strip().lower() == "dollar" else "percent"
         )
+    if "crash_protection_mode" in new:
+        _settings["crash_protection_mode"] = (
+            "dollar" if str(_settings.get("crash_protection_mode", "percent")).strip().lower() == "dollar" else "percent"
+        )
+    if "crash_protection_value" in new:
+        _settings["crash_protection_value"] = max(0.0, float(_settings.get("crash_protection_value", 0.0) or 0.0))
 
     try:
         loop = asyncio.get_running_loop()
@@ -2195,6 +2220,7 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
     except Exception:
         pass
     _sl_pct_drift = max(0.0, float(_settings.get("stop_loss_pct", 0.5) or 0.0))
+    _sl_value_drift = max(0.0, float(_settings.get("stop_loss_value", 0.0) or 0.0))
     _sl_mkt_enabled_drift = bool(_settings.get("stop_loss_sell_market_enabled", True))
 
     def _auto_limit_price_from_reference(reference_price: float, side: str) -> float:
@@ -2325,18 +2351,24 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
             if (
                 side == "SELL"
                 and _sl_mkt_enabled_drift
-                and _sl_pct_drift > 0.0
+                and (_sl_pct_drift > 0.0 or _sl_value_drift > 0.0)
                 and cp > 0.0
             ):
                 _avg_c = float(ib_avg_cost_map.get(symbol, 0.0))
-                if _avg_c > 0.0 and cp <= _avg_c * (1.0 - _sl_pct_drift / 100.0):
+                _thresholds: list[float] = []
+                if _avg_c > 0.0 and _sl_pct_drift > 0.0:
+                    _thresholds.append(_avg_c * (1.0 - _sl_pct_drift / 100.0))
+                if _avg_c > 0.0 and _sl_value_drift > 0.0:
+                    _thresholds.append(_avg_c - _sl_value_drift)
+                _sl_threshold = max(_thresholds) if _thresholds else 0.0
+                if _avg_c > 0.0 and _sl_threshold > 0.0 and cp <= _sl_threshold:
                     repost_order_type = "MKT"
                     repost_reason_tag = "pm_ib_pending_repost_stop_loss"
                     _log_activity(
                         f"IB PM SELL repost upgraded to MKT for {symbol}: "
                         f"price ${cp:.2f} <= SL threshold "
-                        f"${_avg_c * (1.0 - _sl_pct_drift / 100.0):.2f} "
-                        f"({_sl_pct_drift:.2f}% below avg ${_avg_c:.2f})"
+                        f"${_sl_threshold:.2f} "
+                        f"(avg ${_avg_c:.2f}, sl_pct={_sl_pct_drift:.2f}, sl_value=${_sl_value_drift:.2f})"
                     )
 
             repost_result = await ib_service.place_order(
@@ -2594,6 +2626,16 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
         return len(positions)
 
 
+def _current_trading_day_key_et() -> str:
+    """Return YYYYMMDD for the current US/Eastern trading day."""
+    try:
+        from app.services.sandbox_engine import _ET
+
+        return datetime.now(tz=_ET).strftime("%Y%m%d")
+    except Exception:
+        return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
 async def _process_ib_engine_signals() -> None:
     """Consume engine signals in IB mode and route execution through PM rules."""
     from app.services.ib_service import ib_service
@@ -2641,7 +2683,12 @@ async def _process_ib_engine_signals() -> None:
     account_cap_base = 0.0
     account_buying_power = 0.0
     account_available_funds = 0.0
+    current_equity = 0.0
     if isinstance(account_summary, dict) and not account_summary.get("error"):
+        try:
+            current_equity = float(account_summary.get("NetLiquidation") or 0.0)
+        except Exception:
+            current_equity = 0.0
         for key in ("NetLiquidation", "TotalCashValue", "AvailableFunds"):
             try:
                 value = float(account_summary.get(key) or 0.0)
@@ -2658,6 +2705,83 @@ async def _process_ib_engine_signals() -> None:
             account_available_funds = float(account_summary.get("AvailableFunds") or 0.0)
         except Exception:
             account_available_funds = 0.0
+
+    crash_enabled = bool(_settings.get("crash_protection_enabled", False))
+    crash_mode = "dollar" if str(_settings.get("crash_protection_mode", "percent")).strip().lower() == "dollar" else "percent"
+    crash_value = max(0.0, float(_settings.get("crash_protection_value", 0.0) or 0.0))
+    crash_day = _current_trading_day_key_et()
+    if _state.get("crash_baseline_day") != crash_day:
+        _state["crash_baseline_day"] = crash_day
+        _state["crash_baseline_equity"] = None
+        _state["crash_triggered_day"] = None
+        _state["crash_triggered_at"] = None
+        _state["crash_trigger_reason"] = None
+
+    crash_triggered_today = _state.get("crash_triggered_day") == crash_day
+    if crash_enabled and crash_value > 0.0 and current_equity > 0.0:
+        baseline = _state.get("crash_baseline_equity")
+        if not isinstance(baseline, (int, float)) or baseline <= 0.0:
+            _state["crash_baseline_equity"] = float(current_equity)
+            baseline = float(current_equity)
+
+        threshold = (
+            baseline * (1.0 - crash_value / 100.0)
+            if crash_mode == "percent"
+            else baseline - crash_value
+        )
+        if threshold < 0.0:
+            threshold = 0.0
+        breached = current_equity <= threshold
+
+        if breached and not crash_triggered_today:
+            reason = (
+                f"drawdown {crash_value:.2f}%"
+                if crash_mode == "percent"
+                else f"drawdown ${crash_value:.2f}"
+            )
+            _state["crash_triggered_day"] = crash_day
+            _state["crash_triggered_at"] = datetime.now(timezone.utc).isoformat()
+            _state["crash_trigger_reason"] = (
+                f"{reason}: equity ${current_equity:.2f} <= threshold ${threshold:.2f} "
+                f"(baseline ${baseline:.2f})"
+            )
+            _log_activity(f"PM crash protection triggered ({_state['crash_trigger_reason']})")
+
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import select as sa_select
+
+                res = await db.execute(
+                    sa_select(SandboxPosition).where(
+                        SandboxPosition.strategy_name.isnot(None),
+                        SandboxPosition.strategy_enabled == True,  # noqa: E712
+                    )
+                )
+                engine_rows: list[SandboxPosition] = res.scalars().all()
+                for row in engine_rows:
+                    row.strategy_enabled = False
+                if engine_rows:
+                    await db.commit()
+                    _log_activity(f"PM crash protection: disabled {len(engine_rows)} engine(s) for the rest of the day")
+
+            for symbol, info in ib_by_symbol.items():
+                qty = max(0.0, float(info.get("qty") or 0.0))
+                if qty <= 0.0:
+                    continue
+                result = await ib_service.place_order(
+                    symbol=symbol,
+                    side="SELL",
+                    quantity=qty,
+                    order_type="MKT",
+                )
+                if result.get("error"):
+                    _log_activity(f"PM crash protection SELL failed for {symbol}: {result['error']}")
+                else:
+                    _log_activity(f"PM crash protection SELL submitted for {symbol} x{qty:.4f}")
+
+            return
+
+    if _state.get("crash_triggered_day") == crash_day:
+        return
 
     open_orders = await ib_service.get_open_orders()
     active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
@@ -2680,6 +2804,8 @@ async def _process_ib_engine_signals() -> None:
     _take_profit_pct = _settings.get("take_profit_pct", 2.5)
     stop_loss_pct = float(0.8 if _stop_loss_pct is None else _stop_loss_pct)
     take_profit_pct = float(2.5 if _take_profit_pct is None else _take_profit_pct)
+    stop_loss_value = max(0.0, float(_settings.get("stop_loss_value", 0.0) or 0.0))
+    take_profit_value = max(0.0, float(_settings.get("take_profit_value", 0.0) or 0.0))
     ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
     allow_order_placement = _ib_order_placement_allowed_now()
 
@@ -2759,7 +2885,7 @@ async def _process_ib_engine_signals() -> None:
             ib_qty > 0
             and ib_avg_cost > 0
             and symbol not in pending_sell_symbols
-            and (stop_loss_pct > 0.0 or take_profit_pct > 0.0)
+            and (stop_loss_pct > 0.0 or take_profit_pct > 0.0 or stop_loss_value > 0.0 or take_profit_value > 0.0)
         ):
             risk_symbols_needing_quote.add(symbol)
             risk_rows.append((symbol, ib_qty, ib_avg_cost))
@@ -2948,15 +3074,28 @@ async def _process_ib_engine_signals() -> None:
             if cp <= 0.0 or avg_cost <= 0.0 or qty <= 0.0:
                 continue
 
-            hit_sl = stop_loss_pct > 0.0 and cp <= avg_cost * (1.0 - stop_loss_pct / 100.0)
-            hit_tp = take_profit_pct > 0.0 and cp >= avg_cost * (1.0 + take_profit_pct / 100.0)
+            sl_targets: list[float] = []
+            tp_targets: list[float] = []
+            if stop_loss_pct > 0.0:
+                sl_targets.append(avg_cost * (1.0 - stop_loss_pct / 100.0))
+            if stop_loss_value > 0.0:
+                sl_targets.append(avg_cost - stop_loss_value)
+            if take_profit_pct > 0.0:
+                tp_targets.append(avg_cost * (1.0 + take_profit_pct / 100.0))
+            if take_profit_value > 0.0:
+                tp_targets.append(avg_cost + take_profit_value)
+
+            sl_trigger = max(sl_targets) if sl_targets else None
+            tp_trigger = min(tp_targets) if tp_targets else None
+            hit_sl = sl_trigger is not None and cp <= sl_trigger
+            hit_tp = tp_trigger is not None and cp >= tp_trigger
             if not hit_sl and not hit_tp:
                 continue
 
             reason = (
-                f"pm_risk_stop_loss ({stop_loss_pct:.2f}% @ ${cp:.2f})"
+                f"pm_risk_stop_loss (@ ${cp:.2f}, trigger ${float(sl_trigger or 0.0):.2f})"
                 if hit_sl
-                else f"pm_risk_take_profit ({take_profit_pct:.2f}% @ ${cp:.2f})"
+                else f"pm_risk_take_profit (@ ${cp:.2f}, trigger ${float(tp_trigger or 0.0):.2f})"
             )
             order_candidates.append({
                 "symbol": symbol,

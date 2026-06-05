@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -165,7 +166,7 @@ def list_portfolio_activity_files() -> list[dict[str, Any]]:
     """List all saved portfolio activity files."""
     files = []
     for p in sorted(_PORTFOLIO_DIR.iterdir()):
-        if p.suffix in {".csv", ".json"}:
+        if p.suffix in {".csv", ".json", ".jsonl"}:
             stat = p.stat()
             files.append({
                 "filename": p.name,
@@ -174,6 +175,64 @@ def list_portfolio_activity_files() -> list[dict[str, Any]]:
                 "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
             })
     return files
+
+
+def read_portfolio_activity_entries(
+    *,
+    page: int = 1,
+    page_size: int = 100,
+    day: str | None = None,
+    source: str | None = "portfolio_manager",
+) -> dict[str, Any]:
+    """Read paginated portfolio activity entries from daily JSONL files.
+
+    Returns entries sorted newest-first.
+    """
+    safe_page = max(1, int(page or 1))
+    safe_page_size = max(1, min(500, int(page_size or 100)))
+
+    target_day = (day or datetime.utcnow().strftime("%Y%m%d")).strip()
+    if not re.fullmatch(r"\d{8}", target_day):
+        target_day = datetime.utcnow().strftime("%Y%m%d")
+
+    _PORTFOLIO_DIR.mkdir(parents=True, exist_ok=True)
+    pattern = f"portfolio_manager_activity_{target_day}.jsonl"
+    target_files = sorted(_PORTFOLIO_DIR.glob(pattern), reverse=True)
+
+    entries: list[dict[str, Any]] = []
+    for path in target_files:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        obj = json.loads(raw)
+                    except Exception:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    if source and str(obj.get("source") or "") != source:
+                        continue
+                    entries.append(obj)
+        except Exception:
+            continue
+
+    entries.sort(key=lambda x: str(x.get("at") or ""), reverse=True)
+    total = len(entries)
+    start = (safe_page - 1) * safe_page_size
+    end = start + safe_page_size
+
+    return {
+        "items": entries[start:end],
+        "page": safe_page,
+        "page_size": safe_page_size,
+        "total": total,
+        "has_next": end < total,
+        "has_prev": safe_page > 1,
+        "day": target_day,
+    }
 
 
 # ---------------------------------------------------------------------------

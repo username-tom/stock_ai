@@ -119,4 +119,6 @@ export const toggleSandboxEngine = (symbol) => api.post(`/sandbox/engine/toggle/
 // Portfolio Manager
 export const getPortfolioManagerState = () => api.get('/sandbox/manager/state').then(r => r.data)
 export const updatePortfolioManagerSettings = (payload) => api.patch('/sandbox/manager/settings', payload).then(r => r.data)
+export const getPortfolioManagerActivityLog = ({ page = 1, pageSize = 100, day = undefined } = {}) =>
+  api.get('/sandbox/manager/activity-log', { params: { page, page_size: pageSize, ...(day ? { day } : {}) } }).then(r => r.data)
 export const togglePortfolioManager = () => api.post('/sandbox/manager/toggle').then(r => r.data)
