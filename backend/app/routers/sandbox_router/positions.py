@@ -15,6 +15,7 @@ from app.models.sandbox import SandboxPosition, SandboxAllocationEvent
 from app.config import settings
 from app.routers.sandbox_router._helpers import (
     get_account,
+    fetch_ib_market_prices,
     position_dict,
     compute_available_cash,
     ensure_sandbox_write_allowed,
@@ -121,6 +122,7 @@ async def get_positions(
             for p in ib_filtered
             if str(p.get("symbol") or "").strip()
         }
+        market_price_by_symbol = await fetch_ib_market_prices(list(ib_by_symbol.keys()))
 
         mode = requested_profile if requested_profile in {"paper", "live"} else "paper"
         trade_mode = TradingMode.LIVE if mode == "live" else TradingMode.PAPER
@@ -161,27 +163,25 @@ async def get_positions(
 
             quantity = float((ib_item or {}).get("quantity") or 0.0)
             avg_cost = float((ib_item or {}).get("avg_cost") or 0.0)
-            market_price = avg_cost
+            market_price = float(market_price_by_symbol.get(symbol, 0.0) or 0.0)
             if ib_item is not None:
                 ib_market_price = float((ib_item or {}).get("market_price") or (ib_item or {}).get("last_price") or 0.0)
-                ib_market_value = float((ib_item or {}).get("market_value") or 0.0)
-                if ib_market_price > 0:
+                if market_price <= 0 and ib_market_price > 0:
                     market_price = ib_market_price
-                elif quantity != 0 and ib_market_value != 0:
-                    market_price = abs(ib_market_value / quantity)
 
-            market_value = quantity * market_price
-            unrealized = (market_price - avg_cost) * quantity
+            has_market_price = market_price > 0
+            market_value = (quantity * market_price) if has_market_price else None
+            unrealized = ((market_price - avg_cost) * quantity) if has_market_price else None
             local_created_at = local.created_at.astimezone().isoformat() if local and local.created_at else None
 
             return {
                 "id": local.id if local else None,
                 "symbol": symbol,
-                "allocated_funds": round(max(0.0, market_value), 4),
+                "allocated_funds": round(max(0.0, float(market_value)), 4) if market_value is not None else 0.0,
                 "shares": quantity,
                 "avg_cost": round(avg_cost, 4),
-                "market_price": round(market_price, 4),
-                "last_price": round(market_price, 4),
+                "market_price": round(market_price, 4) if has_market_price else None,
+                "last_price": round(market_price, 4) if has_market_price else None,
                 "strategy_name": local.strategy_name if local else None,
                 "strategy_enabled": bool(local.strategy_enabled) if local else False,
                 "pm_managed": bool(local.pm_managed) if local else False,
@@ -193,8 +193,8 @@ async def get_positions(
                     4,
                 ),
                 "total_invested": round(max(0.0, avg_cost * quantity), 4),
-                "unrealized_pnl": round(unrealized, 4),
-                "market_value": round(market_value, 4),
+                "unrealized_pnl": round(unrealized, 4) if unrealized is not None else None,
+                "market_value": round(market_value, 4) if market_value is not None else None,
                 "max_allocation_mode": (local.max_allocation_mode if local and local.max_allocation_mode else "dollar"),
                 "max_allocation_value": (local.max_allocation_value if local else None),
                 "sentiment_mode": (local.sentiment_mode if local else None),

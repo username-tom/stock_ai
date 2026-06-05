@@ -46,7 +46,7 @@ function pmClassLabel(cls) {
   return '—'
 }
 
-function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, accountTotalFunds = 0, isSelected, onClick, toggleEngineMut }) {
+function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, accountTotalFunds = 0, isSelected, onClick, toggleEngineMut, ibMode = null }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
   const { data: templatesData } = useQuery({ queryKey: ['builtin-templates'], queryFn: getBuiltinTemplates, staleTime: 300000 })
@@ -61,14 +61,18 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
     const marketValuePrice = shares > 0 && Number.isFinite(Number(pos.market_value)) && Number(pos.market_value) > 0
       ? Number(pos.market_value) / shares
       : null
-    const mp = quote?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? (shares > 0 ? pos.avg_cost : null)
-    const equity = mp * pos.shares
-    const unrealised = equity - pos.avg_cost * pos.shares
-    const totalPnl = pos.realized_pnl + unrealised
-    const changePct = quote?.change_pct
+    const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
+    const mp = ibMode
+      ? ibMarketPrice ?? marketValuePrice ?? null
+      : quote?.last_price ?? ibMarketPrice ?? marketValuePrice ?? (shares > 0 ? pos.avg_cost : null)
+    const mpNum = Number.isFinite(Number(mp)) ? Number(mp) : null
+    const equity = mpNum != null ? (mpNum * pos.shares) : null
+    const unrealised = equity != null ? (equity - pos.avg_cost * pos.shares) : 0
+    const totalPnl = Number(pos.realized_pnl ?? 0) + unrealised
+    const changePct = ibMode ? null : quote?.change_pct
     const positive = changePct == null ? null : changePct >= 0
     return { mp, equity, unrealised, totalPnl, changePct, positive }
-  }, [quote, pos.avg_cost, pos.shares, pos.realized_pnl])
+  }, [quote, pos.avg_cost, pos.shares, pos.realized_pnl, pos.market_price, pos.last_price, pos.market_value, ibMode])
 
   const { mp, equity, unrealised, totalPnl, changePct, positive } = calculations
   const canToggleEngine = !!toggleEngineMut && !!pos.strategy_name
@@ -188,8 +192,8 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
         )}
         {pos.shares > 0 && (
           <div className="flex items-center justify-between text-xs mt-0.5">
-            <span className="text-slate-600">Equity {fmtMoney(equity)}</span>
-            <span className={`font-semibold ${unrealised >= 0 ? 'text-emerald-500/80' : 'text-red-500/80'}`}>{fmt(unrealised)}</span>
+            <span className="text-slate-600">Equity {equity != null ? fmtMoney(equity) : '—'}</span>
+            <span className={`font-semibold ${unrealised >= 0 ? 'text-emerald-500/80' : 'text-red-500/80'}`}>{equity != null ? fmt(unrealised) : '—'}</span>
           </div>
         )}
         <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">

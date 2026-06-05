@@ -92,6 +92,9 @@ export default function PositionDetail({
   const selectedShares = Number(selectedPos?.shares ?? 0)
   const hasPosition = Math.abs(selectedShares) > 0
   const isLongPosition = selectedShares > 0
+  const displayMarketPrice = Number.isFinite(Number(selectedPrice)) && Number(selectedPrice) > 0
+    ? Number(selectedPrice)
+    : null
   const marketEdgePct = hasPosition && Number(selectedPos?.avg_cost) > 0 && Number(selectedPrice) > 0
     ? (((Number(selectedPrice) - Number(selectedPos.avg_cost)) / Number(selectedPos.avg_cost)) * 100) * (isLongPosition ? 1 : -1)
     : null
@@ -789,7 +792,7 @@ export default function PositionDetail({
             <div>
               <div className="flex items-center gap-3">
                 <h1 className="text-3xl font-bold text-slate-100">{selectedSymbol}</h1>
-                {quotes[selectedSymbol]?.change_pct != null && (
+                {!ibMode && quotes[selectedSymbol]?.change_pct != null && (
                   <span className={`text-base font-semibold ${quotes[selectedSymbol].change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {quotes[selectedSymbol].change_pct >= 0 ? '+' : ''}{quotes[selectedSymbol].change_pct.toFixed(2)}%
                   </span>
@@ -799,14 +802,14 @@ export default function PositionDetail({
                 <div className="text-sm text-slate-400 mt-0.5">{quotes[selectedSymbol].company_name}</div>
               )}
               <div className="flex items-center gap-3 mt-1.5 flex-wrap">
-                <span className="text-sm text-slate-500">Market: <span className="text-slate-200 font-semibold">${selectedPrice?.toFixed(2)}</span></span>
-                {quotes[selectedSymbol]?.day_high != null && (
+                <span className="text-sm text-slate-500">Market: <span className="text-slate-200 font-semibold">{displayMarketPrice != null ? `$${displayMarketPrice.toFixed(2)}` : '—'}</span></span>
+                {!ibMode && quotes[selectedSymbol]?.day_high != null && (
                   <span className="text-xs text-slate-500">
                     H: <span className="text-slate-300">${quotes[selectedSymbol].day_high.toFixed(2)}</span>
                     {' '}L: <span className="text-slate-300">${quotes[selectedSymbol].day_low?.toFixed(2)}</span>
                   </span>
                 )}
-                {quotes[selectedSymbol]?.volume != null && (
+                {!ibMode && quotes[selectedSymbol]?.volume != null && (
                   <span className="text-xs text-slate-500">Vol: <span className="text-slate-300">{(quotes[selectedSymbol].volume / 1e6).toFixed(2)}M</span></span>
                 )}
                 {selectedPos.strategy_name && !editingStrategy && (

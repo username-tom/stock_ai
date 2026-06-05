@@ -1,6 +1,8 @@
 """Shared helpers used across sandbox sub-routers."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -49,6 +51,45 @@ async def compute_available_cash(
     pending_equity = sum(p.pending_shares * p.pending_avg_cost for p in positions)
     available = account.total_funds - allocated - equity - pending_equity
     return round(max(0.0, available), 4)
+
+
+async def fetch_ib_market_prices(symbols: list[str]) -> dict[str, float]:
+    requested = [str(symbol or "").upper().strip() for symbol in symbols if str(symbol or "").strip()]
+    if not requested or not ib_service.is_connected:
+        return {}
+
+    try:
+        from app.services.top_of_book import get_ib_top_of_book
+
+        prices: dict[str, float] = {}
+        missing = list(dict.fromkeys(requested))
+        for attempt in range(3):
+            if not missing:
+                break
+            books = await asyncio.gather(*[get_ib_top_of_book(symbol) for symbol in missing])
+            next_missing: list[str] = []
+            for symbol, book in zip(missing, books):
+                if not isinstance(book, dict):
+                    next_missing.append(symbol)
+                    continue
+                price = book.get("last_price")
+                if price is None:
+                    price = book.get("close")
+                try:
+                    numeric_price = float(price)
+                except (TypeError, ValueError):
+                    next_missing.append(symbol)
+                    continue
+                if numeric_price > 0:
+                    prices[symbol] = numeric_price
+                else:
+                    next_missing.append(symbol)
+            missing = next_missing
+            if missing and attempt < 2:
+                await asyncio.sleep(0.25)
+        return prices
+    except Exception:
+        return {}
 
 
 def position_dict(p: SandboxPosition, market_price: float | None = None) -> dict:

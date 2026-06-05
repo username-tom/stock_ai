@@ -201,6 +201,7 @@ export default function SandboxPanel() {
   const prevTradeIdRef = useRef(null)
   const tradeFirstSeenRef = useRef({})
   const ibSyncFirstSeenRef = useRef({})
+  const ibMissingPriceRetryAtRef = useRef(0)
   const prevIbSessionRef = useRef({ connected: false, mode: null })
   const prevProfileRef = useRef('simulated')
   const activeProfileRef = useRef('simulated')
@@ -361,15 +362,34 @@ export default function SandboxPanel() {
   })
   const quotes = quotesData ?? {}
   const getOwnedMarketPrice = pos => {
+    const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
+    const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
+    if (activeProfile !== 'simulated' && ibMarketPrice != null) return ibMarketPrice
+    if (activeProfile !== 'simulated') return null
     const quotePrice = quotes[pos.symbol]?.last_price
     if (quotePrice != null) return quotePrice
-    const storedMarketPrice = pos.market_price ?? pos.last_price
-    if (storedMarketPrice != null) return storedMarketPrice
+    if (ibMarketPrice != null) return ibMarketPrice
     const shares = Number(pos.shares ?? 0)
     const marketValue = Number(pos.market_value ?? 0)
     if (shares > 0 && marketValue > 0) return marketValue / shares
     return pos.shares > 0 ? pos.avg_cost : null
   }
+  useEffect(() => {
+    if (activeProfile === 'simulated') return
+    const hasMissingHeldPrice = rawPositions.some((p) => {
+      const shares = Number(p?.shares ?? 0)
+      if (Math.abs(shares) <= 0) return false
+      const mp = Number(p?.market_price ?? p?.last_price)
+      return !Number.isFinite(mp) || mp <= 0
+    })
+    if (!hasMissingHeldPrice) return
+    const now = Date.now()
+    if (now - ibMissingPriceRetryAtRef.current < 5000) return
+    ibMissingPriceRetryAtRef.current = now
+    qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+    qc.invalidateQueries({ queryKey: ['ib-positions'] })
+    qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+  }, [activeProfile, rawPositions, qc])
   const { data: sectorsData } = useQuery({
     queryKey: ['sandbox-sectors', symbols.join(',')],
     queryFn: () => symbols.length ? getSymbolSectors(symbols) : Promise.resolve({}),
@@ -388,24 +408,33 @@ export default function SandboxPanel() {
 
   // portfolio calcs
   const totalEquity = useMemo(() => {
-    if (activeProfile !== 'simulated' && Number.isFinite(Number(accountData?.equity))) {
-      return Number(accountData.equity)
+    if (activeProfile !== 'simulated') {
+      return rawPositions.reduce((s, p) => {
+        const mp = getOwnedMarketPrice(p)
+        return s + ((Number.isFinite(Number(mp)) ? Number(mp) : 0) * Number(p.shares ?? 0))
+      }, 0)
     }
     return rawPositions.reduce((s, p) => s + (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares, 0)
-  }, [activeProfile, accountData?.equity, rawPositions, quotesData])
+  }, [activeProfile, rawPositions, quotesData])
   const totalRealizedPnl = useMemo(() => {
-    if (activeProfile !== 'simulated' && Number.isFinite(Number(accountData?.realized_pnl))) {
-      return Number(accountData.realized_pnl)
+    if (activeProfile !== 'simulated') {
+      return rawPositions.reduce((s, p) => s + Number(p.realized_pnl ?? 0), 0)
     }
     return rawPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
-  }, [activeProfile, accountData?.realized_pnl, rawPositions])
+  }, [activeProfile, rawPositions])
 
   const totalUnrealizedPnl = useMemo(() => {
-    if (activeProfile !== 'simulated' && Number.isFinite(Number(accountData?.unrealized_pnl))) {
-      return Number(accountData.unrealized_pnl)
+    if (activeProfile !== 'simulated') {
+      return rawPositions.reduce((s, p) => {
+        const mp = getOwnedMarketPrice(p)
+        const avg = Number(p.avg_cost ?? 0)
+        const shares = Number(p.shares ?? 0)
+        if (!Number.isFinite(Number(mp))) return s
+        return s + (Number(mp) - avg) * shares
+      }, 0)
     }
     return rawPositions.reduce((s, p) => s + ((getOwnedMarketPrice(p) ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
-  }, [activeProfile, accountData?.unrealized_pnl, rawPositions, quotesData])
+  }, [activeProfile, rawPositions, quotesData])
   const pieData = useMemo(() => {
     const active = rawPositions.filter((p) => {
       const shares = Number(p.shares ?? 0)
@@ -421,7 +450,10 @@ export default function SandboxPanel() {
       const avgCost = Number(p.avg_cost ?? 0)
       const pendingShares = Number(p.pending_shares ?? 0)
       const pendingAvgCost = Number(p.pending_avg_cost ?? 0)
-      const mv = (getOwnedMarketPrice(p) ?? avgCost) * shares
+      const ownedMp = getOwnedMarketPrice(p)
+      const mv = activeProfile !== 'simulated'
+        ? ((Number.isFinite(Number(ownedMp)) ? Number(ownedMp) : 0) * shares)
+        : ((ownedMp ?? avgCost) * shares)
       const committed = avgCost * shares + pendingAvgCost * pendingShares
       const cashRemaining = Math.max(0, Number(p.allocated_funds ?? 0) - committed)
       return s + mv + cashRemaining
@@ -432,13 +464,16 @@ export default function SandboxPanel() {
       const avgCost = Number(p.avg_cost ?? 0)
       const pendingShares = Number(p.pending_shares ?? 0)
       const pendingAvgCost = Number(p.pending_avg_cost ?? 0)
-      const mv = (getOwnedMarketPrice(p) ?? avgCost) * shares
+      const ownedMp = getOwnedMarketPrice(p)
+      const mv = activeProfile !== 'simulated'
+        ? ((Number.isFinite(Number(ownedMp)) ? Number(ownedMp) : 0) * shares)
+        : ((ownedMp ?? avgCost) * shares)
       const committed = avgCost * shares + pendingAvgCost * pendingShares
       const cashRemaining = Math.max(0, Number(p.allocated_funds ?? 0) - committed)
       const sliceValue = mv + cashRemaining
       return { symbol: p.symbol, shares, market_value: sliceValue, mv, cash: cashRemaining, pct: pct(sliceValue, total) }
     })
-  }, [rawPositions, quotesData])
+  }, [activeProfile, rawPositions, quotesData])
   const selectedMarketValue = selectedPos ? selectedPrice * selectedPos.shares : 0
   const selectedUnrealised = selectedPos ? selectedMarketValue - selectedPos.avg_cost * selectedPos.shares : 0
 

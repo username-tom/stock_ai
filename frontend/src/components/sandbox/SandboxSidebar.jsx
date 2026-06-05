@@ -31,12 +31,12 @@ export default function SandboxSidebar({
   onAddIbWatchlistSymbol,
 }) {
   const qc = useQueryClient()
-  const ibUnrealizedPnl = ibMode && Number.isFinite(Number(accountData?.unrealized_pnl))
-    ? Number(accountData.unrealized_pnl)
-    : totalUnrealizedPnl
-  const ibRealizedPnl = ibMode && Number.isFinite(Number(accountData?.realized_pnl))
-    ? Number(accountData.realized_pnl)
-    : totalRealizedPnl
+  const ibUnrealizedPnl = totalUnrealizedPnl
+  const ibRealizedPnl = totalRealizedPnl
+  const totalFundsSource = String(accountData?.total_funds_source ?? '').toLowerCase()
+  const fundsLabel = ibMode
+    ? ((ibMode === 'paper' && totalFundsSource === 'paper_max_allocation_sum') ? 'Allocation Cap (Paper)' : 'Net Liquidation')
+    : 'Total Funds'
   const [phaseNow, setPhaseNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -324,7 +324,7 @@ export default function SandboxSidebar({
         )}
 
         <div className="space-y-1.5 text-sm">
-          <div className="flex justify-between"><span className="text-slate-500">{ibMode ? 'Net Liquidation' : 'Total Funds'}</span><span className="text-slate-200 font-semibold">{fmtMoney(accountData?.total_funds)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">{fundsLabel}</span><span className="text-slate-200 font-semibold">{fmtMoney(accountData?.total_funds)}</span></div>
           <div className="flex justify-between items-center">
             <span className="text-slate-500">{ibMode ? 'Available Funds' : 'Available'}</span>
             <span className={`font-semibold ${(accountData?.available_funds ?? 0) < 0 ? 'text-red-400' : 'text-emerald-400'}`}>{fmtMoney(accountData?.available_funds)}</span>
@@ -386,7 +386,7 @@ export default function SandboxSidebar({
 
         <div className="space-y-1">
           {positions.map(pos => (
-            <StockListItem key={pos.symbol} pos={pos} quote={quotes[pos.symbol]}
+            <StockListItem key={pos.symbol} pos={pos} quote={quotes[pos.symbol]} ibMode={ibMode}
               sector={sectors?.[pos.symbol]}
               pmScore={pmScores[pos.symbol]}
               managerSettings={managerSettings}

@@ -27,6 +27,30 @@ from app.services.local_storage import (
 router = APIRouter()
 
 
+def _sum_position_max_allocations(
+    positions: list[SandboxPosition],
+    percent_base_total: float | None,
+) -> float | None:
+    total = 0.0
+    has_any_cap = False
+    base_total = float(percent_base_total or 0.0)
+    for pos in positions:
+        cap_value = float(getattr(pos, "max_allocation_value", 0.0) or 0.0)
+        if cap_value <= 0.0:
+            continue
+        mode = str(getattr(pos, "max_allocation_mode", "dollar") or "dollar").lower()
+        if mode == "percent":
+            if base_total <= 0.0:
+                continue
+            total += base_total * (cap_value / 100.0)
+        else:
+            total += cap_value
+        has_any_cap = True
+    if not has_any_cap:
+        return None
+    return round(max(0.0, total), 4)
+
+
 @router.get("/account")
 async def get_account_info(
     profile: Optional[str] = Query(default=None, pattern=r"^(simulated|paper|live)$"),
@@ -54,8 +78,11 @@ async def get_account_info(
                     continue
             return None
 
-        # Strict IB-backed values only; do not substitute with local estimates.
-        total_funds = _to_float("NetLiquidation")
+        # Strict IB-backed values for most fields. For paper mode only,
+        # total_funds is overridden by configured allocation caps.
+        ib_net_liq = _to_float("NetLiquidation")
+        total_funds = ib_net_liq
+        total_funds_source = "ib_net_liq"
         available_funds = _to_float("AvailableFunds")
         buying_power = _to_float("BuyingPower")
         cash_value = _to_float("TotalCashValue")
@@ -63,9 +90,17 @@ async def get_account_info(
         unrealized_pnl = _to_float("UnrealizedPnL")
         realized_pnl = _to_float("RealizedPnL")
 
+        if requested_profile == "paper":
+            positions_res = await db.execute(select(SandboxPosition))
+            local_positions = positions_res.scalars().all()
+            cap_total = _sum_position_max_allocations(local_positions, ib_net_liq)
+            if cap_total is not None and cap_total > 0:
+                total_funds = cap_total
+                total_funds_source = "paper_max_allocation_sum"
+
         # Fallback only when GrossPositionValue is unavailable.
-        if equity is None and total_funds is not None and available_funds is not None:
-            equity = max(0.0, total_funds - available_funds)
+        if equity is None and ib_net_liq is not None and available_funds is not None:
+            equity = max(0.0, ib_net_liq - available_funds)
 
         mode = requested_profile if requested_profile in {"paper", "live"} else "paper"
         save_portfolio_state(mode, {
@@ -79,6 +114,8 @@ async def get_account_info(
 
         return {
             "total_funds": round(total_funds, 4) if total_funds is not None else None,
+            "total_funds_source": total_funds_source,
+            "total_funds_ib_net_liq": round(ib_net_liq, 4) if ib_net_liq is not None else None,
             "allocated_funds": round(equity, 4) if equity is not None else None,
             "equity": round(equity, 4) if equity is not None else None,
             "available_funds": round(available_funds, 4) if available_funds is not None else None,

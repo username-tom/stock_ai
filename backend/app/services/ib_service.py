@@ -125,7 +125,9 @@ class _IBApiApp(EWrapper, EClient):
                     "exchange": contract.exchange,
                     "quantity": pos,
                     "avg_cost": round(avgCost, 4),
-                    "market_value": round(pos * avgCost, 2),
+                    "market_price": None,
+                    "last_price": None,
+                    "market_value": None,
                 }
             )
 

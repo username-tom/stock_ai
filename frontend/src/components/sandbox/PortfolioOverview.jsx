@@ -189,6 +189,17 @@ export default function PortfolioOverview({
       }
     })
   }, [positions, isSimulated, ibPositionsBySymbol])
+  const resolveMarketPrice = (pos, fallbackQuote = quotes?.[pos.symbol]) => {
+    const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
+    const marketValuePrice = Math.abs(Number(pos?.shares ?? 0)) > 0 && Number.isFinite(Number(pos.market_value)) && Math.abs(Number(pos.market_value)) > 0
+      ? Math.abs(Number(pos.market_value) / Number(pos.shares ?? 1))
+      : null
+    const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
+    if (!isSimulated) {
+      return ibMarketPrice
+    }
+    return fallbackQuote?.last_price ?? ibMarketPrice ?? marketValuePrice ?? Number(pos.avg_cost ?? 0)
+  }
   const effectivePieData = useMemo(() => {
     if (isSimulated) return pieData
 
@@ -196,12 +207,8 @@ export default function PortfolioOverview({
       .filter(p => Math.abs(Number(p._effShares ?? 0)) > 0)
       .map((p) => {
         const shares = Math.abs(Number(p._effShares ?? 0))
-        const avgCost = Number(p._effAvgCost ?? 0)
-        const storedMarketPrice = Number(p.market_price ?? p.last_price)
-        const marketValuePrice = shares > 0 && Number.isFinite(Number(p.market_value)) && Number(p.market_value) > 0
-          ? Number(p.market_value) / shares
-          : null
-        const mp = Number(quotes?.[p.symbol]?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost)
+        const mp = Number(resolveMarketPrice(p))
+        if (!Number.isFinite(mp) || mp <= 0) return null
         const mv = shares * mp
         return {
           symbol: p.symbol,
@@ -211,6 +218,7 @@ export default function PortfolioOverview({
           cash: 0,
         }
       })
+      .filter(Boolean)
 
     const total = held.reduce((sum, row) => sum + Number(row.market_value ?? 0), 0)
     if (total <= 0) return []
@@ -260,6 +268,8 @@ export default function PortfolioOverview({
   const ibCashValue = numOrNull(accountData?.cash_value)
   const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
   const ibRealizedPnl = numOrNull(accountData?.realized_pnl)
+  const totalFundsSource = String(accountData?.total_funds_source ?? '').toLowerCase()
+  const usingPaperCapBase = !isSimulated && activeProfile === 'paper' && totalFundsSource === 'paper_max_allocation_sum'
   const performanceBase = (() => {
     if (isSimulated) {
       const deposited = numOrNull(totalDeposited)
@@ -272,7 +282,7 @@ export default function PortfolioOverview({
     const cash = numOrNull(ibCashValue)
     return (cash != null && cash > 0) ? cash : null
   })()
-  const performanceBaseLabel = isSimulated ? 'deposited' : 'net liq'
+  const performanceBaseLabel = isSimulated ? 'deposited' : (usingPaperCapBase ? 'alloc cap' : 'net liq')
   const realizedPnlPct = performanceBase > 0 && totalRealizedPnl != null
     ? (totalRealizedPnl / performanceBase) * 100
     : null
@@ -283,12 +293,8 @@ export default function PortfolioOverview({
       const shares = Number(pos._effShares ?? 0)
       if (shares === 0) continue
       const avgCost = Number(pos._effAvgCost ?? 0)
-      const q = quotes[pos.symbol]
-      const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
-      const marketValuePrice = Math.abs(shares) > 0 && Number.isFinite(Number(pos.market_value)) && Math.abs(Number(pos.market_value)) > 0
-        ? Math.abs(Number(pos.market_value) / shares)
-        : null
-      const mp = q?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
+      const mp = resolveMarketPrice(pos, quotes[pos.symbol])
+      if (!Number.isFinite(Number(mp))) continue
       const unreal = (mp - avgCost) * shares
       if (Number.isFinite(unreal)) {
         sum += unreal
@@ -394,17 +400,137 @@ export default function PortfolioOverview({
       })
       .filter(v => v && v.date)
   }, [allTrades, isSimulated])
-  const ibRealizedBySymbol = (() => {
-    const map = new Map()
-    if (isSimulated) return map
-    for (const row of realizedTradeLog) {
-      const symbol = String(row?.symbol ?? '').trim().toUpperCase()
-      const pnl = Number(row?.pnl)
-      if (!symbol || !Number.isFinite(pnl)) continue
-      map.set(symbol, (map.get(symbol) ?? 0) + pnl)
+  const ibChartDerived = useMemo(() => {
+    if (isSimulated) {
+      return {
+        cumulative: [],
+        dailyVolume: [],
+        symbolPnl: [],
+        winLoss: null,
+        totalTrades: 0,
+        dailyPnl: null,
+        weeklyPnl: null,
+        monthlyPnl: null,
+        maxGain: 0,
+        maxDrawdown: 0,
+      }
     }
-    return map
-  })()
+
+    const toKey = (dt) => {
+      const d = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate())
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    }
+    const dayPnlMap = new Map()
+    const symbolPnlMap = new Map()
+    let wins = 0
+    let losses = 0
+    let breakeven = 0
+
+    for (const row of realizedTradeLog) {
+      const key = toKey(row.date)
+      dayPnlMap.set(key, (dayPnlMap.get(key) ?? 0) + Number(row.pnl ?? 0))
+      const symbol = String(row.symbol ?? '').trim().toUpperCase()
+      if (symbol) symbolPnlMap.set(symbol, (symbolPnlMap.get(symbol) ?? 0) + Number(row.pnl ?? 0))
+      if (row.pnl > 0) wins += 1
+      else if (row.pnl < 0) losses += 1
+      else breakeven += 1
+    }
+
+    const realizedBySymbolFromPositions = new Map()
+    for (const pos of breakdownPositions ?? []) {
+      const symbol = String(pos?.symbol ?? '').trim().toUpperCase()
+      const realized = Number(pos?.realized_pnl ?? 0)
+      if (!symbol || !Number.isFinite(realized)) continue
+      realizedBySymbolFromPositions.set(symbol, (realizedBySymbolFromPositions.get(symbol) ?? 0) + realized)
+    }
+    const realizedTotalFromPositions = Array.from(realizedBySymbolFromPositions.values())
+      .reduce((sum, value) => sum + Number(value ?? 0), 0)
+
+    const cumulativeRaw = Array.from(dayPnlMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .reduce((acc, [key, pnl]) => {
+        const prev = acc.length > 0 ? Number(acc[acc.length - 1].value ?? 0) : 0
+        acc.push({ date: key, value: prev + Number(pnl ?? 0) })
+        return acc
+      }, [])
+    const cumulative = (() => {
+      if (cumulativeRaw.length === 0) return []
+      const last = Number(cumulativeRaw[cumulativeRaw.length - 1]?.value ?? 0)
+      const delta = Number(realizedTotalFromPositions ?? 0) - last
+      if (!Number.isFinite(delta) || Math.abs(delta) <= 1e-9) return cumulativeRaw
+      return cumulativeRaw.map((pt) => ({
+        ...pt,
+        value: Number((Number(pt.value ?? 0) + delta).toFixed(4)),
+      }))
+    })()
+
+    const dailyVolumeMap = new Map()
+    for (const trade of allTrades ?? []) {
+      const status = String(trade?.status ?? '').toUpperCase()
+      if (status !== 'FILLED') continue
+      const side = String(trade?.side ?? '').toLowerCase()
+      if (side !== 'buy' && side !== 'sell') continue
+      const ts = parsePointDate(trade?.created_at)
+      if (!ts) continue
+      const total = Number(trade?.total)
+      const qty = Number(trade?.quantity)
+      const price = Number(trade?.price)
+      const amount = Number.isFinite(total) && total > 0
+        ? total
+        : ((Number.isFinite(qty) && Number.isFinite(price) && qty > 0 && price > 0) ? qty * price : 0)
+      if (amount <= 0) continue
+      const key = toKey(ts)
+      if (!dailyVolumeMap.has(key)) dailyVolumeMap.set(key, { date: key, buy: 0, sell: 0 })
+      dailyVolumeMap.get(key)[side] += amount
+    }
+    const dailyVolume = Array.from(dailyVolumeMap.values()).sort((a, b) => a.date.localeCompare(b.date))
+
+    const symbolPnl = Array.from(realizedBySymbolFromPositions.entries())
+      .map(([symbol, value]) => ({ symbol, realized_pnl: Number(value ?? 0) }))
+      .sort((a, b) => b.realized_pnl - a.realized_pnl)
+
+    const todayKey = toKey(todayStart)
+    const weekStartKey = toKey(weekStart)
+    const monthStartKey = toKey(monthStart)
+    let dailyPnlValue = null
+    let weeklyPnlValue = null
+    let monthlyPnlValue = null
+    if (dayPnlMap.size > 0) {
+      dailyPnlValue = Number(dayPnlMap.get(todayKey) ?? 0)
+      weeklyPnlValue = 0
+      monthlyPnlValue = 0
+      for (const [key, pnl] of dayPnlMap.entries()) {
+        if (key >= weekStartKey) weeklyPnlValue += Number(pnl ?? 0)
+        if (key >= monthStartKey) monthlyPnlValue += Number(pnl ?? 0)
+      }
+    }
+
+    let maxGainValue = 0
+    let maxDrawdownValue = 0
+    if (cumulative.length > 0) {
+      let peak = Number(cumulative[0].value ?? 0)
+      for (const pt of cumulative) {
+        const value = Number(pt.value ?? 0)
+        if (value > maxGainValue) maxGainValue = value
+        if (value > peak) peak = value
+        const drawdown = peak - value
+        if (drawdown > maxDrawdownValue) maxDrawdownValue = drawdown
+      }
+    }
+
+    return {
+      cumulative,
+      dailyVolume,
+      symbolPnl,
+      winLoss: { wins, losses, breakeven },
+      totalTrades: realizedTradeLog.length,
+      dailyPnl: dailyPnlValue,
+      weeklyPnl: weeklyPnlValue,
+      monthlyPnl: monthlyPnlValue,
+      maxGain: maxGainValue,
+      maxDrawdown: maxDrawdownValue,
+    }
+  }, [isSimulated, realizedTradeLog, allTrades, parsePointDate, todayStart, weekStart, monthStart, breakdownPositions])
   const realizedTradeDaysFallback = new Set(realizedTradeLog.map(t => t.date.toISOString().slice(0, 10))).size
   const realizedPnlSumFallback = realizedTradeLog.reduce((sum, t) => sum + t.pnl, 0)
   const firstRealizedDateFallback = realizedTradeLog.length > 0 ? realizedTradeLog[0].date : null
@@ -530,19 +656,86 @@ export default function PortfolioOverview({
   const realizedTradeDays = realizedTradeDaysServer ?? realizedTradeDaysFallback
   const elapsedDays = elapsedTradingDaysServer ?? elapsedTradingDaysFallback
   let breakdownRealizedTotal = 0
+  let breakdownMarketValueTotal = 0
+  let breakdownUnrealizedTotal = 0
   for (const pos of breakdownPositions) {
     const symbol = String(pos.symbol ?? '').trim().toUpperCase()
     const stored = Number(pos.realized_pnl ?? 0)
-    const fallback = Number(ibRealizedBySymbol.get(symbol) ?? 0)
-    const realized = isSimulated ? stored : (Math.abs(stored) > 1e-9 ? stored : fallback)
+    const realized = stored
     if (Number.isFinite(realized)) breakdownRealizedTotal += realized
+
+    const shares = Number(pos._effShares ?? 0)
+    const avgCost = Number(pos._effAvgCost ?? 0)
+    const mp = Number(resolveMarketPrice(pos, quotes[pos.symbol]))
+    if (!Number.isFinite(shares) || shares === 0 || !Number.isFinite(mp)) continue
+    const mv = shares * mp
+    if (Number.isFinite(mv)) breakdownMarketValueTotal += mv
+    const unreal = (mp - avgCost) * shares
+    if (Number.isFinite(unreal)) breakdownUnrealizedTotal += unreal
   }
   const footerRealizedValue = isSimulated
     ? totalRealizedPnl
-    : (headlineRealized ?? breakdownRealizedTotal)
+    : breakdownRealizedTotal
+  const footerMarketValue = isSimulated ? totalEquity : breakdownMarketValueTotal
+  const footerUnrealizedValue = isSimulated
+    ? headlineUnrealized
+    : breakdownUnrealizedTotal
   const footerRealizedPct = isSimulated
     ? realizedPnlPct
-    : (totalEquity > 0 ? (footerRealizedValue / totalEquity) * 100 : null)
+    : (footerMarketValue > 0 ? (footerRealizedValue / footerMarketValue) * 100 : null)
+  const footerUnrealizedPct = footerMarketValue > 0 ? (footerUnrealizedValue / footerMarketValue) * 100 : null
+  const topEquityValue = isSimulated ? totalEquity : footerMarketValue
+  const topUnrealizedValue = isSimulated ? headlineUnrealized : footerUnrealizedValue
+  const topRealizedValue = isSimulated ? headlineRealized : footerRealizedValue
+  const topUnrealizedPct = topEquityValue > 0 ? (topUnrealizedValue / topEquityValue) * 100 : null
+  const topRealizedPct = isSimulated
+    ? realizedPnlPct
+    : (topEquityValue > 0 ? (topRealizedValue / topEquityValue) * 100 : null)
+  const simulatedCurveExtremes = useMemo(() => {
+    let maxGainValue = 0
+    let maxDrawdownValue = 0
+    if (analytics?.cumulative_pnl?.length > 0) {
+      let peak = Number(analytics.cumulative_pnl[0]?.value ?? 0)
+      for (const pt of analytics.cumulative_pnl) {
+        const value = Number(pt?.value ?? 0)
+        if (value > maxGainValue) maxGainValue = value
+        if (value > peak) peak = value
+        const drawdown = peak - value
+        if (drawdown > maxDrawdownValue) maxDrawdownValue = drawdown
+      }
+    }
+    return { maxGain: maxGainValue, maxDrawdown: maxDrawdownValue }
+  }, [analytics?.cumulative_pnl])
+
+  const displayEquity = isSimulated ? totalEquity : footerMarketValue
+  const displayUnrealized = isSimulated ? headlineUnrealized : footerUnrealizedValue
+  const displayRealized = isSimulated ? headlineRealized : footerRealizedValue
+  const effectiveDailyPnl = isSimulated ? dailyPnl : ibChartDerived.dailyPnl
+  const effectiveWeeklyPnl = isSimulated ? weeklyPnl : ibChartDerived.weeklyPnl
+  const effectiveMonthlyPnl = isSimulated ? monthlyPnl : ibChartDerived.monthlyPnl
+  const effectiveDailyPnlPct = (performanceBase > 0 && effectiveDailyPnl != null) ? (effectiveDailyPnl / performanceBase) * 100 : null
+  const effectiveWeeklyPnlPct = (performanceBase > 0 && effectiveWeeklyPnl != null) ? (effectiveWeeklyPnl / performanceBase) * 100 : null
+  const effectiveMonthlyPnlPct = (performanceBase > 0 && effectiveMonthlyPnl != null) ? (effectiveMonthlyPnl / performanceBase) * 100 : null
+  const effectiveDailyAnnualizedPct = annualizePnlForPeriod(effectiveDailyPnl, 1)
+  const effectiveWeeklyAnnualizedPct = annualizePnlForPeriod(effectiveWeeklyPnl, 5)
+  const effectiveMonthlyAnnualizedPct = annualizePnlForPeriod(effectiveMonthlyPnl, 21)
+  const displayAvgDailyRealizedPnl = isSimulated ? avgDailyRealizedPnl : avgDailyRealizedPnlFallback
+  const displayRealizedTradeDays = isSimulated ? realizedTradeDays : realizedTradeDaysFallback
+  const displayAnnualizedReturnPct = isSimulated ? annualizedReturnPct : annualizedReturnPctFallback
+  const displayAnnualizedReturnSource = isSimulated
+    ? annualizedReturnSource
+    : (annualizedReturnPctFallback != null ? 'ib-trade-log' : 'unavailable')
+  const displayElapsedDays = isSimulated ? elapsedDays : elapsedTradingDaysFallback
+  const effectiveMaxGain = isSimulated ? simulatedCurveExtremes.maxGain : ibChartDerived.maxGain
+  const effectiveMaxDrawdown = isSimulated ? simulatedCurveExtremes.maxDrawdown : ibChartDerived.maxDrawdown
+  const effectiveMaxGainPct = performanceBase > 0 ? (effectiveMaxGain / performanceBase) * 100 : null
+  const effectiveMaxDrawdownPct = performanceBase > 0 ? (effectiveMaxDrawdown / performanceBase) * 100 : null
+  const chartCumulative = isSimulated ? (analytics?.cumulative_pnl ?? []) : ibChartDerived.cumulative
+  const chartDailyVolume = isSimulated ? (analytics?.daily_volume ?? []) : ibChartDerived.dailyVolume
+  const chartSymbolPnl = isSimulated ? (analytics?.symbol_pnl ?? []) : ibChartDerived.symbolPnl
+  const chartWinLoss = isSimulated ? (analytics?.win_loss ?? null) : ibChartDerived.winLoss
+  const chartTotalTrades = isSimulated ? Number(analytics?.total_trades ?? 0) : Number(ibChartDerived.totalTrades ?? 0)
+  const chartLatestCumulative = chartCumulative.length > 0 ? Number(chartCumulative[chartCumulative.length - 1]?.value ?? 0) : 0
 
   useEffect(() => {
     if (!gainLossChartRef.current) return undefined
@@ -571,7 +764,7 @@ export default function PortfolioOverview({
       dailyMap.set(key, (dailyMap.get(key) ?? 0) + trade.pnl)
     }
 
-    if (dailyMap.size === 0 && analytics?.cumulative_pnl?.length > 1) {
+    if (dailyMap.size === 0 && isSimulated && analytics?.cumulative_pnl?.length > 1) {
       for (let i = 1; i < analytics.cumulative_pnl.length; i++) {
         const current = analytics.cumulative_pnl[i]
         const previous = analytics.cumulative_pnl[i - 1]
@@ -670,22 +863,7 @@ export default function PortfolioOverview({
     }
 
     return { granularity: chosen, data: chosenData }
-  }, [analytics?.cumulative_pnl, dateKey, gainLossChartWidth, parsePointDate, realizedTradeLog])
-
-  // Max gain & max drawdown from cumulative P&L curve
-  let maxGain = 0
-  let maxDrawdown = 0
-  if (analytics?.cumulative_pnl?.length > 0) {
-    let peak = analytics.cumulative_pnl[0].value
-    for (const pt of analytics.cumulative_pnl) {
-      if (pt.value > maxGain) maxGain = pt.value
-      if (pt.value > peak) peak = pt.value
-      const dd = peak - pt.value
-      if (dd > maxDrawdown) maxDrawdown = dd
-    }
-  }
-  const maxGainPct = performanceBase > 0 ? (maxGain / performanceBase) * 100 : null
-  const maxDrawdownPct = performanceBase > 0 ? (maxDrawdown / performanceBase) * 100 : null
+  }, [analytics?.cumulative_pnl, dateKey, gainLossChartWidth, parsePointDate, realizedTradeLog, isSimulated])
 
   const marketShareData = effectivePieData.map((entry, i) => ({
     ...entry,
@@ -707,7 +885,7 @@ export default function PortfolioOverview({
       {/* Top stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         <div className="card">
-          <div className="text-xs text-slate-500 mb-1">{isSimulated ? 'Total Funds' : 'Net Liquidation'}</div>
+          <div className="text-xs text-slate-500 mb-1">{isSimulated ? 'Total Funds' : (usingPaperCapBase ? 'Allocation Cap (Paper)' : 'Net Liquidation')}</div>
           <div className="text-xl font-bold text-slate-100">{fmtMoney(accountData?.total_funds)}</div>
           <div className="text-xs text-slate-500 mt-0.5">Available: <span className="text-emerald-400">{fmtMoney(accountData?.available_funds)}</span></div>
         </div>
@@ -718,7 +896,7 @@ export default function PortfolioOverview({
         </div>
         <div className="card">
           <div className="text-xs text-slate-500 mb-1">{isSimulated ? 'Portfolio Equity' : 'Gross Position Value'}</div>
-          <div className="text-xl font-bold text-slate-100">{fmtMoney(totalEquity)}</div>
+          <div className="text-xl font-bold text-slate-100">{fmtMoney(displayEquity)}</div>
           <div className="text-xs text-slate-500 mt-0.5">
             {isSimulated
               ? effectivePositions.filter(p => Number(p._effShares) > 0).length
@@ -726,101 +904,101 @@ export default function PortfolioOverview({
             } positions held
           </div>
         </div>
-        <div className={`card ${headlineUnrealized >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
+        <div className={`card ${displayUnrealized >= 0 ? 'border-emerald-700/20' : 'border-red-700/20'}`}>
           <div className="text-xs text-slate-500 mb-1">Unrealised P&amp;L</div>
-          <div className={`text-xl font-bold ${headlineUnrealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(headlineUnrealized)}</div>
-          {totalEquity > 0 && (
-            <div className="text-xs text-slate-500 mt-0.5">{((headlineUnrealized / totalEquity) * 100).toFixed(2)}% of equity</div>
+          <div className={`text-xl font-bold ${displayUnrealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(displayUnrealized)}</div>
+          {displayEquity > 0 && (
+            <div className="text-xs text-slate-500 mt-0.5">{((displayUnrealized / displayEquity) * 100).toFixed(2)}% of equity</div>
           )}
         </div>
-        <div className={`card ${headlineRealized != null && headlineRealized >= 0 ? 'border-emerald-700/20' : headlineRealized != null ? 'border-red-700/20' : ''}`}>
+        <div className={`card ${displayRealized != null && displayRealized >= 0 ? 'border-emerald-700/20' : displayRealized != null ? 'border-red-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Realised P&amp;L</div>
-          <div className={`text-xl font-bold ${headlineRealized == null ? 'text-slate-400' : headlineRealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{headlineRealized == null ? '—' : fmt(headlineRealized)}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{realizedPnlPct == null ? '—' : `${realizedPnlPct.toFixed(2)}% of ${performanceBaseLabel}`}</div>
+          <div className={`text-xl font-bold ${displayRealized == null ? 'text-slate-400' : displayRealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{displayRealized == null ? '—' : fmt(displayRealized)}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{topRealizedPct == null ? '—' : `${topRealizedPct.toFixed(2)}% of ${performanceBaseLabel}`}</div>
         </div>
       </div>
 
       {/* Secondary stat cards: performance metrics */}
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-        <div className={`card ${maxGain > 0 ? 'border-emerald-700/20' : ''}`}>
+        <div className={`card ${effectiveMaxGain > 0 ? 'border-emerald-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Max Gain</div>
-          <div className={`text-xl font-bold ${maxGain > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{maxGain > 0 ? fmt(maxGain) : '—'}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{maxGainPct != null && maxGain > 0 ? `${maxGainPct.toFixed(2)}% of ${performanceBaseLabel}` : 'No realised trades yet'}</div>
+          <div className={`text-xl font-bold ${effectiveMaxGain > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{effectiveMaxGain > 0 ? fmt(effectiveMaxGain) : '—'}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{effectiveMaxGainPct != null && effectiveMaxGain > 0 ? `${effectiveMaxGainPct.toFixed(2)}% of ${performanceBaseLabel}` : 'No realised trades yet'}</div>
         </div>
-        <div className={`card ${maxDrawdown > 0 ? 'border-red-700/20' : ''}`}>
+        <div className={`card ${effectiveMaxDrawdown > 0 ? 'border-red-700/20' : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Max Drawdown</div>
-          <div className={`text-xl font-bold ${maxDrawdown > 0 ? 'text-red-400' : 'text-slate-400'}`}>{maxDrawdown > 0 ? fmt(-maxDrawdown) : '—'}</div>
-          <div className="text-xs text-slate-500 mt-0.5">{maxDrawdownPct != null && maxDrawdown > 0 ? `${maxDrawdownPct.toFixed(2)}% of ${performanceBaseLabel}` : 'No drawdown recorded'}</div>
+          <div className={`text-xl font-bold ${effectiveMaxDrawdown > 0 ? 'text-red-400' : 'text-slate-400'}`}>{effectiveMaxDrawdown > 0 ? fmt(-effectiveMaxDrawdown) : '—'}</div>
+          <div className="text-xs text-slate-500 mt-0.5">{effectiveMaxDrawdownPct != null && effectiveMaxDrawdown > 0 ? `${effectiveMaxDrawdownPct.toFixed(2)}% of ${performanceBaseLabel}` : 'No drawdown recorded'}</div>
         </div>
-        <div className={`card ${avgDailyRealizedPnl != null ? (avgDailyRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+        <div className={`card ${displayAvgDailyRealizedPnl != null ? (displayAvgDailyRealizedPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Avg Daily Realised</div>
-          <div className={`text-xl font-bold ${avgDailyRealizedPnl == null ? 'text-slate-400' : avgDailyRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {avgDailyRealizedPnl == null ? '—' : fmt(avgDailyRealizedPnl)}
+          <div className={`text-xl font-bold ${displayAvgDailyRealizedPnl == null ? 'text-slate-400' : displayAvgDailyRealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {displayAvgDailyRealizedPnl == null ? '—' : fmt(displayAvgDailyRealizedPnl)}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {realizedTradeDays > 0 ? `${realizedTradeDays} realised trade day${realizedTradeDays !== 1 ? 's' : ''}` : 'No realised history yet'}
+            {displayRealizedTradeDays > 0 ? `${displayRealizedTradeDays} realised trade day${displayRealizedTradeDays !== 1 ? 's' : ''}` : 'No realised history yet'}
           </div>
         </div>
       </div>
 
       {/* Tertiary stat cards: period and long-horizon performance */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className={`card ${dailyPnl != null && dailyPnl !== 0 ? (dailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+        <div className={`card ${effectiveDailyPnl != null && effectiveDailyPnl !== 0 ? (effectiveDailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Today&apos;s P&amp;L</div>
           <div className="flex items-baseline justify-between gap-3">
-            <div className={`text-xl font-bold ${dailyPnl == null ? 'text-slate-400' : dailyPnl > 0 ? 'text-emerald-400' : dailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-              {dailyPnl == null ? '—' : fmt(dailyPnl)}
+            <div className={`text-xl font-bold ${effectiveDailyPnl == null ? 'text-slate-400' : effectiveDailyPnl > 0 ? 'text-emerald-400' : effectiveDailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+              {effectiveDailyPnl == null ? '—' : fmt(effectiveDailyPnl)}
             </div>
-            <div className={`text-sm font-semibold ${dailyAnnualizedPct == null ? 'text-slate-500' : dailyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {dailyAnnualizedPct == null ? '—' : `${dailyAnnualizedPct >= 0 ? '+' : ''}${dailyAnnualizedPct.toFixed(2)}%`}
+            <div className={`text-sm font-semibold ${effectiveDailyAnnualizedPct == null ? 'text-slate-500' : effectiveDailyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {effectiveDailyAnnualizedPct == null ? '—' : `${effectiveDailyAnnualizedPct >= 0 ? '+' : ''}${effectiveDailyAnnualizedPct.toFixed(2)}%`}
             </div>
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {dailyPnlPct != null ? `${dailyPnlPct >= 0 ? '+' : ''}${dailyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
+            {effectiveDailyPnlPct != null ? `${effectiveDailyPnlPct >= 0 ? '+' : ''}${effectiveDailyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
           </div>
         </div>
 
-        <div className={`card ${weeklyPnl != null && weeklyPnl !== 0 ? (weeklyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+        <div className={`card ${effectiveWeeklyPnl != null && effectiveWeeklyPnl !== 0 ? (effectiveWeeklyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
           <div className="text-xs text-slate-500 mb-1">This Week&apos;s P&amp;L</div>
           <div className="flex items-baseline justify-between gap-3">
-            <div className={`text-xl font-bold ${weeklyPnl == null ? 'text-slate-400' : weeklyPnl > 0 ? 'text-emerald-400' : weeklyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-              {weeklyPnl == null ? '—' : fmt(weeklyPnl)}
+            <div className={`text-xl font-bold ${effectiveWeeklyPnl == null ? 'text-slate-400' : effectiveWeeklyPnl > 0 ? 'text-emerald-400' : effectiveWeeklyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+              {effectiveWeeklyPnl == null ? '—' : fmt(effectiveWeeklyPnl)}
             </div>
-            <div className={`text-sm font-semibold ${weeklyAnnualizedPct == null ? 'text-slate-500' : weeklyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {weeklyAnnualizedPct == null ? '—' : `${weeklyAnnualizedPct >= 0 ? '+' : ''}${weeklyAnnualizedPct.toFixed(2)}%`}
+            <div className={`text-sm font-semibold ${effectiveWeeklyAnnualizedPct == null ? 'text-slate-500' : effectiveWeeklyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {effectiveWeeklyAnnualizedPct == null ? '—' : `${effectiveWeeklyAnnualizedPct >= 0 ? '+' : ''}${effectiveWeeklyAnnualizedPct.toFixed(2)}%`}
             </div>
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {weeklyPnlPct != null ? `${weeklyPnlPct >= 0 ? '+' : ''}${weeklyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
+            {effectiveWeeklyPnlPct != null ? `${effectiveWeeklyPnlPct >= 0 ? '+' : ''}${effectiveWeeklyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
           </div>
         </div>
 
-        <div className={`card ${monthlyPnl != null && monthlyPnl !== 0 ? (monthlyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
+        <div className={`card ${effectiveMonthlyPnl != null && effectiveMonthlyPnl !== 0 ? (effectiveMonthlyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
           <div className="text-xs text-slate-500 mb-1">Month-to-Date P&amp;L</div>
           <div className="flex items-baseline justify-between gap-3">
-            <div className={`text-xl font-bold ${monthlyPnl == null ? 'text-slate-400' : monthlyPnl > 0 ? 'text-emerald-400' : monthlyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-              {monthlyPnl == null ? '—' : fmt(monthlyPnl)}
+            <div className={`text-xl font-bold ${effectiveMonthlyPnl == null ? 'text-slate-400' : effectiveMonthlyPnl > 0 ? 'text-emerald-400' : effectiveMonthlyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+              {effectiveMonthlyPnl == null ? '—' : fmt(effectiveMonthlyPnl)}
             </div>
-            <div className={`text-sm font-semibold ${monthlyAnnualizedPct == null ? 'text-slate-500' : monthlyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {monthlyAnnualizedPct == null ? '—' : `${monthlyAnnualizedPct >= 0 ? '+' : ''}${monthlyAnnualizedPct.toFixed(2)}%`}
+            <div className={`text-sm font-semibold ${effectiveMonthlyAnnualizedPct == null ? 'text-slate-500' : effectiveMonthlyAnnualizedPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {effectiveMonthlyAnnualizedPct == null ? '—' : `${effectiveMonthlyAnnualizedPct >= 0 ? '+' : ''}${effectiveMonthlyAnnualizedPct.toFixed(2)}%`}
             </div>
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {monthlyPnlPct != null ? `${monthlyPnlPct >= 0 ? '+' : ''}${monthlyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
+            {effectiveMonthlyPnlPct != null ? `${effectiveMonthlyPnlPct >= 0 ? '+' : ''}${effectiveMonthlyPnlPct.toFixed(2)}% of ${performanceBaseLabel} · ann.` : 'No realised trades yet'}
           </div>
         </div>
 
         <div
-          className={`card ${annualizedReturnPct != null ? (annualizedReturnPct >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}
-          title={`Annualized return source: ${annualizedReturnSource}`}
+          className={`card ${displayAnnualizedReturnPct != null ? (displayAnnualizedReturnPct >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}
+          title={`Annualized return source: ${displayAnnualizedReturnSource}`}
         >
           <div className="text-xs text-slate-500 mb-1">Annualized Return</div>
-          <div className={`text-xl font-bold ${annualizedReturnPct == null ? 'text-slate-400' : annualizedReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {annualizedReturnPct == null ? '—' : `${annualizedReturnPct >= 0 ? '+' : ''}${annualizedReturnPct.toFixed(2)}%`}
+          <div className={`text-xl font-bold ${displayAnnualizedReturnPct == null ? 'text-slate-400' : displayAnnualizedReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {displayAnnualizedReturnPct == null ? '—' : `${displayAnnualizedReturnPct >= 0 ? '+' : ''}${displayAnnualizedReturnPct.toFixed(2)}%`}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {elapsedDays == null ? 'No realised history yet' : `${elapsedDays} trading day${elapsedDays !== 1 ? 's' : ''} from trade log`}
-            {annualizedReturnSource !== 'unavailable' ? ` · ${annualizedReturnSource}` : ''}
+            {displayElapsedDays == null ? 'No realised history yet' : `${displayElapsedDays} trading day${displayElapsedDays !== 1 ? 's' : ''} from trade log`}
+            {displayAnnualizedReturnSource !== 'unavailable' ? ` · ${displayAnnualizedReturnSource}` : ''}
           </div>
         </div>
       </div>
@@ -860,25 +1038,18 @@ export default function PortfolioOverview({
                     const shares = Number(pos._effShares ?? 0)
                     const avgCost = Number(pos._effAvgCost ?? 0)
                     const q = quotes[pos.symbol]
-                    const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
-                    const marketValuePrice = Math.abs(shares) > 0 && Number.isFinite(Number(pos.market_value)) && Math.abs(Number(pos.market_value)) > 0
-                      ? Math.abs(Number(pos.market_value) / shares)
-                      : null
-                    const mp = q?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
-                    const mv = mp * shares
+                    const mp = resolveMarketPrice(pos, q)
+                    const hasMarketPrice = Number.isFinite(Number(mp))
+                    const mv = hasMarketPrice ? (Number(mp) * shares) : null
                     const costBasis = avgCost * shares
                     const pendingCost = Number(pos.pending_avg_cost ?? 0) * Number(pos.pending_shares ?? 0)
                     const cashRemaining = isSimulated
                       ? Math.max(0, Number(pos.allocated_funds ?? 0) - (avgCost * shares + pendingCost))
                       : null
-                    const unreal = mv - costBasis
-                    const unrealPct = Math.abs(costBasis) > 0 ? (unreal / Math.abs(costBasis)) * 100 : null
-                    const symbolKey = String(pos.symbol ?? '').trim().toUpperCase()
+                    const unreal = hasMarketPrice ? ((mv ?? 0) - costBasis) : null
+                    const unrealPct = (unreal != null && Math.abs(costBasis) > 0) ? (unreal / Math.abs(costBasis)) * 100 : null
                     const storedRealized = Number(pos.realized_pnl ?? 0)
-                    const fallbackRealized = Number(ibRealizedBySymbol.get(symbolKey) ?? 0)
-                    const realizedValue = isSimulated
-                      ? storedRealized
-                      : (Math.abs(storedRealized) > 1e-9 ? storedRealized : fallbackRealized)
+                    const realizedValue = storedRealized
                     const realizedPctBase = isSimulated ? Number(pos.total_invested ?? 0) : Math.abs(costBasis)
                     const realizedPct = realizedPctBase > 0.01 ? (realizedValue / realizedPctBase) * 100 : null
                     const pd = effectivePieData.find(d => d.symbol === pos.symbol)
@@ -939,13 +1110,13 @@ export default function PortfolioOverview({
                         <td className="text-right text-slate-300 font-mono">{shares !== 0 ? shares.toFixed(3) : '—'}</td>
                         <td className="text-right text-slate-300 font-mono">{Math.abs(shares) > 0 ? fmtMoney(avgCost) : '—'}</td>
                         <td className={`text-right py-2 px-3 font-mono rounded transition-colors ${priceColor?.bgColor || ''} ${priceColor?.textColor || 'text-slate-200'}`}>
-                          {fmtMoney(mp)}
+                          {hasMarketPrice ? fmtMoney(mp) : '—'}
                         </td>
-                        <td className="text-right text-slate-200 font-mono">{shares !== 0 ? fmtMoney(mv) : '—'}</td>
+                        <td className="text-right text-slate-200 font-mono">{shares !== 0 && mv != null ? fmtMoney(mv) : '—'}</td>
                         <td className="text-right text-blue-300 font-mono">{cashRemaining != null && cashRemaining > 0 ? fmtMoney(cashRemaining) : '—'}</td>
                         <td className="text-right text-slate-400">{pd ? `${pd.pct}%` : '—'}</td>
-                        <td className={`text-right font-semibold font-mono ${unreal >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {shares !== 0
+                        <td className={`text-right font-semibold font-mono ${(unreal ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {shares !== 0 && unreal != null
                             ? `${fmt(unreal)} (${unrealPct == null ? '—' : `${unrealPct >= 0 ? '+' : ''}${unrealPct.toFixed(2)}%`})`
                             : '—'}
                         </td>
@@ -965,11 +1136,11 @@ export default function PortfolioOverview({
                     <td />
                     <td />
                     <td />
-                    <td className="text-right pt-2 font-mono text-slate-200">{fmtMoney(totalEquity)}</td>
+                    <td className="text-right pt-2 font-mono text-slate-200">{fmtMoney(footerMarketValue)}</td>
                     <td />
                     <td className="text-right pt-2">100%</td>
-                    <td className={`text-right pt-2 font-mono ${headlineUnrealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {`${fmt(headlineUnrealized)} (${totalEquity > 0 ? `${headlineUnrealized >= 0 ? '+' : ''}${((headlineUnrealized / totalEquity) * 100).toFixed(2)}%` : '—'})`}
+                    <td className={`text-right pt-2 font-mono ${footerUnrealizedValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {`${fmt(footerUnrealizedValue)} (${footerUnrealizedPct != null ? `${footerUnrealizedPct >= 0 ? '+' : ''}${footerUnrealizedPct.toFixed(2)}%` : '—'})`}
                     </td>
                     <td className={`text-right pt-2 font-mono ${footerRealizedValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                       {`${fmt(footerRealizedValue)} (${footerRealizedPct != null ? `${footerRealizedPct >= 0 ? '+' : ''}${footerRealizedPct.toFixed(2)}%` : '—'})`}
@@ -1128,11 +1299,7 @@ export default function PortfolioOverview({
               .map(p => {
                 const avgCost = Number(p._effAvgCost ?? 0)
                 const shares = Number(p._effShares ?? 0)
-                const storedMarketPrice = Number(p.market_price ?? p.last_price)
-                const marketValuePrice = shares > 0 && Number.isFinite(Number(p.market_value)) && Number(p.market_value) > 0
-                  ? Number(p.market_value) / shares
-                  : null
-                const mp = quotes[p.symbol]?.last_price ?? (Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null) ?? marketValuePrice ?? avgCost
+                const mp = resolveMarketPrice(p, quotes[p.symbol])
                 const unreal = (mp - avgCost) * shares
                 return { symbol: p.symbol, value: parseFloat(unreal.toFixed(2)) }
               })
@@ -1167,20 +1334,20 @@ export default function PortfolioOverview({
       )}
 
       {/* Analytics Charts */}
-      {analytics && analytics.total_trades > 0 && (
+      {chartTotalTrades > 0 && (
         <div className="space-y-4">
           <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Portfolio Performance Over Time</h2>
 
-          {analytics.cumulative_pnl.length > 1 && (
+          {chartCumulative.length > 1 && (
             <div className="card">
               <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Cumulative Realised P&amp;L</div>
               <div className="h-52">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={analytics.cumulative_pnl} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                  <AreaChart data={chartCumulative} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
                     <defs>
                       <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={latestCumulative >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
-                        <stop offset="95%" stopColor={latestCumulative >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0} />
+                        <stop offset="5%" stopColor={chartLatestCumulative >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0.3} />
+                        <stop offset="95%" stopColor={chartLatestCumulative >= 0 ? '#10b981' : '#ef4444'} stopOpacity={0} />
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
@@ -1194,21 +1361,21 @@ export default function PortfolioOverview({
                       labelStyle={{ color: '#94a3b8' }}
                       formatter={(v) => [`$${v >= 0 ? '+' : ''}${v.toFixed(2)}`, 'Cumulative P&L']}
                     />
-                    <Area type="monotone" dataKey="value" stroke={latestCumulative >= 0 ? '#10b981' : '#ef4444'} strokeWidth={2} fill="url(#pnlGrad)" dot={false} activeDot={{ r: 4, fill: latestCumulative >= 0 ? '#10b981' : '#ef4444' }} />
+                    <Area type="monotone" dataKey="value" stroke={chartLatestCumulative >= 0 ? '#10b981' : '#ef4444'} strokeWidth={2} fill="url(#pnlGrad)" dot={false} activeDot={{ r: 4, fill: chartLatestCumulative >= 0 ? '#10b981' : '#ef4444' }} />
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
             </div>
           )}
 
-          {(analytics.daily_volume.length > 0 || analytics.cumulative_pnl.length > 1) && (
+          {(chartDailyVolume.length > 0 || chartCumulative.length > 1) && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {analytics.daily_volume.length > 0 && (
+              {chartDailyVolume.length > 0 && (
                 <div className="card">
                   <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Daily Trade Volume</div>
                   <div className="h-48">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={analytics.daily_volume} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
+                      <BarChart data={chartDailyVolume} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
                         <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
                           tickFormatter={v => v.slice(5)} />
@@ -1268,12 +1435,12 @@ export default function PortfolioOverview({
           )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {analytics.symbol_pnl.length > 0 && (
+            {chartSymbolPnl.length > 0 && (
               <div className="card">
                 <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Realised P&amp;L by Symbol</div>
                 <div className="h-48">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={analytics.symbol_pnl} layout="vertical" margin={{ top: 0, right: 16, left: 0, bottom: 0 }}>
+                    <BarChart data={chartSymbolPnl} layout="vertical" margin={{ top: 0, right: 16, left: 0, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#334155" horizontal={false} />
                       <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false}
                         tickFormatter={v => `$${v.toFixed(0)}`} />
@@ -1283,7 +1450,7 @@ export default function PortfolioOverview({
                         formatter={(v) => [`$${v.toFixed(2)}`, 'Realised P&L']}
                       />
                       <Bar dataKey="realized_pnl" name="Realised P&L" radius={[0, 3, 3, 0]}>
-                        {analytics.symbol_pnl.map((entry) => (
+                        {chartSymbolPnl.map((entry) => (
                           <Cell key={entry.symbol} fill={entry.realized_pnl >= 0 ? '#10b981' : '#ef4444'} />
                         ))}
                       </Bar>
@@ -1293,8 +1460,8 @@ export default function PortfolioOverview({
               </div>
             )}
 
-            {analytics.win_loss && (analytics.win_loss.wins + analytics.win_loss.losses + analytics.win_loss.breakeven) > 0 && (() => {
-              const wl = analytics.win_loss
+            {chartWinLoss && (chartWinLoss.wins + chartWinLoss.losses + chartWinLoss.breakeven) > 0 && (() => {
+              const wl = chartWinLoss
               const total = wl.wins + wl.losses + wl.breakeven
               const winRate = ((wl.wins / total) * 100).toFixed(1)
               const winLossData = [{

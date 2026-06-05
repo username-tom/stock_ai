@@ -16,6 +16,7 @@ from app.database import get_db, AsyncSessionLocal
 from app.models.trade import Trade, OrderSide, OrderStatus, TradingMode
 from app.models.sandbox import SandboxPosition
 from app.routers.sandbox_router._helpers import offload_simulated_state
+from app.routers.sandbox_router._helpers import fetch_ib_market_prices
 from app.services import market_service
 from app.services.ib_service import ib_service
 from app.services.local_storage import (
@@ -217,12 +218,25 @@ async def _snapshot_ib_state(mode: str) -> None:
         ib_service.get_account_summary(),
         ib_service.get_positions(),
     )
+    market_prices = await fetch_ib_market_prices([str(p.get("symbol") or "") for p in positions])
+    enriched_positions = []
+    for position in positions:
+        symbol = str(position.get("symbol") or "").upper().strip()
+        market_price = float(market_prices.get(symbol, 0.0) or 0.0)
+        if market_price > 0:
+            position = {
+                **position,
+                "market_price": market_price,
+                "last_price": market_price,
+                "market_value": round(float(position.get("quantity") or 0.0) * market_price, 2),
+            }
+        enriched_positions.append(position)
     save_portfolio_state(mode, {
         "source": "ib",
         "mode": mode,
         "captured_at": datetime.utcnow().isoformat(),
         "account_summary": account_summary,
-        "positions": positions,
+        "positions": enriched_positions,
     })
 
 
