@@ -251,19 +251,50 @@ function CandlestickInner({
   const visibleBars = bars.slice(safeStart, safeEnd + 1)
   const n = visibleBars.length
 
-    const safePriceLines = (priceLines ?? []).filter((line) => Number.isFinite(Number(line?.price)) && Number(line.price) > 0)
+  const safePriceLines = (priceLines ?? []).filter((line) => Number.isFinite(Number(line?.price)) && Number(line.price) > 0)
 
-  /* price scale � some bars (e.g. early pre-market prints) carry only close
-     and would poison Math.min/max with NaN, so filter to finite values. */
-  const allP = visibleBars.flatMap(d => [d.low, d.high, d.close].filter(Number.isFinite))
-  if (prevClose != null) allP.push(prevClose)
-    for (const line of safePriceLines) allP.push(Number(line.price))
-  const minP = allP.length ? Math.min(...allP) : 0
-  const maxP = allP.length ? Math.max(...allP) : 1
+  /* Price scale: guard against one-off bad ticks (e.g. rogue wick) that can
+     flatten the whole chart. For intraday windows with enough bars, use an
+     IQR fence to ignore extreme outliers when computing axis bounds. */
+  const barPrices = visibleBars.flatMap(d => [d.low, d.high, d.close].filter(Number.isFinite))
+  const refPrices = []
+  if (prevClose != null) refPrices.push(prevClose)
+  for (const line of safePriceLines) refPrices.push(Number(line.price))
+
+  let scalePrices = [...barPrices, ...refPrices]
+  if (isIntraday && barPrices.length >= 40) {
+    const sorted = [...barPrices].sort((a, b) => a - b)
+    const quantile = (arr, q) => {
+      if (!arr.length) return null
+      const pos = (arr.length - 1) * q
+      const loIdx = Math.floor(pos)
+      const hiIdx = Math.ceil(pos)
+      if (loIdx === hiIdx) return arr[loIdx]
+      const w = pos - loIdx
+      return arr[loIdx] * (1 - w) + arr[hiIdx] * w
+    }
+    const q1 = quantile(sorted, 0.25)
+    const q3 = quantile(sorted, 0.75)
+    const iqr = (q3 ?? 0) - (q1 ?? 0)
+    if (Number.isFinite(iqr) && iqr > 0) {
+      const lowFence = q1 - iqr * 3
+      const highFence = q3 + iqr * 3
+      const filteredBars = barPrices.filter((p) => p >= lowFence && p <= highFence)
+      if (filteredBars.length >= Math.max(20, Math.floor(barPrices.length * 0.85))) {
+        scalePrices = [...filteredBars, ...refPrices]
+      }
+    }
+  }
+
+  const minP = scalePrices.length ? Math.min(...scalePrices) : 0
+  const maxP = scalePrices.length ? Math.max(...scalePrices) : 1
   const padP = (maxP - minP) * 0.06 || 1
   const lo   = minP - padP
   const hi   = maxP + padP
-  const pToY = (p) => PAD_TOP + plotH - ((p - lo) / (hi - lo)) * plotH
+  const pToY = (p) => {
+    const clamped = Math.max(lo, Math.min(hi, p))
+    return PAD_TOP + plotH - ((clamped - lo) / (hi - lo)) * plotH
+  }
 
   /* volume scale */
   const maxVol = Math.max(...visibleBars.map(d => d.volume ?? 0), 1)

@@ -3,7 +3,6 @@ import { useSearchParams, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { getBulkQuotes, getHistory, getIBStatus } from '../api/client'
 import { useMarketOpen } from '../hooks/useMarketOpen'
-import { isOpeningFrenzyWindow } from '../utils/marketHours'
 import { useWatchlist } from '../hooks/useWatchlist'
 import { useAppSettings } from '../hooks/useAppSettings'
 import WatchlistPanel from './dashboard/WatchlistPanel'
@@ -288,6 +287,7 @@ export default function Dashboard() {
     staleTime: 15_000,
   })
   const ibConnected = ibStatus?.connected === true
+  const ibHasLiveMarketData = Number(ibStatus?.market_data_type) === 1
 
   // Consume ?symbol= param on navigation from sandbox.
   // Guard with pathname === '/' so this panel doesn't strip params
@@ -357,31 +357,15 @@ export default function Dashboard() {
   // Feed quotesMap back into the hook so market_state signals are used
   useEffect(() => { setQuotesMapForHook(quotesMap ?? null) }, [quotesMap])
 
-  // 5-second candles are only useful around the open: pre-market warmup so we
-  // can stage orders, and the first hour of trading when price action is
-  // frenzied. Outside that window we revert to 1-minute bars so we stop
-  // hammering IB for 5s data we don't need. Recomputed each minute below.
-  const [inOpeningWindow, setInOpeningWindow] = useState(() => isOpeningFrenzyWindow())
-  useEffect(() => {
-    const id = setInterval(() => {
-      setInOpeningWindow(prev => {
-        const next = isOpeningFrenzyWindow()
-        return next !== prev ? next : prev
-      })
-    }, 60_000)
-    return () => clearInterval(id)
-  }, [])
-
   const fiveSecActive =
-    useFiveSec && ibConnected && marketOpen && inOpeningWindow &&
+    useFiveSec && ibConnected && ibHasLiveMarketData &&
     chartType === 'candles' && chartPeriod === '1d'
   const chartInterval = fiveSecActive ? '5s' : (intervalHints[chartPeriod] ?? '1d')
 
-  // Reflect the auto-revert in the toggle state so the button shows it's off
-  // once the market closes or we leave the opening frenzy window.
+  // Reflect capability changes in toggle state.
   useEffect(() => {
-    if (useFiveSec && (!marketOpen || !inOpeningWindow)) setUseFiveSec(false)
-  }, [useFiveSec, marketOpen, inOpeningWindow])
+    if (useFiveSec && (!ibConnected || !ibHasLiveMarketData)) setUseFiveSec(false)
+  }, [useFiveSec, ibConnected, ibHasLiveMarketData])
 
   const shortPeriod = ['1d', '2d', '5d', '2w'].includes(chartPeriod)
   // 5s bars need a much faster refresh; 1m+ falls back to user-configured cadence.
@@ -556,7 +540,7 @@ export default function Dashboard() {
               ibConnected={ibConnected}
               useFiveSec={useFiveSec}
               setUseFiveSec={setUseFiveSec}
-              fiveSecAvailable={ibConnected && marketOpen && inOpeningWindow}
+              fiveSecAvailable={ibConnected && ibHasLiveMarketData}
             />
           </div>
         </div>

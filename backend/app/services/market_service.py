@@ -416,8 +416,63 @@ def _ib_disk_cache_path(symbol: str, bar_size: str, what_to_show: str, use_rth: 
     return _IB_HIST_DISK_CACHE_DIR / f"{symbol.upper()}__{safe_bar}__{what_to_show.upper()}__{int(use_rth)}.json"
 
 
+def _ib_disk_cache_base_name(symbol: str, bar_size: str, what_to_show: str, use_rth: bool) -> str:
+    safe_bar = bar_size.strip().lower().replace(" ", "_")
+    return f"{symbol.upper()}__{safe_bar}__{what_to_show.upper()}__{int(use_rth)}"
+
+
+def _ib_should_split_weekly(bar_size: str) -> bool:
+    return bar_size.strip().lower() == "5 secs"
+
+
+def _ib_weekly_cache_path(
+    symbol: str,
+    bar_size: str,
+    what_to_show: str,
+    use_rth: bool,
+    iso_year: int,
+    iso_week: int,
+) -> Path:
+    base = _ib_disk_cache_base_name(symbol, bar_size, what_to_show, use_rth)
+    return _IB_HIST_DISK_CACHE_DIR / f"{base}__week-{iso_year:04d}-{iso_week:02d}.json"
+
+
+def _ib_weekly_cache_glob(symbol: str, bar_size: str, what_to_show: str, use_rth: bool) -> str:
+    base = _ib_disk_cache_base_name(symbol, bar_size, what_to_show, use_rth)
+    return f"{base}__week-*.json"
+
+
 def _ib_disk_cache_load(symbol: str, bar_size: str, what_to_show: str, use_rth: bool) -> list[dict]:
     """Return persisted bars from disk, or [] on any error."""
+    if _ib_should_split_weekly(bar_size):
+        bars: list[dict] = []
+        try:
+            pattern = _ib_weekly_cache_glob(symbol, bar_size, what_to_show, use_rth)
+            weekly_paths = sorted(_IB_HIST_DISK_CACHE_DIR.glob(pattern))
+            for weekly_path in weekly_paths:
+                data = json.loads(weekly_path.read_text(encoding="utf-8"))
+                weekly_bars = data.get("bars", [])
+                if isinstance(weekly_bars, list):
+                    bars.extend(weekly_bars)
+        except Exception:
+            return []
+
+        # Backward compatibility: if no weekly shards exist yet, read legacy
+        # monolithic cache file.
+        if not bars:
+            path = _ib_disk_cache_path(symbol, bar_size, what_to_show, use_rth)
+            if not path.exists():
+                return []
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                legacy_bars = data.get("bars", [])
+                if isinstance(legacy_bars, list):
+                    bars.extend(legacy_bars)
+            except Exception:
+                return []
+
+        return _ib_merge_bars([], bars)
+
     path = _ib_disk_cache_path(symbol, bar_size, what_to_show, use_rth)
     if not path.exists():
         return []
@@ -437,6 +492,48 @@ def _ib_disk_cache_save(
     """Persist *bars* to disk (runs in executor — must be thread-safe)."""
     try:
         _IB_HIST_DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        if _ib_should_split_weekly(bar_size):
+            deduped = _ib_merge_bars([], bars)
+            grouped: dict[tuple[int, int], list[dict]] = {}
+            for bar in deduped:
+                dt = _parse_ib_bar_datetime(bar.get("date"))
+                if dt is None:
+                    continue
+                iso = dt.astimezone(_ET).isocalendar()
+                key = (int(iso.year), int(iso.week))
+                grouped.setdefault(key, []).append(bar)
+
+            for (iso_year, iso_week), week_bars in grouped.items():
+                week_path = _ib_weekly_cache_path(
+                    symbol,
+                    bar_size,
+                    what_to_show,
+                    use_rth,
+                    iso_year,
+                    iso_week,
+                )
+                payload = {
+                    "symbol": symbol.upper(),
+                    "bar_size": bar_size,
+                    "what_to_show": what_to_show.upper(),
+                    "use_rth": int(use_rth),
+                    "bucket": f"{iso_year:04d}-W{iso_week:02d}",
+                    "saved_at": time.time(),
+                    "bars": week_bars,
+                }
+                week_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            # Best-effort cleanup of legacy single-file cache once weekly
+            # shards are available.
+            legacy_path = _ib_disk_cache_path(symbol, bar_size, what_to_show, use_rth)
+            try:
+                if legacy_path.exists():
+                    legacy_path.unlink()
+            except Exception:
+                pass
+            return
+
         path = _ib_disk_cache_path(symbol, bar_size, what_to_show, use_rth)
         payload = {
             "symbol": symbol.upper(),
@@ -1046,6 +1143,19 @@ def _merge_ib_onto_yf(ib_result: dict, yf_result: dict) -> dict:
     if not yf_bars:
         return ib_result
 
+    # If IB is returning second-level intraday bars (e.g. 5s), do not stitch
+    # onto Yahoo's minute bars. Mixing these granularities collapses/warps the
+    # timeline on the dashboard. Prefer pure IB in this case.
+    has_ib_seconds = any(
+        isinstance(bar.get("date"), str) and re.match(r"^\d{2}/\d{2} \d{2}:\d{2}:\d{2}$", bar["date"])
+        for bar in ib_bars
+    )
+    if has_ib_seconds:
+        result = dict(ib_result)
+        if result.get("prev_close") is None and yf_result.get("prev_close") is not None:
+            result["prev_close"] = yf_result.get("prev_close")
+        return result
+
     ib_by_date: dict[str, dict] = {b["date"]: b for b in ib_bars}
 
     # Walk YF bars in order; replace with IB where available, keep YF otherwise.
@@ -1081,6 +1191,8 @@ def _merge_ib_onto_yf(ib_result: dict, yf_result: dict) -> dict:
     for bar in ib_bars:
         if bar["date"] not in seen and bar["date"][:5] in seen_days:
             merged.append(bar)
+
+    merged.sort(key=lambda b: b.get("date", ""))
 
     result: dict = {"data": merged}
     prev_close = ib_result.get("prev_close") or yf_result.get("prev_close")

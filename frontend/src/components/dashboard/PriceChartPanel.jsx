@@ -211,8 +211,8 @@ export default function PriceChartPanel({
             disabled={!fiveSecAvailable}
             title={
               fiveSecAvailable
-                ? 'Stream 5-second IB bars (active only during the open warmup + first hour, 09:15–10:30 ET)'
-                : '5s bars are only available during the open warmup + first hour (09:15–10:30 ET)'
+                ? 'Stream 5-second IB bars (requires IB connection with live market data)'
+                : '5s bars require IB connection with live market data enabled (market_data_type=1)'
             }
             className={`px-2 py-1 text-xs rounded-md border transition-colors ${
               !fiveSecAvailable
