@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { getQuote, searchSymbols } from '../api/client'
 import { setSetting } from './useAppSettings'
 
@@ -36,6 +36,16 @@ export function useWatchlist() {
   const addDebounce = useRef(null)
   const dragItem = useRef(null)
   const dragOver = useRef(null)
+
+  useEffect(() => {
+    const sync = () => setWatchlist(loadWatchlist())
+    window.addEventListener('watchlist-updated', sync)
+    window.addEventListener('storage', sync)
+    return () => {
+      window.removeEventListener('watchlist-updated', sync)
+      window.removeEventListener('storage', sync)
+    }
+  }, [])
 
   const updateWatchlist = (next) => {
     const trimmed = next.slice(0, WATCHLIST_SYMBOL_LIMIT)

@@ -334,6 +334,11 @@ export default function Dashboard() {
     if (!next.includes(chartSymbol)) setChartSymbol(next[0] ?? '')
   }
 
+  useEffect(() => {
+    if (chartSymbol && watchlist.includes(chartSymbol)) return
+    setChartSymbol(watchlist[0] ?? '')
+  }, [chartSymbol, watchlist])
+
   // marketOpen is initialized from clock; updates again once quotesMap arrives
   const [quotesMapForHook, setQuotesMapForHook] = useState(null)
   const marketOpen = useMarketOpen(quotesMapForHook)

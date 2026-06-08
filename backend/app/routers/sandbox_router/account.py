@@ -91,7 +91,9 @@ async def get_account_info(
         realized_pnl = _to_float("RealizedPnL")
 
         if requested_profile == "paper":
-            positions_res = await db.execute(select(SandboxPosition))
+            positions_res = await db.execute(
+                select(SandboxPosition).where(SandboxPosition.is_on_watchlist.is_(True))
+            )
             local_positions = positions_res.scalars().all()
             cap_total = _sum_position_max_allocations(local_positions, ib_net_liq)
             if cap_total is not None and cap_total > 0:

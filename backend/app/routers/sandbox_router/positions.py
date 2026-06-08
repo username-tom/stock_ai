@@ -214,7 +214,10 @@ async def get_positions(
         watched_local_symbols = {
             p.symbol for p in local_rows if p.symbol and bool(getattr(p, "is_on_watchlist", True))
         }
-        symbols = sorted(watched_local_symbols | set(ib_by_symbol.keys()))
+        hidden_local_symbols = {
+            p.symbol for p in local_rows if p.symbol and not bool(getattr(p, "is_on_watchlist", True))
+        }
+        symbols = sorted((watched_local_symbols | set(ib_by_symbol.keys())) - hidden_local_symbols)
         enriched = await asyncio.gather(
             *[_to_position(symbol, ib_by_symbol.get(symbol)) for symbol in symbols],
             return_exceptions=False,
@@ -406,8 +409,14 @@ async def update_position(symbol: str, req: UpdatePositionRequest, db: AsyncSess
 
 
 @router.delete("/positions/{symbol}")
-async def remove_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
-    if ib_service.is_connected:
+async def remove_symbol(
+    symbol: str,
+    profile: Optional[str] = Query(default=None, pattern=r"^(simulated|paper|live)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    requested_profile = (profile or (settings.TRADING_MODE if ib_service.is_connected else "simulated") or "simulated").lower()
+    use_ib = requested_profile in {"paper", "live"} and ib_service.is_connected
+    if use_ib:
         ensure_sandbox_write_allowed(allow_while_ib=True)
     else:
         ensure_sandbox_write_allowed()
@@ -417,7 +426,7 @@ async def remove_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
     if not pos:
         raise HTTPException(404, "Position not found.")
 
-    if ib_service.is_connected:
+    if use_ib:
         # In IB mode this is a watchlist removal, not a hard delete.
         # Return any idle allocation back to the unallocated pool.
         settled_cost = float(pos.shares or 0.0) * float(pos.avg_cost or 0.0)
@@ -442,7 +451,7 @@ async def remove_symbol(symbol: str, db: AsyncSession = Depends(get_db)):
     return {
         "status": "ok",
         "symbol": symbol,
-        "watchlist_removed": bool(ib_service.is_connected),
+        "watchlist_removed": bool(use_ib),
     }
 
 

@@ -170,6 +170,7 @@ export default function SandboxSidebar({
     mutationFn: p => addSandboxSymbol(p),
     onSuccess: d => {
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       if (!ibMode) {
         onAddIbWatchlistSymbol?.(d.symbol)
       }
@@ -222,6 +223,7 @@ export default function SandboxSidebar({
       await addSandboxSymbol({ symbol, strategy_name: null, allocated_funds: 0 }).catch(() => {})
     }
     qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+    qc.invalidateQueries({ queryKey: ['sandbox-account'] })
     setAddingWatchlist(false)
   }
 

@@ -5,7 +5,7 @@ import {
   ClockIcon, SignalIcon, ExclamationTriangleIcon, ArrowTopRightOnSquareIcon,
   BanknotesIcon, ArrowsRightLeftIcon, ArrowPathIcon, ChevronDownIcon,
 } from '@heroicons/react/24/outline'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getScripts, getHistory, getSandboxFundEvents, getTopOfBook } from '../../api/client'
@@ -63,6 +63,7 @@ export default function PositionDetail({
   onPredictorSellCancelled = null,
 }) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const appSettings = useAppSettings()
   const openOrdersPanelEnabled = appSettings.open_orders_panel_enabled !== false
   const openOrdersCountdownEnabled = appSettings.open_orders_countdown_enabled !== false
@@ -75,15 +76,21 @@ export default function PositionDetail({
   const { data: histData } = useQuery({
     queryKey: ['history', selectedSymbol, '1d', '1m'],
     queryFn: () => getHistory(selectedSymbol, '1d', '1m'),
-    staleTime: 60000,
+    staleTime: 120000,
+    gcTime: 1800000,
+    initialData: () => queryClient.getQueryData(['history', selectedSymbol, '1d', '1m']),
     refetchInterval: appSettings.portfolio_detail_ms,
+    refetchIntervalInBackground: true,
     enabled: !!selectedSymbol,
   })
   const { data: topOfBook } = useQuery({
     queryKey: ['top-of-book', selectedSymbol, ibMode ?? 'simulated'],
     queryFn: () => getTopOfBook(selectedSymbol),
     staleTime: 5000,
+    gcTime: 1800000,
+    initialData: () => queryClient.getQueryData(['top-of-book', selectedSymbol, ibMode ?? 'simulated']),
     refetchInterval: appSettings.portfolio_detail_ms,
+    refetchIntervalInBackground: true,
     enabled: !!selectedSymbol,
   })
   const chartData = histData?.data ?? []

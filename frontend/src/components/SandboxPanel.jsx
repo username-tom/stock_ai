@@ -14,6 +14,7 @@ import {
   getBulkQuotes, getIBStatus, connectIB, disconnectIB, setIBMode,
   placeOrder, getTradeHistory,
   getSymbolSectors,
+  getHistory, getTopOfBook,
   resetIBPaperPortfolio,
   getIBPositions, getIBOrders,
   getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
@@ -202,6 +203,7 @@ export default function SandboxPanel() {
   const tradeFirstSeenRef = useRef({})
   const ibSyncFirstSeenRef = useRef({})
   const ibMissingPriceRetryAtRef = useRef(0)
+  const predictorWarmCacheRef = useRef(new Set())
   const prevIbSessionRef = useRef({ connected: false, mode: null })
   const prevProfileRef = useRef('simulated')
   const activeProfileRef = useRef('simulated')
@@ -254,6 +256,10 @@ export default function SandboxPanel() {
   })
   const hasPrimaryData = Boolean(accountData) && Boolean(posData)
   const rawPositions = posData?.positions ?? []
+  const visibleRawPositions = useMemo(
+    () => rawPositions.filter(p => p?.is_on_watchlist !== false),
+    [rawPositions],
+  )
 
   // Force-refresh table/account payloads immediately on profile transition
   // (simulated <-> paper/live and paper <-> live), rather than waiting for
@@ -280,7 +286,7 @@ export default function SandboxPanel() {
   // Ensure every sidebar stock stays in dashboard watchlist, prioritizing
   // currently visible sidebar symbols when the list is at capacity.
   useEffect(() => {
-    const sidebarSymbols = normalizeSymbolList((rawPositions ?? []).map(p => p?.symbol))
+    const sidebarSymbols = normalizeSymbolList((visibleRawPositions ?? []).map(p => p?.symbol))
     if (!sidebarSymbols.length) return
     const current = readDashboardWatchlist()
     const next = mergePinnedWatchlist(current, sidebarSymbols)
@@ -288,23 +294,23 @@ export default function SandboxPanel() {
     if (!changed) return
     writeDashboardWatchlist(next)
     setIbWatchlistSymbols(next)
-  }, [rawPositions])
+  }, [visibleRawPositions])
 
   // Always include all IB position symbols in the symbols array for quote fetching
   const symbols = useMemo(() => {
-    const baseSymbols = rawPositions.map(p => p.symbol)
+    const baseSymbols = visibleRawPositions.map(p => p.symbol)
     let ibSymbols = []
     if (ibConnected && ibPositionsData?.positions) {
       ibSymbols = ibPositionsData.positions.map(p => p.symbol)
     }
     const merged = [...baseSymbols, ...ibWatchlistSymbols, ...ibSymbols]
     return [...new Set(merged.filter(Boolean))]
-  }, [ibConnected, rawPositions, ibWatchlistSymbols, ibPositionsData])
+  }, [ibConnected, visibleRawPositions, ibWatchlistSymbols, ibPositionsData])
 
   const quoteSymbols = useMemo(() => {
     if (hasPrimaryData) return symbols
     // Keep startup quote workload small so account/positions render first.
-    const owned = rawPositions
+    const owned = visibleRawPositions
       .filter(p => Number(p?.shares ?? 0) > 0 || Number(p?.allocated_funds ?? 0) > 0)
       .map(p => p.symbol)
     return normalizeSymbolList([
@@ -312,7 +318,7 @@ export default function SandboxPanel() {
       ...owned,
       ...ibWatchlistSymbols.slice(0, 4),
     ]).slice(0, 8)
-  }, [hasPrimaryData, symbols, rawPositions, selectedSymbol, ibWatchlistSymbols])
+  }, [hasPrimaryData, symbols, visibleRawPositions, selectedSymbol, ibWatchlistSymbols])
 
   const { data: learnerData } = useQuery({
     queryKey: ['sandbox-learner-insights', symbols.join(',')],
@@ -325,8 +331,8 @@ export default function SandboxPanel() {
     const learnerBySymbol = learnerData?.insights ?? {}
     const applyLearner = pos => ({ ...pos, ...(learnerBySymbol[pos.symbol] ?? {}) })
 
-    const bySymbol = new Map(rawPositions.map(p => [p.symbol, p]))
-    const merged = rawPositions.map(applyLearner)
+    const bySymbol = new Map(visibleRawPositions.map(p => [p.symbol, p]))
+    const merged = visibleRawPositions.map(applyLearner)
     for (const sym of ibWatchlistSymbols) {
       if (bySymbol.has(sym)) continue
       merged.push({
@@ -353,7 +359,7 @@ export default function SandboxPanel() {
       })
     }
     return merged
-  }, [rawPositions, ibWatchlistSymbols, learnerData?.insights])
+  }, [visibleRawPositions, ibWatchlistSymbols, learnerData?.insights])
   const { data: quotesData } = useQuery({
     queryKey: ['sandbox-quotes', quoteSymbols.join(',')],
     queryFn: () => quoteSymbols.length ? getBulkQuotes(quoteSymbols) : Promise.resolve({}),
@@ -376,7 +382,7 @@ export default function SandboxPanel() {
   }
   useEffect(() => {
     if (activeProfile === 'simulated') return
-    const hasMissingHeldPrice = rawPositions.some((p) => {
+    const hasMissingHeldPrice = visibleRawPositions.some((p) => {
       const shares = Number(p?.shares ?? 0)
       if (Math.abs(shares) <= 0) return false
       const mp = Number(p?.market_price ?? p?.last_price)
@@ -389,7 +395,7 @@ export default function SandboxPanel() {
     qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
     qc.invalidateQueries({ queryKey: ['ib-positions'] })
     qc.invalidateQueries({ queryKey: ['sandbox-account'] })
-  }, [activeProfile, rawPositions, qc])
+  }, [activeProfile, visibleRawPositions, qc])
   const { data: sectorsData } = useQuery({
     queryKey: ['sandbox-sectors', symbols.join(',')],
     queryFn: () => symbols.length ? getSymbolSectors(symbols) : Promise.resolve({}),
@@ -406,26 +412,68 @@ export default function SandboxPanel() {
   const selectedPos = positions.find(p => p.symbol === selectedSymbol)
   const selectedPrice = selectedPos ? (getOwnedMarketPrice(selectedPos) ?? 0) : 0
 
+  // Pre-warm Trade Flow cache: prefetch history + top-of-book for selected symbol
+  // immediately, then stagger background fetches for all other positions so switching
+  // positions is nearly instant (data already in React Query cache).
+  useEffect(() => {
+    const allSymbols = positions.map(p => p.symbol).filter(Boolean)
+    if (!allSymbols.length) return
+
+    const prefetchSymbol = (sym, immediate = false) => {
+      const historyKey = ['history', sym, '1d', '1m']
+      const bookKey = ['top-of-book', sym, viewIbMode ?? 'simulated']
+      const hasHistoryCache = qc.getQueryData(historyKey)
+      const hasBookCache = qc.getQueryData(bookKey)
+      if (!immediate && hasHistoryCache && hasBookCache && predictorWarmCacheRef.current.has(sym)) {
+        return
+      }
+
+      predictorWarmCacheRef.current.add(sym)
+      void qc.prefetchQuery({
+        queryKey: historyKey,
+        queryFn: () => getHistory(sym, '1d', '1m'),
+        staleTime: 120_000,
+        gcTime: 1_800_000,
+      })
+      void qc.prefetchQuery({
+        queryKey: bookKey,
+        queryFn: () => getTopOfBook(sym),
+        staleTime: 5_000,
+        gcTime: 1_800_000,
+      })
+    }
+
+    // Selected symbol: fetch immediately (highest priority)
+    if (selectedSymbol) prefetchSymbol(selectedSymbol, true)
+
+    // Other symbols: lightly stagger to avoid flooding while still warming quickly.
+    const others = allSymbols.filter(sym => sym !== selectedSymbol)
+    const timers = others.map((sym, i) =>
+      window.setTimeout(() => prefetchSymbol(sym), (i + 1) * 150)
+    )
+    return () => timers.forEach(t => window.clearTimeout(t))
+  }, [positions, selectedSymbol, viewIbMode, qc])
+
   // portfolio calcs
   const totalEquity = useMemo(() => {
     if (activeProfile !== 'simulated') {
-      return rawPositions.reduce((s, p) => {
+      return visibleRawPositions.reduce((s, p) => {
         const mp = getOwnedMarketPrice(p)
         return s + ((Number.isFinite(Number(mp)) ? Number(mp) : 0) * Number(p.shares ?? 0))
       }, 0)
     }
-    return rawPositions.reduce((s, p) => s + (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares, 0)
-  }, [activeProfile, rawPositions, quotesData])
+    return visibleRawPositions.reduce((s, p) => s + (getOwnedMarketPrice(p) ?? p.avg_cost) * p.shares, 0)
+  }, [activeProfile, visibleRawPositions, quotesData])
   const totalRealizedPnl = useMemo(() => {
     if (activeProfile !== 'simulated') {
-      return rawPositions.reduce((s, p) => s + Number(p.realized_pnl ?? 0), 0)
+      return visibleRawPositions.reduce((s, p) => s + Number(p.realized_pnl ?? 0), 0)
     }
-    return rawPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
-  }, [activeProfile, rawPositions])
+    return visibleRawPositions.reduce((s, p) => s + (p.realized_pnl ?? 0), 0)
+  }, [activeProfile, visibleRawPositions])
 
   const totalUnrealizedPnl = useMemo(() => {
     if (activeProfile !== 'simulated') {
-      return rawPositions.reduce((s, p) => {
+      return visibleRawPositions.reduce((s, p) => {
         const mp = getOwnedMarketPrice(p)
         const avg = Number(p.avg_cost ?? 0)
         const shares = Number(p.shares ?? 0)
@@ -433,10 +481,10 @@ export default function SandboxPanel() {
         return s + (Number(mp) - avg) * shares
       }, 0)
     }
-    return rawPositions.reduce((s, p) => s + ((getOwnedMarketPrice(p) ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
-  }, [activeProfile, rawPositions, quotesData])
+    return visibleRawPositions.reduce((s, p) => s + ((getOwnedMarketPrice(p) ?? p.avg_cost) - p.avg_cost) * p.shares, 0)
+  }, [activeProfile, visibleRawPositions, quotesData])
   const pieData = useMemo(() => {
-    const active = rawPositions.filter((p) => {
+    const active = visibleRawPositions.filter((p) => {
       const shares = Number(p.shares ?? 0)
       const alloc = Number(p.allocated_funds ?? 0)
       const pendingShares = Number(p.pending_shares ?? 0)
@@ -473,7 +521,7 @@ export default function SandboxPanel() {
       const sliceValue = mv + cashRemaining
       return { symbol: p.symbol, shares, market_value: sliceValue, mv, cash: cashRemaining, pct: pct(sliceValue, total) }
     })
-  }, [activeProfile, rawPositions, quotesData])
+  }, [activeProfile, visibleRawPositions, quotesData])
   const selectedMarketValue = selectedPos ? selectedPrice * selectedPos.shares : 0
   const selectedUnrealised = selectedPos ? selectedMarketValue - selectedPos.avg_cost * selectedPos.shares : 0
 
@@ -637,11 +685,11 @@ export default function SandboxPanel() {
   const removeSymbolMut = useMutation({
     mutationFn: async (s) => {
       if (!ibConnected) {
-        return removeSandboxSymbol(s)
+        return removeSandboxSymbol(s, activeProfile)
       }
 
       // Remove from backend watchlist metadata (and release any idle allocation).
-      await removeSandboxSymbol(s)
+      await removeSandboxSymbol(s, activeProfile)
       return { symbol: s }
     },
     onSuccess: (_, symbol) => {
@@ -650,6 +698,9 @@ export default function SandboxPanel() {
       writeDashboardWatchlist(next)
       setIbWatchlistSymbols(next)
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
+      qc.invalidateQueries({ queryKey: ['ib-positions'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-account'] })
+      qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
       setSelectedSymbol(prev => (prev === symbol ? null : prev))
     },
   })
@@ -1044,6 +1095,20 @@ export default function SandboxPanel() {
     setSelectedSymbol(symbol)
     setTradeMsg(null)
     setEditingStrategy(false)
+    if (symbol) {
+      void qc.prefetchQuery({
+        queryKey: ['history', symbol, '1d', '1m'],
+        queryFn: () => getHistory(symbol, '1d', '1m'),
+        staleTime: 120_000,
+        gcTime: 1_800_000,
+      })
+      void qc.prefetchQuery({
+        queryKey: ['top-of-book', symbol, viewIbMode ?? 'simulated'],
+        queryFn: () => getTopOfBook(symbol),
+        staleTime: 5_000,
+        gcTime: 1_800_000,
+      })
+    }
   }
 
   const visibleActivities = useMemo(

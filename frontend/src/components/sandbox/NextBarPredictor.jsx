@@ -143,7 +143,9 @@ function buildLiveBar(bars, currentPrice, topOfBook) {
   const last = bars[bars.length - 1]
   const previousClose = toNumber(last?.close)
   if (!Number.isFinite(previousClose)) return null
-  const candidateClose = toNumber(currentPrice) ?? toNumber(topOfBook?.last_price) ?? previousClose
+  const current = toNumber(currentPrice)
+  const currentCandidate = Number.isFinite(current) && current > 0 ? current : null
+  const candidateClose = currentCandidate ?? toNumber(topOfBook?.last_price) ?? previousClose
   const bid = toNumber(topOfBook?.bid)
   const ask = toNumber(topOfBook?.ask)
   const envelope = [candidateClose, previousClose, bid, ask].filter(Number.isFinite)
@@ -452,6 +454,14 @@ export default function NextBarPredictor({
   }
 
   useEffect(() => {
+    setFlashCard(null)
+    setAnimatingResolution(false)
+    previousConfirmedKeyRef.current = null
+    previousImmediatePredictionRef.current = null
+    if (flashTimeoutRef.current) {
+      window.clearTimeout(flashTimeoutRef.current)
+      flashTimeoutRef.current = null
+    }
     autoTradeEntryKeyRef.current = null
     previousPositionQtyRef.current = 0
   }, [symbol])
