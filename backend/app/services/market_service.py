@@ -769,6 +769,7 @@ async def _get_ib_quote(symbol: str) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "company_name": company_name,
+        "exchange": reg_info["exchange"] if reg_info else None,
         "last_price": round(float(last_price), 4) if last_price is not None else None,
         "previous_close": round(float(prev_close), 4) if prev_close is not None else None,
         "open": round(float(open_price), 4) if open_price is not None else None,
@@ -969,6 +970,7 @@ async def get_quote(symbol: str, source_preference: str | None = None) -> dict:
         return {
             "symbol": sym,
             "company_name": company_name,
+            "exchange": reg_info["exchange"] if reg_info else None,
             "last_price": snapshot["last_price"],
             "previous_close": snapshot["previous_close"],
             "open": snapshot["open"],

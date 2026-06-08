@@ -63,7 +63,7 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
       : null
     const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
     const mp = ibMode
-      ? ibMarketPrice ?? marketValuePrice ?? null
+      ? ibMarketPrice ?? quote?.last_price ?? marketValuePrice ?? null
       : quote?.last_price ?? ibMarketPrice ?? marketValuePrice ?? (shares > 0 ? pos.avg_cost : null)
     const mpNum = Number.isFinite(Number(mp)) ? Number(mp) : null
     const equity = mpNum != null ? (mpNum * pos.shares) : null
@@ -95,6 +95,25 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
   const pendingRerollAttempts = Number(pos.pending_reroll_attempts ?? 0)
   const pendingRerollInRange = pos.pending_reroll_in_range
   const pendingRerollResult = String(pos.pending_reroll_last_result || '').toLowerCase()
+  const companyNameRaw = String(
+    quote?.long_name
+      ?? quote?.company_name
+      ?? quote?.name
+      ?? pos.company_name
+      ?? pos.name
+      ?? ''
+  ).trim()
+  const companyName = companyNameRaw || null
+  const marketLabel = String(
+    pos.exchange
+      ?? pos.primary_exchange
+      ?? pos.listing_exchange
+      ?? quote?.exchange
+      ?? quote?.primary_exchange
+      ?? quote?.listing_exchange
+      ?? quote?.market
+      ?? ''
+  ).trim().toUpperCase() || null
   const pendingRerollColorClass = pendingRerollInRange === false
     ? 'border-red-700/40 bg-red-900/20 text-red-300'
     : 'border-amber-700/40 bg-amber-900/20 text-amber-300'
@@ -130,7 +149,10 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
         className={`w-full cursor-pointer text-left px-3 py-2.5 rounded-lg border transition-colors ${isSelected ? 'bg-emerald-600/20 border-emerald-600/40' : 'border-transparent hover:bg-dark-700'}`}
       >
         <div className="flex items-center justify-between mb-0.5">
-          <span className="font-bold text-slate-100 text-sm">{pos.symbol}</span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-bold text-slate-100 text-sm">{pos.symbol}</span>
+            <span className="font-mono text-xs text-slate-300">{mp != null ? fmtMoney(mp) : '—'}</span>
+          </div>
           <div className="flex items-center gap-1.5">
             {changePct != null && (
               <span className={`text-xs font-medium ${positive ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -140,11 +162,14 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
             {pos.shares > 0 && <span className={`text-xs font-semibold ${totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(totalPnl)}</span>}
           </div>
         </div>
-        {quote?.company_name && (
-          <div className="text-xs text-slate-500 truncate mb-0.5">{quote.company_name}</div>
+        {companyName && (
+          <div className="text-xs text-slate-500 truncate mb-0.5">{companyName}</div>
         )}
-        {sector && (
-          <div className="text-[11px] text-sky-300/80 truncate mb-0.5">{sector}</div>
+        {(sector || marketLabel) && (
+          <div className="text-[11px] mb-0.5 flex items-center justify-between gap-2">
+            <span className="text-sky-300/80 truncate">{sector || '—'}</span>
+            <span className="text-slate-500 shrink-0">{marketLabel || '—'}</span>
+          </div>
         )}
         {learnerTag && (
           <div className="mb-0.5 flex items-center gap-1 flex-wrap">
@@ -167,7 +192,7 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
           </div>
         )}
         <div className="flex items-center justify-between text-xs text-slate-500">
-          <span>{pos.shares > 0 ? `${pos.shares.toFixed(4)} sh` : 'Watchlist'}</span>
+          <span>{pos.shares > 0 ? `${pos.shares.toFixed(4)} sh` : '0 shares'}</span>
           <span className="font-mono text-slate-400">
             {mp != null ? fmtMoney(mp) : '—'}
           </span>

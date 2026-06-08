@@ -169,6 +169,10 @@ _settings: dict[str, Any] = {
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
     "pending_price_drift_cancel_pct": 0.25,  # cancel/repost pending IB LMT orders when market drifts >= this % from pending limit
     "pending_cancel_after_bars": 3,       # cancel pending orders after N sentiment bars even without price drift
+    "paper_buy_mkt_after_bars": 0,        # paper-only: convert hanging BUY LMT to MKT after N bars (0 = disabled)
+    "pending_sell_tp_near_mode": "percent",  # percent | dollar
+    "pending_sell_tp_near_pct": 0.20,     # SELL only: start TP chase when top bid is within this % of TP trigger
+    "pending_sell_tp_near_value": 0.0,    # SELL only: start TP chase when top bid is within this $ of TP trigger
     "pending_repost_cooldown_seconds": 60,  # minimum wait before another drift-driven repost for the same symbol/side
     # Bar predictor (momentum gating): gate BUY/SELL signals using 1m momentum bias
     "bar_predictor_enabled": False,
@@ -487,6 +491,15 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.25) or 0.25)
             _settings["pending_cancel_after_bars"] = int(max(0, getattr(row, "pending_cancel_after_bars", 3) or 3))
+            _settings["paper_buy_mkt_after_bars"] = int(max(0, getattr(row, "paper_buy_mkt_after_bars", 0) or 0))
+            _tp_near_mode = str(getattr(row, "pending_sell_tp_near_mode", "percent") or "percent").strip().lower()
+            _settings["pending_sell_tp_near_mode"] = _tp_near_mode if _tp_near_mode in {"percent", "dollar"} else "percent"
+            _settings["pending_sell_tp_near_pct"] = float(max(0.0, getattr(row, "pending_sell_tp_near_pct", 0.20) or 0.0))
+            _settings["pending_sell_tp_near_value"] = float(max(0.0, getattr(row, "pending_sell_tp_near_value", 0.0) or 0.0))
+            _settings["paper_buy_mkt_after_bars"] = min(
+                int(_settings.get("paper_buy_mkt_after_bars", 0) or 0),
+                int(_settings.get("pending_cancel_after_bars", 0) or 0),
+            )
             _settings["pending_repost_cooldown_seconds"] = int(max(0, getattr(row, "pending_repost_cooldown_seconds", 60) or 60))
             _settings["sim_buy_fill_rate_pct"] = max(0.0, min(100.0, float(getattr(row, "sim_buy_fill_rate_pct", 80.0) or 0.0)))
             _settings["bar_predictor_enabled"] = bool(getattr(row, "bar_predictor_enabled", False))
@@ -633,6 +646,12 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.25)
         row.pending_cancel_after_bars = int(max(0, _settings.get("pending_cancel_after_bars", 3) or 3))
+        row.paper_buy_mkt_after_bars = int(max(0, _settings.get("paper_buy_mkt_after_bars", 0) or 0))
+        row.pending_sell_tp_near_mode = (
+            "dollar" if str(_settings.get("pending_sell_tp_near_mode", "percent")).strip().lower() == "dollar" else "percent"
+        )
+        row.pending_sell_tp_near_pct = float(max(0.0, _settings.get("pending_sell_tp_near_pct", 0.20) or 0.0))
+        row.pending_sell_tp_near_value = float(max(0.0, _settings.get("pending_sell_tp_near_value", 0.0) or 0.0))
         row.pending_repost_cooldown_seconds = int(max(0, _settings.get("pending_repost_cooldown_seconds", 60) or 60))
         row.sim_buy_fill_rate_pct = max(0.0, min(100.0, float(_settings.get("sim_buy_fill_rate_pct", 80.0) or 0.0)))
         row.bar_predictor_enabled = bool(_settings.get("bar_predictor_enabled", False))
@@ -678,7 +697,8 @@ def update_manager_settings(new: dict) -> dict:
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
               "ai_tag_long_tp_value", "ai_tag_long_sl_value",
               "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
-              "pending_cancel_after_bars",
+              "pending_cancel_after_bars", "paper_buy_mkt_after_bars",
+              "pending_sell_tp_near_mode", "pending_sell_tp_near_pct", "pending_sell_tp_near_value",
               "pending_repost_cooldown_seconds",
               "sim_buy_fill_rate_pct", "sim_sell_fill_rate_pct",
               "auto_trade_buy_price_offset_mode", "auto_trade_sell_price_offset_mode",
@@ -706,6 +726,34 @@ def update_manager_settings(new: dict) -> dict:
             0,
             int(_settings.get("pending_repost_cooldown_seconds", 60) or 60),
         )
+    if "pending_cancel_after_bars" in new:
+        _settings["pending_cancel_after_bars"] = max(
+            0,
+            int(_settings.get("pending_cancel_after_bars", 3) or 3),
+        )
+    if "paper_buy_mkt_after_bars" in new:
+        _settings["paper_buy_mkt_after_bars"] = max(
+            0,
+            int(_settings.get("paper_buy_mkt_after_bars", 0) or 0),
+        )
+    if "pending_sell_tp_near_mode" in new:
+        _mode = str(_settings.get("pending_sell_tp_near_mode", "percent") or "percent").strip().lower()
+        _settings["pending_sell_tp_near_mode"] = "dollar" if _mode == "dollar" else "percent"
+    if "pending_sell_tp_near_pct" in new:
+        _settings["pending_sell_tp_near_pct"] = max(
+            0.0,
+            float(_settings.get("pending_sell_tp_near_pct", 0.20) or 0.0),
+        )
+    if "pending_sell_tp_near_value" in new:
+        _settings["pending_sell_tp_near_value"] = max(
+            0.0,
+            float(_settings.get("pending_sell_tp_near_value", 0.0) or 0.0),
+        )
+    # Hard cap: paper BUY->MKT fallback cannot exceed pending timeout bars.
+    _settings["paper_buy_mkt_after_bars"] = min(
+        int(_settings.get("paper_buy_mkt_after_bars", 0) or 0),
+        int(_settings.get("pending_cancel_after_bars", 3) or 0),
+    )
     if "default_strategy_name" in new:
         _settings["default_strategy_name"] = str(_settings.get("default_strategy_name") or _INTRADAY_1M_TEMPLATE)
     if "intraday_1m_template_params" in new and not isinstance(_settings.get("intraday_1m_template_params"), dict):
@@ -2165,6 +2213,115 @@ async def _attempt_ib_eod_liquidation() -> None:
         )
 
 
+def _take_profit_limit_from_entry(
+    entry_price: float,
+    take_profit_pct: float,
+    take_profit_value: float,
+) -> float:
+    if entry_price <= 0:
+        return 0.0
+    tp_targets: list[float] = []
+    if take_profit_pct > 0.0:
+        tp_targets.append(entry_price * (1.0 + take_profit_pct / 100.0))
+    if take_profit_value > 0.0:
+        tp_targets.append(entry_price + take_profit_value)
+    if not tp_targets:
+        return 0.0
+    return round(min(tp_targets), 4)
+
+
+async def _submit_tp_sell_after_buy_fill(
+    *,
+    ib_service: Any,
+    symbol: str,
+    quantity: float,
+    buy_fill_price: float,
+    take_profit_pct: float,
+    take_profit_value: float,
+    mode: Any,
+    buy_order_id: Any = None,
+    pending_sell_symbols: set[str] | None = None,
+    trigger_log: Any = None,
+) -> None:
+    sym = str(symbol or "").upper()
+    qty = max(0.0, float(quantity or 0.0))
+    if not sym or qty <= 0.0:
+        return
+
+    if pending_sell_symbols is not None and sym in pending_sell_symbols:
+        if callable(trigger_log):
+            trigger_log(f"TP SELL skipped symbol={sym} reason=existing_pending_sell")
+        return
+
+    resolved_fill_price = float(buy_fill_price or 0.0)
+    try:
+        if buy_order_id is not None:
+            fill_prices = ib_service.get_known_order_fill_prices()
+            resolved_fill_price = float(fill_prices.get(int(buy_order_id), resolved_fill_price) or resolved_fill_price)
+    except Exception:
+        pass
+
+    tp_limit_price = _take_profit_limit_from_entry(
+        float(resolved_fill_price or 0.0),
+        float(take_profit_pct or 0.0),
+        float(take_profit_value or 0.0),
+    )
+    if tp_limit_price <= 0.0:
+        if callable(trigger_log):
+            trigger_log(f"TP SELL skipped symbol={sym} reason=tp_disabled_or_invalid")
+        return
+
+    tp_result = await ib_service.place_order(
+        symbol=sym,
+        side="SELL",
+        quantity=qty,
+        order_type="LMT",
+        limit_price=tp_limit_price,
+    )
+    if tp_result.get("error"):
+        _log_activity(
+            f"IB PM TP SELL failed after BUY fill for {sym}: {tp_result['error']}"
+        )
+        if callable(trigger_log):
+            trigger_log(
+                f"TP SELL failed symbol={sym} qty={qty:.4f} limit=${tp_limit_price:.4f} error={tp_result['error']}"
+            )
+        return
+
+    from app.models.trade import Trade, OrderSide, OrderStatus
+
+    tp_status = str(tp_result.get("status") or "").upper()
+    tp_filled = tp_status == "FILLED"
+    tp_est_pnl = round((tp_limit_price - float(resolved_fill_price or 0.0)) * qty, 4)
+    async with AsyncSessionLocal() as db:
+        db.add(Trade(
+            symbol=sym,
+            side=OrderSide.SELL,
+            quantity=qty,
+            price=tp_limit_price,
+            status=OrderStatus.FILLED if tp_filled else OrderStatus.PENDING,
+            mode=mode,
+            ib_order_id=tp_result.get("ib_order_id"),
+            strategy_name="pm_buy_fill_take_profit",
+            pnl=tp_est_pnl,
+            filled_at=datetime.now(timezone.utc) if tp_filled else None,
+        ))
+        await db.commit()
+
+    if pending_sell_symbols is not None:
+        pending_sell_symbols.add(sym)
+    _log_activity(
+        f"IB PM TP SELL submitted after BUY fill for {sym} "
+        f"x{qty:.4f} @ ${tp_limit_price:.4f}"
+    )
+    if callable(trigger_log):
+        trigger_log(
+            f"TP SELL submitted symbol={sym} qty={qty:.4f} "
+            f"limit=${tp_limit_price:.4f} from_buy_fill=${float(resolved_fill_price or 0.0):.4f} "
+            f"status={tp_status or 'UNKNOWN'} ib_order_id={tp_result.get('ib_order_id')}"
+        )
+
+
 async def _cancel_ib_pending_orders_price_moved() -> None:
     """Cancel/repost open IB LMT orders when market drifts from pending price.
 
@@ -2173,12 +2330,25 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
     a fresh limit using current-bar reference price + side-specific offsets.
     """
     from app.services.ib_service import ib_service
+    from app.config import settings as app_settings
 
     if not ib_service.is_connected:
         return
 
+    ib_mode = str(getattr(app_settings, "TRADING_MODE", "paper") or "paper").strip().lower()
+    is_paper_mode = ib_mode == "paper"
+
     open_orders = await ib_service.get_open_orders()
     active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
+    pending_sell_symbols = {
+        str(o.get("symbol") or "").upper()
+        for o in open_orders
+        if str(o.get("side") or "").upper() == "SELL"
+        and str(o.get("status") or "") in active_status
+        and float(o.get("remaining") or 0.0) > 0
+    }
+    from app.models.trade import TradingMode
+    mode = TradingMode.LIVE if str(getattr(app_settings, "TRADING_MODE", "paper") or "paper").strip().lower() == "live" else TradingMode.PAPER
 
     candidates: list[dict[str, Any]] = []
     symbols: set[str] = set()
@@ -2216,6 +2386,18 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         logger.warning("PM IB pending-cancel price fetch failed: %s", exc)
         return
 
+    book_map: dict[str, dict[str, Any]] = {}
+    if is_paper_mode and symbols:
+        try:
+            from app.services.top_of_book import get_ib_top_of_book
+
+            books = await asyncio.gather(*[get_ib_top_of_book(sym) for sym in sorted(symbols)])
+            for sym, book in zip(sorted(symbols), books):
+                if isinstance(book, dict):
+                    book_map[sym] = book
+        except Exception as exc:
+            logger.warning("PM IB pending-cancel top-of-book fetch failed: %s", exc)
+
     # Fetch IB avg costs to detect if a pending SELL has crossed the SL level.
     ib_avg_cost_map: dict[str, float] = {}
     try:
@@ -2230,6 +2412,11 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
     _sl_pct_drift = max(0.0, float(_settings.get("stop_loss_pct", 0.5) or 0.0))
     _sl_value_drift = max(0.0, float(_settings.get("stop_loss_value", 0.0) or 0.0))
     _sl_mkt_enabled_drift = bool(_settings.get("stop_loss_sell_market_enabled", True))
+    _tp_pct_reprice = max(0.0, float(_settings.get("take_profit_pct", 0.0) or 0.0))
+    _tp_value_reprice = max(0.0, float(_settings.get("take_profit_value", 0.0) or 0.0))
+    _tp_near_mode = "dollar" if str(_settings.get("pending_sell_tp_near_mode", "percent") or "percent").strip().lower() == "dollar" else "percent"
+    _tp_near_buffer_pct = max(0.0, float(_settings.get("pending_sell_tp_near_pct", 0.20) or 0.0))
+    _tp_near_buffer_value = max(0.0, float(_settings.get("pending_sell_tp_near_value", 0.0) or 0.0))
 
     def _auto_limit_price_from_reference(reference_price: float, side: str) -> float:
         if reference_price <= 0:
@@ -2247,6 +2434,15 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
             return round(max(0.01, reference_price - offset), 4)
         return round(reference_price * (1.0 - offset / 100.0), 4)
 
+    def _paper_touch_priority_limit(reference_price: float, side: str) -> float:
+        if reference_price <= 0.0:
+            return 0.0
+        side_u = str(side or "").upper()
+        tick = 0.01 if reference_price >= 1.0 else 0.0001
+        if side_u == "BUY":
+            return round(reference_price + tick, 4)
+        return round(max(tick, reference_price - tick), 4)
+
     cancelled: list[str] = []
     reposted: list[str] = []
     cooldown_skipped: list[str] = []
@@ -2254,8 +2450,11 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
     repost_events: list[dict[str, Any]] = []
     drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
     pending_cancel_after_bars = max(0, int(_settings.get("pending_cancel_after_bars", 3) or 3))
+    paper_buy_mkt_after_bars = max(0, int(_settings.get("paper_buy_mkt_after_bars", 0) or 0))
+    paper_buy_mkt_after_bars = min(paper_buy_mkt_after_bars, pending_cancel_after_bars)
     bar_minutes = _interval_to_minutes(str(_settings.get("sentiment_interval", "1m") or "1m"))
     pending_cancel_after_minutes = pending_cancel_after_bars * bar_minutes
+    paper_buy_mkt_after_minutes = paper_buy_mkt_after_bars * bar_minutes
     repost_cooldown_seconds = max(0, int(_settings.get("pending_repost_cooldown_seconds", 60) or 60))
     now_utc = datetime.now(timezone.utc)
     allow_order_reposts = _ib_order_placement_allowed_now()
@@ -2286,27 +2485,73 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
             continue
         qty = float(o.get("remaining") or o.get("quantity") or 0.0)
         limit_price = float(o.get("limit_price") or 0.0)
-        cp = float(price_map.get(symbol, 0.0))
+        cp_quote = float(price_map.get(symbol, 0.0))
+        book = book_map.get(symbol, {}) if is_paper_mode else {}
+        ask_px = float((book.get("ask") if isinstance(book, dict) else 0.0) or 0.0)
+        bid_px = float((book.get("bid") if isinstance(book, dict) else 0.0) or 0.0)
+        cp = float((ask_px if side == "BUY" else bid_px) or cp_quote)
         if cp <= 0 or limit_price <= 0:
             continue
 
         order_key = f"{symbol}:{side}"
 
         pending_expired = False
+        pending_buy_mkt_due = False
         created_at = _parse_order_created_at(o.get("created_at"))
         if created_at is not None and pending_cancel_after_minutes > 0:
             elapsed_min = max(0.0, (now_utc - created_at).total_seconds() / 60.0)
             pending_expired = elapsed_min >= pending_cancel_after_minutes
+            pending_buy_mkt_due = (
+                is_paper_mode
+                and side == "BUY"
+                and paper_buy_mkt_after_minutes > 0
+                and elapsed_min >= paper_buy_mkt_after_minutes
+            )
 
         # Cancel if market has drifted materially from the pending limit.
         drift_pct = abs(cp - limit_price) / limit_price * 100.0
         drifted = drift_pct >= drift_threshold_pct
-        if not drifted and not pending_expired:
+        tp_chase_due = False
+        tp_chase_price = 0.0
+        if side == "SELL" and bid_px > 0.0:
+            avg_cost = float(ib_avg_cost_map.get(symbol, 0.0) or 0.0)
+            if avg_cost > 0.0 and bid_px > avg_cost:
+                tp_targets: list[float] = []
+                if _tp_pct_reprice > 0.0:
+                    tp_targets.append(avg_cost * (1.0 + _tp_pct_reprice / 100.0))
+                if _tp_value_reprice > 0.0:
+                    tp_targets.append(avg_cost + _tp_value_reprice)
+                tp_trigger = min(tp_targets) if tp_targets else 0.0
+                if tp_trigger <= 0.0:
+                    near_tp = True
+                else:
+                    tp_gap = max(0.0, tp_trigger - bid_px)
+                    near_by_pct = (
+                        _tp_near_mode == "percent"
+                        and _tp_near_buffer_pct > 0.0
+                        and bid_px >= tp_trigger * (1.0 - _tp_near_buffer_pct / 100.0)
+                    )
+                    near_by_value = (
+                        _tp_near_mode == "dollar"
+                        and _tp_near_buffer_value > 0.0
+                        and tp_gap <= _tp_near_buffer_value
+                    )
+                    near_tp = (bid_px >= tp_trigger) or near_by_pct or near_by_value
+                if near_tp:
+                    tp_chase_price = (
+                        _paper_touch_priority_limit(bid_px, side)
+                        if is_paper_mode
+                        else _auto_limit_price_from_reference(bid_px, side)
+                    )
+                    if tp_chase_price > 0.0 and (limit_price - tp_chase_price) >= 0.0001:
+                        tp_chase_due = True
+
+        if not drifted and not pending_expired and not pending_buy_mkt_due and not tp_chase_due:
             continue
 
         cooldown_until = _ib_pending_repost_cooldown_until.get(order_key)
         cooldown_active = bool(cooldown_until and cooldown_until > now_utc)
-        if cooldown_active and not pending_expired:
+        if cooldown_active and not pending_expired and not pending_buy_mkt_due and not tp_chase_due:
             cooldown_skipped.append(
                 f"{symbol} {side} (cooldown until {cooldown_until.astimezone().isoformat(timespec='seconds')})"
             )
@@ -2325,7 +2570,11 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
             cancel_reason = (
                 f"timeout {pending_cancel_after_bars} bars"
                 if pending_expired
-                else f"drift {drift_pct:.2f}%: ${cp:.2f} vs ${limit_price:.2f}"
+                else (
+                    f"tp-chase near target: bid ${bid_px:.2f}, old ${limit_price:.2f}"
+                    if tp_chase_due
+                    else f"drift {drift_pct:.2f}%: ${cp:.2f} vs ${limit_price:.2f}"
+                )
             )
             cancelled.append(
                 f"{symbol} {side} id={oid} ({cancel_reason})"
@@ -2336,15 +2585,23 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                 "quantity": max(0.0, qty),
                 "price": max(0.0, limit_price),
                 "ib_order_id": oid,
-                "reason_tag": ("pm_ib_pending_cancel_timeout" if pending_expired else "pm_ib_pending_cancel_drift"),
+                "reason_tag": (
+                    "pm_ib_pending_cancel_timeout"
+                    if pending_expired
+                    else ("pm_ib_pending_cancel_tp_chase" if tp_chase_due else "pm_ib_pending_cancel_drift")
+                ),
             })
 
-            if pending_expired:
+            if pending_expired and not pending_buy_mkt_due:
                 # Timeout has precedence: cancel stale order and do not repost.
                 continue
 
             repost_qty = max(0.0, qty)
-            repost_price = _auto_limit_price_from_reference(cp, side)
+            repost_price = tp_chase_price if tp_chase_due else (
+                _paper_touch_priority_limit(cp, side)
+                if is_paper_mode and ((side == "BUY" and ask_px > 0.0) or (side == "SELL" and bid_px > 0.0))
+                else _auto_limit_price_from_reference(cp, side)
+            )
             if repost_qty <= 0.0 or repost_price <= 0.0:
                 _log_activity(
                     f"IB PM pending {side} repost skipped {symbol}: qty={repost_qty:.4f}, ref=${cp:.4f}"
@@ -2355,7 +2612,17 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
             # This makes the drift-cancel loop the SL execution vehicle when a
             # limit sell is stuck in a drift-repost cycle past the loss threshold.
             repost_order_type = "LMT"
-            repost_reason_tag = "pm_ib_pending_repost_drift"
+            repost_reason_tag = "pm_ib_pending_repost_tp_chase" if tp_chase_due else "pm_ib_pending_repost_drift"
+            if pending_buy_mkt_due and side == "BUY" and is_paper_mode:
+                repost_order_type = "MKT"
+                repost_reason_tag = "pm_ib_pending_repost_buy_mkt_fallback"
+                _log_activity(
+                    f"IB PM BUY repost upgraded to MKT for {symbol}: pending >= {paper_buy_mkt_after_bars} bars in paper mode"
+                )
+            if tp_chase_due and side == "SELL":
+                _log_activity(
+                    f"IB PM SELL TP-chase repost for {symbol}: bid ${bid_px:.2f} -> limit ${repost_price:.2f} (was ${limit_price:.2f})"
+                )
             if (
                 side == "SELL"
                 and _sl_mkt_enabled_drift
@@ -2404,6 +2671,19 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
                     "status": repost_status,
                     "reason_tag": repost_reason_tag,
                 })
+                if side == "BUY" and repost_status == "FILLED":
+                    buy_fill_price = repost_price if repost_order_type == "LMT" else cp
+                    await _submit_tp_sell_after_buy_fill(
+                        ib_service=ib_service,
+                        symbol=symbol,
+                        quantity=repost_qty,
+                        buy_fill_price=buy_fill_price,
+                        take_profit_pct=_tp_pct_reprice,
+                        take_profit_value=_tp_value_reprice,
+                        mode=mode,
+                        buy_order_id=repost_result.get("ib_order_id"),
+                        pending_sell_symbols=pending_sell_symbols,
+                    )
                 if repost_cooldown_seconds > 0:
                     _ib_pending_repost_cooldown_until[order_key] = now_utc + timedelta(seconds=repost_cooldown_seconds)
 
@@ -2849,6 +3129,35 @@ async def _process_ib_engine_signals() -> None:
         except Exception:
             account_available_funds = 0.0
 
+    crash_baseline_equity_input = float(current_equity or 0.0)
+    crash_baseline_source = "net_liq"
+    # In IB paper mode, align crash % baseline with the same allocation-cap
+    # denominator shown in portfolio stats to avoid percentage mismatch.
+    if ib_mode == "paper" and current_equity > 0.0:
+        try:
+            from sqlalchemy import select as sa_select
+
+            async with AsyncSessionLocal() as db:
+                cap_res = await db.execute(sa_select(SandboxPosition))
+                cap_positions: list[SandboxPosition] = cap_res.scalars().all()
+
+            cap_total = 0.0
+            has_cap = False
+            for p in cap_positions:
+                cap_val = float(getattr(p, "max_allocation_value", 0.0) or 0.0)
+                if cap_val <= 0.0:
+                    continue
+                has_cap = True
+                cap_amt = _position_max_allocation(p, current_equity)
+                if math.isfinite(cap_amt) and cap_amt > 0.0:
+                    cap_total += float(cap_amt)
+
+            if has_cap and cap_total > 0.0:
+                crash_baseline_equity_input = float(cap_total)
+                crash_baseline_source = "paper_alloc_cap"
+        except Exception as exc:
+            logger.warning("PM crash baseline paper-cap calc failed; using net liq: %s", exc)
+
     crash_enabled = bool(_settings.get("crash_protection_enabled", False))
     crash_mode = "dollar" if str(_settings.get("crash_protection_mode", "percent")).strip().lower() == "dollar" else "percent"
     crash_value = max(0.0, float(_settings.get("crash_protection_value", 0.0) or 0.0))
@@ -2868,11 +3177,11 @@ async def _process_ib_engine_signals() -> None:
 
     if crash_enabled and crash_value > 0.0 and not crash_triggered_today:
         # Use equity as baseline for percent-mode threshold calculation
-        if current_equity > 0.0:
+        if crash_baseline_equity_input > 0.0:
             baseline = _state.get("crash_baseline_equity")
             if not isinstance(baseline, (int, float)) or baseline <= 0.0:
-                _state["crash_baseline_equity"] = float(current_equity)
-                baseline = float(current_equity)
+                _state["crash_baseline_equity"] = float(crash_baseline_equity_input)
+                baseline = float(crash_baseline_equity_input)
         else:
             baseline = float(_state.get("crash_baseline_equity") or 0.0)
 
@@ -2895,7 +3204,7 @@ async def _process_ib_engine_signals() -> None:
             limit_str = f"{crash_value:.2f}% of account" if crash_mode == "percent" else f"${crash_value:.2f}"
             reason_str = (
                 f"daily realized gain ${daily_realized_gain:.2f} breached "
-                f"-{limit_str} loss limit (baseline equity ${baseline:.2f})"
+                f"-{limit_str} loss limit (baseline equity ${baseline:.2f}, source={crash_baseline_source})"
             )
             _state["crash_triggered_day"] = crash_day
             _state["crash_triggered_at"] = datetime.now(timezone.utc).isoformat()
@@ -3032,6 +3341,27 @@ async def _process_ib_engine_signals() -> None:
         if mode == "dollar":
             return round(max(0.01, reference_price - offset), 4)
         return round(reference_price * (1.0 - offset / 100.0), 4)
+
+    def _paper_touch_priority_limit(reference_price: float, side: str) -> float:
+        if reference_price <= 0.0:
+            return 0.0
+        side_u = str(side or "").upper()
+        tick = 0.01 if reference_price >= 1.0 else 0.0001
+        if side_u == "BUY":
+            return round(reference_price + tick, 4)
+        return round(max(tick, reference_price - tick), 4)
+
+    def _resolve_limit_price_for_order(order: dict[str, Any], reference_price: float, side: str) -> tuple[float, str]:
+        price_source = str(order.get("price_source") or "")
+        tob_source = str(order.get("top_of_book_source") or "")
+        if (
+            ib_mode == "paper"
+            and reference_price > 0.0
+            and price_source in {"ib_tob_ask", "ib_tob_bid"}
+            and tob_source
+        ):
+            return _paper_touch_priority_limit(reference_price, side), "paper_touch_priority"
+        return _auto_limit_price_from_reference(reference_price, side), "configured_offset"
 
     # Always evaluate risk exits for all held IB longs, even without fresh
     # engine signals, so SL/TP protection is PM-owned and continuously active.
@@ -3320,7 +3650,7 @@ async def _process_ib_engine_signals() -> None:
             f"dispatch symbol={symbol} side={side} qty={float(order.get('quantity') or 0.0):.4f} "
             f"ref=${reference_price:.4f} src={order.get('price_source') or 'n/a'} tob={order.get('top_of_book_source') or '-'}"
         )
-        limit_price = _auto_limit_price_from_reference(reference_price, side)
+        limit_price, limit_price_policy = _resolve_limit_price_for_order(order, reference_price, side)
         order_type = "MKT" if is_stop_loss_exit else "LMT"
         if order_type == "LMT" and limit_price <= 0.0:
             _log_activity(f"IB PM {side} skipped for {symbol}: no reference price")
@@ -3394,8 +3724,26 @@ async def _process_ib_engine_signals() -> None:
         _log_ib_trigger(
             f"{side} submitted symbol={symbol} qty={qty_to_submit:.4f} order_type={order_type} "
             f"ref=${reference_price:.4f} submit_px=${submitted_price:.4f} "
-            f"status={ib_status or 'UNKNOWN'} ib_order_id={result.get('ib_order_id')}"
+            f"status={ib_status or 'UNKNOWN'} ib_order_id={result.get('ib_order_id')} policy={limit_price_policy}"
         )
+
+        # Fast-path: once a BUY is confirmed FILLED, immediately stage a TP SELL.
+        # This avoids waiting for slower periodic PM sweeps before requesting exit liquidity.
+        if side == "BUY" and is_filled and qty_to_submit > 0.0:
+            buy_fill_price = submitted_price if submitted_price > 0 else reference_price
+            await _submit_tp_sell_after_buy_fill(
+                ib_service=ib_service,
+                symbol=symbol,
+                quantity=qty_to_submit,
+                buy_fill_price=buy_fill_price,
+                take_profit_pct=take_profit_pct,
+                take_profit_value=take_profit_value,
+                mode=mode,
+                buy_order_id=result.get("ib_order_id"),
+                pending_sell_symbols=pending_sell_symbols,
+                trigger_log=_log_ib_trigger,
+            )
+
         processed_key = order.get("processed_key")
         full_qty = float(order.get("quantity") or 0.0)
         is_partial = side == "SELL" and qty_to_submit + 1e-9 < full_qty

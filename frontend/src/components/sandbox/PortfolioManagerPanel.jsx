@@ -284,6 +284,7 @@ function buildDraftFromSettings(settings) {
   const aiLongSlValue = Number(settings.ai_tag_long_sl_value ?? 0)
   const aiLongPctActive = aiLongTpPct > 0 || aiLongSlPct > 0
   const aiLongValueActive = aiLongTpValue > 0 || aiLongSlValue > 0
+  const pendingNearTpMode = (settings.pending_sell_tp_near_mode === 'dollar') ? 'dollar' : 'percent'
 
   return {
     transfer_pct: Math.round(settings.transfer_pct * 100),
@@ -350,6 +351,10 @@ function buildDraftFromSettings(settings) {
     pm_hold_trailing_pct: settings.pm_hold_trailing_pct ?? 3.0,
     pending_price_drift_cancel_pct: settings.pending_price_drift_cancel_pct ?? 0.25,
     pending_cancel_after_bars: settings.pending_cancel_after_bars ?? 3,
+    paper_buy_mkt_after_bars: Math.max(0, Math.min(Number(settings.paper_buy_mkt_after_bars ?? 0), Number(settings.pending_cancel_after_bars ?? 3))),
+    pending_sell_tp_near_mode: pendingNearTpMode,
+    pending_sell_tp_near_pct: settings.pending_sell_tp_near_pct ?? 0.20,
+    pending_sell_tp_near_value: settings.pending_sell_tp_near_value ?? 0.0,
     // Anti-churn bypass toggles (UI-only; controls whether bypass values are sent on save)
     pending_drift_cancel_enabled: settings.pending_drift_cancel_enabled ?? true,
     pending_cancel_after_bars_enabled: settings.pending_cancel_after_bars_enabled ?? true,
@@ -1087,6 +1092,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     const aiLongSlPct = aiLongExitMode === 'percent' ? Number(draft.ai_tag_long_sl_pct) : 0
     const aiLongTpValue = aiLongExitMode === 'value' ? Number(draft.ai_tag_long_tp_value) : 0
     const aiLongSlValue = aiLongExitMode === 'value' ? Number(draft.ai_tag_long_sl_value) : 0
+    const nearTpMode = draft.pending_sell_tp_near_mode === 'dollar' ? 'dollar' : 'percent'
 
     setSentimentError(null)
     setImportNotice(null)
@@ -1138,6 +1144,16 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       // Anti-churn bypass: when toggle is OFF, send the bypass value to the backend
       pending_price_drift_cancel_pct: draft.pending_drift_cancel_enabled ? Number(draft.pending_price_drift_cancel_pct) : 100,
       pending_cancel_after_bars: draft.pending_cancel_after_bars_enabled ? Math.max(0, Math.floor(Number(draft.pending_cancel_after_bars ?? 3) || 3)) : 0,
+      paper_buy_mkt_after_bars: (() => {
+        const timeoutBars = draft.pending_cancel_after_bars_enabled
+          ? Math.max(0, Math.floor(Number(draft.pending_cancel_after_bars ?? 3) || 3))
+          : 0
+        const fallbackBars = Math.max(0, Math.floor(Number(draft.paper_buy_mkt_after_bars ?? 0) || 0))
+        return Math.min(fallbackBars, timeoutBars)
+      })(),
+      pending_sell_tp_near_mode: nearTpMode,
+      pending_sell_tp_near_pct: nearTpMode === 'percent' ? Math.max(0, Number(draft.pending_sell_tp_near_pct ?? 0.20) || 0) : 0,
+      pending_sell_tp_near_value: nearTpMode === 'dollar' ? Math.max(0, Number(draft.pending_sell_tp_near_value ?? 0.0) || 0) : 0,
       eod_engine_shutoff_minutes_before_sell: draft.eod_engine_shutoff_enabled ? Number(draft.eod_engine_shutoff_minutes_before_sell) : 0,
       sentiment_bucket_persistence: draft.sentiment_persistence_enabled ? Math.max(1, Math.min(20, Number(draft.sentiment_bucket_persistence ?? 3))) : 1,
       pm_hold_duration_bars: draft.hold_duration_enabled ? Math.max(0, Math.floor(Number(draft.pm_hold_duration_bars ?? 20) || 0)) : 0,
@@ -1657,6 +1673,10 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           Pending cancel: drift {Number(settings.pending_price_drift_cancel_pct ?? 0.25).toFixed(2)}%
           {' · timeout '}
           {Math.max(1, Number(settings.pending_cancel_after_bars ?? 3))} bars
+          {' · TP chase '}
+          {(settings.pending_sell_tp_near_mode ?? 'percent') === 'dollar'
+            ? `$${Number(settings.pending_sell_tp_near_value ?? 0.0).toFixed(2)}`
+            : `${Number(settings.pending_sell_tp_near_pct ?? 0.20).toFixed(2)}%`}
         </span>
         <span className={`flex items-center gap-1 ${settings.hold_positions_overnight ? 'text-slate-600' : 'text-orange-400'}`}>
           <ClockIcon className="h-3.5 w-3.5" />
@@ -2539,10 +2559,71 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                             type="number" min={0} max={120} step={1}
                             disabled={!editSettings}
                             value={draft.pending_cancel_after_bars}
-                            onChange={e => updateDraft(d => ({ ...d, pending_cancel_after_bars: e.target.value }))}
+                            onChange={e => updateDraft(d => {
+                              const timeoutBars = Math.max(0, Math.floor(Number(e.target.value ?? 0) || 0))
+                              const fallbackBars = Math.max(0, Math.floor(Number(d.paper_buy_mkt_after_bars ?? 0) || 0))
+                              return {
+                                ...d,
+                                pending_cancel_after_bars: e.target.value,
+                                paper_buy_mkt_after_bars: Math.min(fallbackBars, timeoutBars),
+                              }
+                            })}
                             className="input w-24 text-sm py-1.5"
                           />
                           <span className="text-slate-400 text-sm">bars</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">Paper BUY→MKT</span>
+                          <input
+                            type="number" min={0} max={Math.max(0, Number(draft.pending_cancel_after_bars ?? 0) || 0)} step={1}
+                            disabled={!editSettings}
+                            value={draft.paper_buy_mkt_after_bars}
+                            onChange={e => updateDraft(d => {
+                              const timeoutBars = Math.max(0, Math.floor(Number(d.pending_cancel_after_bars ?? 0) || 0))
+                              const next = Math.max(0, Math.floor(Number(e.target.value ?? 0) || 0))
+                              return { ...d, paper_buy_mkt_after_bars: Math.min(next, timeoutBars) }
+                            })}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">bars</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-400">Near TP</span>
+                          <div className="inline-flex rounded-md border border-dark-600 overflow-hidden shrink-0">
+                            <button
+                              type="button"
+                              disabled={!editSettings}
+                              onClick={() => editSettings && updateDraft(d => ({ ...d, pending_sell_tp_near_mode: 'percent' }))}
+                              className={`px-2.5 py-1 text-xs transition-colors ${(draft.pending_sell_tp_near_mode ?? 'percent') === 'percent' ? 'bg-violet-600 text-white' : 'bg-dark-700 text-slate-300 hover:bg-dark-600'}`}
+                            >
+                              %
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!editSettings}
+                              onClick={() => editSettings && updateDraft(d => ({ ...d, pending_sell_tp_near_mode: 'dollar' }))}
+                              className={`px-2.5 py-1 text-xs transition-colors border-l border-dark-600 ${(draft.pending_sell_tp_near_mode ?? 'percent') === 'dollar' ? 'bg-violet-600 text-white' : 'bg-dark-700 text-slate-300 hover:bg-dark-600'}`}
+                            >
+                              $
+                            </button>
+                          </div>
+                          {(draft.pending_sell_tp_near_mode ?? 'percent') === 'dollar' && <span className="text-slate-400 text-sm">$</span>}
+                          <input
+                            type="number"
+                            min={0}
+                            max={(draft.pending_sell_tp_near_mode ?? 'percent') === 'dollar' ? 10000 : 100}
+                            step={0.01}
+                            disabled={!editSettings}
+                            value={(draft.pending_sell_tp_near_mode ?? 'percent') === 'dollar' ? draft.pending_sell_tp_near_value : draft.pending_sell_tp_near_pct}
+                            onChange={e => updateDraft(d => ({
+                              ...d,
+                              ...(d.pending_sell_tp_near_mode ?? 'percent') === 'dollar'
+                                ? { pending_sell_tp_near_value: e.target.value }
+                                : { pending_sell_tp_near_pct: e.target.value },
+                            }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          {(draft.pending_sell_tp_near_mode ?? 'percent') !== 'dollar' && <span className="text-slate-400 text-sm">%</span>}
                         </div>
                       </div>
                     </div>

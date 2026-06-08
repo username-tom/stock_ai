@@ -196,7 +196,7 @@ export default function PortfolioOverview({
       : null
     const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
     if (!isSimulated) {
-      return ibMarketPrice
+      return ibMarketPrice ?? fallbackQuote?.last_price ?? marketValuePrice ?? null
     }
     return fallbackQuote?.last_price ?? ibMarketPrice ?? marketValuePrice ?? Number(pos.avg_cost ?? 0)
   }

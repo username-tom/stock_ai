@@ -140,6 +140,10 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_no_loss_sell: Optional[bool] = None
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     pending_cancel_after_bars: Optional[int] = Field(default=None, ge=0, le=120)
+    paper_buy_mkt_after_bars: Optional[int] = Field(default=None, ge=0, le=120)
+    pending_sell_tp_near_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
+    pending_sell_tp_near_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    pending_sell_tp_near_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     pending_repost_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     sim_buy_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     sim_sell_fill_rate_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
@@ -148,6 +152,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     auto_trade_buy_price_offset_pct: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     auto_trade_sell_price_offset_pct: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     default_strategy_name: Optional[str] = None
+    pm_hold_extended_multiplier: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    pm_hold_trailing_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     pm_hold_duration_bars: Optional[int] = Field(default=None, ge=0, le=50000)
     intraday_1m_template_params: Optional[dict[str, Any]] = None
     sentiment_matrix_strategies: Optional[dict[str, dict[str, str]]] = None

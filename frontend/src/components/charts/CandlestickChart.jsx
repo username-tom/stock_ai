@@ -279,9 +279,18 @@ function CandlestickInner({
     if (Number.isFinite(iqr) && iqr > 0) {
       const lowFence = q1 - iqr * 3
       const highFence = q3 + iqr * 3
-      const filteredBars = barPrices.filter((p) => p >= lowFence && p <= highFence)
-      if (filteredBars.length >= Math.max(20, Math.floor(barPrices.length * 0.85))) {
-        scalePrices = [...filteredBars, ...refPrices]
+      const filteredPrices = barPrices.filter((p) => p >= lowFence && p <= highFence)
+      if (filteredPrices.length >= Math.max(20, Math.floor(barPrices.length * 0.85))) {
+        // Preserve the regular-session opening/closing windows so legitimate
+        // gap-and-run highs are not clipped just because the rest of the day
+        // is tightly clustered around a narrow range.
+        const protectedPrices = visibleBars
+          .filter((bar) => {
+            const t = timeOf(bar.date)
+            return (t >= '09:30' && t <= '10:00') || (t >= '15:30' && t <= '16:00')
+          })
+          .flatMap((bar) => [bar.low, bar.high, bar.close].filter(Number.isFinite))
+        scalePrices = [...new Set([...filteredPrices, ...protectedPrices]), ...refPrices]
       }
     }
   }
