@@ -739,7 +739,34 @@ export default function PortfolioOverview({
   const chartCumulative = isSimulated ? (analytics?.cumulative_pnl ?? []) : ibChartDerived.cumulative
   const chartDailyVolume = isSimulated ? (analytics?.daily_volume ?? []) : ibChartDerived.dailyVolume
   const chartSymbolPnl = isSimulated ? (analytics?.symbol_pnl ?? []) : ibChartDerived.symbolPnl
-  const chartWinLoss = isSimulated ? (analytics?.win_loss ?? null) : ibChartDerived.winLoss
+  const winLossByPeriod = useMemo(() => {
+    const mk = () => ({ wins: 0, losses: 0, breakeven: 0 })
+    const buckets = {
+      daily: mk(),
+      weekly: mk(),
+      monthly: mk(),
+      overall: mk(),
+    }
+
+    for (const row of realizedTradeLog ?? []) {
+      if (!(row?.date instanceof Date) || Number.isNaN(row.date.getTime())) continue
+      const pnl = Number(row?.pnl)
+      if (!Number.isFinite(pnl)) continue
+
+      const bump = (bucket) => {
+        if (pnl > 0) bucket.wins += 1
+        else if (pnl < 0) bucket.losses += 1
+        else bucket.breakeven += 1
+      }
+
+      bump(buckets.overall)
+      if (row.date >= todayStart) bump(buckets.daily)
+      if (row.date >= weekStart) bump(buckets.weekly)
+      if (row.date >= monthStart) bump(buckets.monthly)
+    }
+
+    return buckets
+  }, [realizedTradeLog, todayStart, weekStart, monthStart])
   const chartTotalTrades = isSimulated ? Number(analytics?.total_trades ?? 0) : Number(ibChartDerived.totalTrades ?? 0)
   const chartLatestCumulative = chartCumulative.length > 0 ? Number(chartCumulative[chartCumulative.length - 1]?.value ?? 0) : 0
 
@@ -1471,61 +1498,57 @@ export default function PortfolioOverview({
               </div>
             )}
 
-            {chartWinLoss && (chartWinLoss.wins + chartWinLoss.losses + chartWinLoss.breakeven) > 0 && (() => {
-              const wl = chartWinLoss
-              const total = wl.wins + wl.losses + wl.breakeven
-              const winRate = ((wl.wins / total) * 100).toFixed(1)
-              const winLossData = [{
-                bucket: 'Trades',
-                Wins: wl.wins,
-                Losses: wl.losses,
-                Breakeven: wl.breakeven,
-              }]
-              const segments = [
-                { name: 'Wins', value: wl.wins, color: '#10b981' },
-                { name: 'Losses', value: wl.losses, color: '#ef4444' },
-                ...(wl.breakeven > 0 ? [{ name: 'Breakeven', value: wl.breakeven, color: '#64748b' }] : []),
+            {(() => {
+              const periodRows = [
+                { key: 'daily', label: 'Daily', data: winLossByPeriod.daily },
+                { key: 'weekly', label: 'Weekly', data: winLossByPeriod.weekly },
+                { key: 'monthly', label: 'Monthly', data: winLossByPeriod.monthly },
+                { key: 'overall', label: 'Overall', data: winLossByPeriod.overall },
               ]
+                .map((row) => {
+                  const wl = row.data ?? { wins: 0, losses: 0, breakeven: 0 }
+                  const total = Number(wl.wins || 0) + Number(wl.losses || 0) + Number(wl.breakeven || 0)
+                  const winsPct = total > 0 ? (Number(wl.wins || 0) / total) * 100 : 0
+                  const lossesPct = total > 0 ? (Number(wl.losses || 0) / total) * 100 : 0
+                  const breakevenPct = total > 0 ? (Number(wl.breakeven || 0) / total) * 100 : 0
+                  return {
+                    ...row,
+                    total,
+                    winRate: total > 0 ? ((Number(wl.wins || 0) / total) * 100) : 0,
+                    winsPct,
+                    lossesPct,
+                    breakevenPct,
+                  }
+                })
+
+              if (!periodRows.some(row => row.total > 0)) return null
+
               return (
                 <div className="card flex flex-col">
                   <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Win / Loss Ratio</div>
-                  <div className="flex-1 flex items-center gap-4">
-                    <div className="h-28 flex-1">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={winLossData} layout="vertical" margin={{ top: 6, right: 8, left: 8, bottom: 6 }}>
-                          <XAxis type="number" hide domain={[0, total]} />
-                          <YAxis type="category" dataKey="bucket" hide />
-                          <Tooltip
-                            contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 6, fontSize: 11 }}
-                            labelStyle={{ color: '#94a3b8' }}
-                            itemStyle={{ color: '#cbd5e1' }}
-                            formatter={(v, name) => {
-                              const pct = total > 0 ? ((Number(v ?? 0) / total) * 100).toFixed(1) : '0.0'
-                              return [`${v} (${pct}%)`, name]
-                            }}
-                          />
-                          <Bar dataKey="Wins" stackId="wl" fill="#10b981" radius={[4, 0, 0, 4]} />
-                          <Bar dataKey="Losses" stackId="wl" fill="#ef4444" radius={[0, 0, 0, 0]} />
-                          {wl.breakeven > 0 && <Bar dataKey="Breakeven" stackId="wl" fill="#64748b" radius={[0, 4, 4, 0]} />}
-                        </BarChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <div className="space-y-2 text-xs shrink-0">
-                      <div>
-                        <div className="text-slate-500">Win Rate</div>
-                        <div className="text-xl font-bold text-emerald-400">{winRate}%</div>
-                      </div>
-                      {segments.map(d => (
-                        <div key={d.name} className="flex items-center gap-2">
-                          <span className="inline-block w-2 h-2 rounded-full" style={{ background: d.color }} />
-                          <span className="text-slate-400">{d.name}</span>
-                          <span className="font-bold text-slate-200 ml-auto">{d.value}</span>
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                    {periodRows.map((row) => (
+                      <div key={row.key} className="rounded-xl border border-dark-600 bg-slate-950/40 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">{row.label}</div>
+                          <div className="text-right">
+                            <div className={`text-base font-bold ${row.winRate >= 50 ? 'text-emerald-400' : 'text-amber-300'}`}>{row.winRate.toFixed(1)}%</div>
+                            <div className="text-[10px] text-slate-500">Win Rate</div>
+                          </div>
                         </div>
-                      ))}
-                      <div className="border-t border-dark-600 pt-1 text-slate-500">
-                        {total} total trades
+                        <div className="mt-2 h-2.5 w-full overflow-hidden rounded bg-slate-800 border border-dark-600 flex">
+                          {row.winsPct > 0 && <div className="h-full bg-emerald-500" style={{ width: `${row.winsPct}%` }} />}
+                          {row.lossesPct > 0 && <div className="h-full bg-red-500" style={{ width: `${row.lossesPct}%` }} />}
+                          {row.breakevenPct > 0 && <div className="h-full bg-slate-500" style={{ width: `${row.breakevenPct}%` }} />}
+                        </div>
+                        <div className="mt-2 text-[11px] text-slate-400 grid grid-cols-3 gap-2">
+                          <div>W <span className="text-emerald-400 font-semibold">{row.data.wins}</span></div>
+                          <div>L <span className="text-red-400 font-semibold">{row.data.losses}</span></div>
+                          <div>BE <span className="text-slate-300 font-semibold">{row.data.breakeven}</span></div>
+                        </div>
+                        <div className="mt-1 text-[10px] text-slate-500">{row.total} trade{row.total !== 1 ? 's' : ''}</div>
                       </div>
-                    </div>
+                    ))}
                   </div>
                 </div>
               )

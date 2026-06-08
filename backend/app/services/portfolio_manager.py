@@ -1144,6 +1144,15 @@ async def _apply_ai_tag_strategies() -> None:
     hold_trailing_pct = max(0.0, float(_settings.get("pm_hold_trailing_pct", 3.0) or 0.0))
     bar_minutes = max(1e-9, _interval_to_minutes(_settings.get("sentiment_interval", "1m")))
     symbol_overrides = _settings.get("position_overrides", {}) if isinstance(_settings.get("position_overrides"), dict) else {}
+    hold_overnight_global = bool(_settings.get("hold_positions_overnight", True))
+    ai_allow_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
+    eod_window_mins = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+    pre_sell_shutoff_mins = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
+
+    try:
+        from app.services.sandbox_engine import should_force_engine_off_without_position as _should_force_engine_off_without_position
+    except Exception:
+        _should_force_engine_off_without_position = None
 
     def _matrix_tag_for_ai(raw_tag: str) -> str:
         tag = str(raw_tag or "WATCH").upper()
@@ -1320,6 +1329,17 @@ async def _apply_ai_tag_strategies() -> None:
                 cell_action = base_action
                 hold_variant = ""
 
+            effective_hold_overnight = hold_overnight_global or (
+                ai_allow_overnight and new_tag in ("LONG", "STRONG LONG")
+            )
+            force_engine_off_now = bool(_should_force_engine_off_without_position(
+                shares=max(float(pos.shares or 0.0), ib_qty),
+                pending_shares=float(pos.pending_shares or 0.0),
+                hold_overnight=effective_hold_overnight,
+                eod_sell_window_minutes=eod_window_mins,
+                eod_engine_shutoff_minutes_before_sell=pre_sell_shutoff_mins,
+            )) if _should_force_engine_off_without_position else False
+
             # ── no_trade: no changes this tick ────────────────────────────
             if cell_action == "no_trade":
                 continue
@@ -1331,6 +1351,19 @@ async def _apply_ai_tag_strategies() -> None:
                     pos.strategy_name = cell_strategy
                     db_changed = True
                     strategy_changes.append(f"{pos.symbol}[AI:{new_tag}]: {old_strat}→{cell_strategy}")
+                if force_engine_off_now:
+                    if pos.strategy_enabled:
+                        pos.strategy_enabled = False
+                        db_changed = True
+                        engine_changes.append(
+                            f"{pos.symbol}: engine off (EOD shutoff/final-sell window)"
+                        )
+                    if pos.pm_managed:
+                        pos.pm_managed = False
+                        pos.pm_hold_started_at = None
+                        db_changed = True
+                        hold_modes[pos.symbol] = False
+                    continue
                 # Always re-enable engine when transitioning into a `trade` cell,
                 # regardless of whether it was paused by PM hold or engine_off.
                 if not pos.strategy_enabled:
@@ -1405,6 +1438,12 @@ async def _apply_ai_tag_strategies() -> None:
                     engine_changes.append(f"{pos.symbol}: force-sell PnL ${pnl:+.2f}")
                 else:
                     # No open position – ensure engine is on
+                    if force_engine_off_now:
+                        if pos.strategy_enabled:
+                            pos.strategy_enabled = False
+                            db_changed = True
+                            hold_modes[pos.symbol] = False
+                        continue
                     if not pos.strategy_enabled:
                         pos.strategy_enabled = True
                         pos.pm_managed = False
@@ -2451,6 +2490,10 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
     drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.75) or 0.0))
     pending_cancel_after_bars = max(0, int(_settings.get("pending_cancel_after_bars", 3) or 3))
     paper_buy_mkt_after_bars = max(0, int(_settings.get("paper_buy_mkt_after_bars", 0) or 0))
+    # In IB paper mode, do not leave BUY fallback disabled: otherwise pending
+    # BUY LMT orders can age out and get cancelled repeatedly without filling.
+    if is_paper_mode and pending_cancel_after_bars > 0 and paper_buy_mkt_after_bars <= 0:
+        paper_buy_mkt_after_bars = 1
     paper_buy_mkt_after_bars = min(paper_buy_mkt_after_bars, pending_cancel_after_bars)
     bar_minutes = _interval_to_minutes(str(_settings.get("sentiment_interval", "1m") or "1m"))
     pending_cancel_after_minutes = pending_cancel_after_bars * bar_minutes
@@ -2894,6 +2937,29 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
         _state["crash_last_triggered_day"] = None
         _state["crash_shutdown_active"] = False
         _log_activity("Trading-day start: crash auto-restart — resuming normal operations")
+
+    # Do not re-enable engines during end-of-day shutoff/sell periods when
+    # overnight holding is disabled.
+    try:
+        from app.services.sandbox_engine import (
+            _is_in_pre_sell_engine_shutoff_window,
+            _is_in_eod_sell_window,
+        )
+
+        hold_overnight = bool(_settings.get("hold_positions_overnight", True))
+        eod_mins = int(_settings.get("eod_sell_window_minutes", 30) or 30)
+        shutoff_mins = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
+
+        if not hold_overnight and (
+            _is_in_pre_sell_engine_shutoff_window(eod_mins, shutoff_mins)
+            or _is_in_eod_sell_window(eod_mins)
+        ):
+            _log_activity(
+                "Trading-day start: engine re-enable skipped — current period is SHUT OFF/SELL PERIOD"
+            )
+            return 0
+    except Exception as exc:
+        logger.warning("PM day-start phase check failed: %s", exc)
 
     ib_owned_symbols: set[str] = set()
     try:
@@ -3354,14 +3420,31 @@ async def _process_ib_engine_signals() -> None:
     def _resolve_limit_price_for_order(order: dict[str, Any], reference_price: float, side: str) -> tuple[float, str]:
         price_source = str(order.get("price_source") or "")
         tob_source = str(order.get("top_of_book_source") or "")
+        policy = "configured_offset"
         if (
             ib_mode == "paper"
             and reference_price > 0.0
             and price_source in {"ib_tob_ask", "ib_tob_bid"}
             and tob_source
         ):
-            return _paper_touch_priority_limit(reference_price, side), "paper_touch_priority"
-        return _auto_limit_price_from_reference(reference_price, side), "configured_offset"
+            limit_price = _paper_touch_priority_limit(reference_price, side)
+            policy = "paper_touch_priority"
+        else:
+            limit_price = _auto_limit_price_from_reference(reference_price, side)
+
+        # For discretionary engine SELL signals, never post below the configured
+        # TP trigger derived from current IB average cost.
+        side_u = str(side or "").upper()
+        reason_l = str(order.get("reason") or "").strip().lower()
+        if side_u == "SELL" and "pm_engine_signal_sell" in reason_l:
+            symbol = str(order.get("symbol") or "").upper()
+            avg_cost = float(ib_avg_cost_by_symbol.get(symbol, 0.0) or 0.0)
+            tp_floor = _take_profit_limit_from_entry(avg_cost, take_profit_pct, take_profit_value)
+            if tp_floor > 0.0 and (limit_price <= 0.0 or limit_price < tp_floor):
+                limit_price = tp_floor
+                policy = f"{policy}+tp_floor"
+
+        return limit_price, policy
 
     # Always evaluate risk exits for all held IB longs, even without fresh
     # engine signals, so SL/TP protection is PM-owned and continuously active.

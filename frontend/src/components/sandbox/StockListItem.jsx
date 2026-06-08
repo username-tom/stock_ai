@@ -46,6 +46,18 @@ function pmClassLabel(cls) {
   return '—'
 }
 
+function normalizeMarketLabel(value) {
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  const upper = text.toUpperCase()
+  if (upper === 'NASDAQGS' || upper === 'NMS') return 'NASDAQ'
+  if (upper === 'NASDAQCM') return 'NASDAQ Capital Market'
+  if (upper === 'NASDAQGM') return 'NASDAQ Global Market'
+  if (upper === 'NYSEARCA') return 'NYSE Arca'
+  if (upper === 'BATS') return 'Cboe BZX'
+  return text
+}
+
 function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, accountTotalFunds = 0, isSelected, onClick, toggleEngineMut, ibMode = null }) {
   const { data: scriptsData } = useQuery({ queryKey: ['scripts'], queryFn: getScripts, staleTime: 60000 })
   const scripts = scriptsData?.scripts ?? []
@@ -103,17 +115,21 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
       ?? pos.name
       ?? ''
   ).trim()
-  const companyName = companyNameRaw || null
-  const marketLabel = String(
+  const companyName = companyNameRaw && companyNameRaw.toUpperCase() !== String(pos.symbol ?? '').toUpperCase()
+    ? companyNameRaw
+    : null
+  const marketLabel = normalizeMarketLabel(
     pos.exchange
       ?? pos.primary_exchange
       ?? pos.listing_exchange
+      ?? quote?.full_exchange_name
+      ?? quote?.exchange_name
       ?? quote?.exchange
       ?? quote?.primary_exchange
       ?? quote?.listing_exchange
       ?? quote?.market
-      ?? ''
-  ).trim().toUpperCase() || null
+      ?? null
+  )
   const pendingRerollColorClass = pendingRerollInRange === false
     ? 'border-red-700/40 bg-red-900/20 text-red-300'
     : 'border-amber-700/40 bg-amber-900/20 text-amber-300'

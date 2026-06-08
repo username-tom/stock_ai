@@ -792,15 +792,6 @@ async def _execute_trade(
     """Open a fresh DB session and execute the simulated trade."""
     from app.services.ib_service import ib_service
 
-    if ib_service.is_connected:
-        logger.info(
-            "Sandbox engine trade blocked while IB is connected (symbol=%s side=%s reason=%s)",
-            pos.symbol,
-            side,
-            reason,
-        )
-        return
-
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
         from app.models.sandbox import SandboxAccount
@@ -900,26 +891,9 @@ async def _execute_trade(
                 db.add(trade)
                 await db.commit()
                 _log_trade_activity(pos.symbol, "BUY", quantity, execution_price, reason)
-                if ib_service.is_connected:
-                    ib_result = await ib_service.place_order(
-                        symbol=position.symbol,
-                        side="BUY",
-                        quantity=quantity,
-                        order_type="MKT",
-                    )
-                    if ib_result.get("error"):
-                        logger.error(
-                            "Engine IB BUY failed for %s: %s",
-                            position.symbol,
-                            ib_result.get("error"),
-                        )
-                        _notify_manager_activity(
-                            f"Engine IB BUY failed for {position.symbol}: {ib_result.get('error')}"
-                        )
-                    else:
-                        _notify_manager_activity(
-                            f"Engine IB BUY submitted for {position.symbol} x{float(quantity):.4f}"
-                        )
+                # Keep simulated and IB automation independent. In IB-connected
+                # sessions, PM owns broker order routing; sandbox engine keeps
+                # writing simulated fills for side-by-side performance comparison.
             return
 
         elif side == "SELL":

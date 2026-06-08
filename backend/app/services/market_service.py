@@ -194,6 +194,67 @@ def _first_non_null(values: list[Any]) -> Any | None:
     return None
 
 
+_IDENTITY_EMPTY_VALUES = {"", "-", "--", "N/A", "NA", "NONE", "NULL", "UNKNOWN"}
+_IDENTITY_PLACEHOLDER_EXCHANGES = {"SMART", "VALUE", "UNKNOWN"}
+
+
+def _clean_identity_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.upper() in _IDENTITY_EMPTY_VALUES:
+        return None
+    return text
+
+
+def _is_placeholder_company_name(name: Any, symbol: str) -> bool:
+    text = _clean_identity_text(name)
+    if text is None:
+        return True
+    return text.upper() == symbol.upper()
+
+
+def _is_placeholder_exchange_name(exchange: Any) -> bool:
+    text = _clean_identity_text(exchange)
+    if text is None:
+        return True
+    return text.upper() in _IDENTITY_PLACEHOLDER_EXCHANGES
+
+
+def _prefer_identity_text(*values: Any) -> str | None:
+    for value in values:
+        cleaned = _clean_identity_text(value)
+        if cleaned is not None:
+            return cleaned
+    return None
+
+
+async def _get_yf_identity(symbol: str) -> dict[str, str | None]:
+    sym = symbol.upper()
+    cache_key = f"quote-identity:yf:{sym}"
+
+    async def _fetch_identity() -> dict[str, str | None]:
+        chart = await _yf_chart(sym, range_="5d", interval="1d", include_pre_post=False)
+        meta = chart.get("meta", {})
+        company_name = _prefer_identity_text(meta.get("longName"), meta.get("shortName"))
+        exchange = _prefer_identity_text(
+            meta.get("fullExchangeName"),
+            meta.get("exchangeName"),
+            meta.get("exchange"),
+            meta.get("market"),
+        )
+        return {
+            "company_name": company_name,
+            "exchange": exchange,
+        }
+
+    try:
+        return await _cache.pull(cache_key, 43_200.0, _fetch_identity, wait_timeout=8.0)
+    except Exception as exc:
+        logger.debug("YF identity fallback failed for %s: %s", sym, exc)
+        return {"company_name": None, "exchange": None}
+
+
 def _build_quote_snapshot(chart: dict) -> dict[str, Any]:
     """Derive a session-aware quote snapshot from Yahoo intraday bars."""
     meta = chart.get("meta", {})
@@ -955,22 +1016,63 @@ async def get_quote(symbol: str, source_preference: str | None = None) -> dict:
 
     async def _fetch_quote_payload() -> dict[str, Any]:
         if source == "ib":
-            return await _get_ib_quote_deduped(sym)
+            payload = await _get_ib_quote_deduped(sym)
+            reg_info = symbol_registry.lookup(sym) or {}
+
+            current_company = payload.get("company_name")
+            current_exchange = payload.get("exchange")
+            reg_company = reg_info.get("name")
+            reg_exchange = reg_info.get("exchange")
+
+            needs_company = _is_placeholder_company_name(current_company, sym)
+            needs_exchange = _is_placeholder_exchange_name(current_exchange)
+
+            yf_identity: dict[str, str | None] = {"company_name": None, "exchange": None}
+            if needs_company or needs_exchange:
+                yf_identity = await _get_yf_identity(sym)
+
+            company_name = (
+                _prefer_identity_text(reg_company, yf_identity.get("company_name"), sym)
+                if needs_company
+                else _prefer_identity_text(current_company, reg_company, yf_identity.get("company_name"), sym)
+            )
+            exchange = (
+                _prefer_identity_text(reg_exchange, yf_identity.get("exchange"))
+                if needs_exchange
+                else _prefer_identity_text(current_exchange, reg_exchange, yf_identity.get("exchange"))
+            )
+
+            payload["company_name"] = company_name
+            payload["exchange"] = exchange
+            payload.setdefault("long_name", company_name)
+            payload.setdefault("primary_exchange", exchange)
+            return payload
 
         chart = await _yf_chart(sym, range_="1d", interval="1m", include_pre_post=True)
         meta = chart["meta"]
         snapshot = _build_quote_snapshot(chart)
 
-        reg_info = symbol_registry.lookup(sym)
-        company_name = (
-            reg_info["name"] if reg_info
-            else meta.get("shortName") or meta.get("longName")
+        reg_info = symbol_registry.lookup(sym) or {}
+        company_name = _prefer_identity_text(
+            reg_info.get("name"),
+            meta.get("longName"),
+            meta.get("shortName"),
+            sym,
+        )
+        exchange = _prefer_identity_text(
+            reg_info.get("exchange"),
+            meta.get("fullExchangeName"),
+            meta.get("exchangeName"),
+            meta.get("exchange"),
+            meta.get("market"),
         )
 
         return {
             "symbol": sym,
             "company_name": company_name,
-            "exchange": reg_info["exchange"] if reg_info else None,
+            "long_name": company_name,
+            "exchange": exchange,
+            "primary_exchange": exchange,
             "last_price": snapshot["last_price"],
             "previous_close": snapshot["previous_close"],
             "open": snapshot["open"],

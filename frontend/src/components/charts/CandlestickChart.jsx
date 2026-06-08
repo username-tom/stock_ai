@@ -393,7 +393,8 @@ function CandlestickInner({
     return acc
   }, [])
 
-  const activeHover = hovered
+  const isDragging = dragState != null
+  const activeHover = isDragging ? null : hovered
 
   const normalizedBarDate = (value) => {
     const text = String(value ?? '').trim()
@@ -463,7 +464,7 @@ function CandlestickInner({
     const distUpper = Math.abs(externalHoverDate.localeCompare(upperDate))
     return distUpper < distLower ? lower + 1 : lower
   })()
-  const highlightIdx = localHoverIdx >= 0 ? localHoverIdx : externalHoverIdx
+  const highlightIdx = isDragging ? -1 : (localHoverIdx >= 0 ? localHoverIdx : externalHoverIdx)
   const highlightWidth = Math.max(bandwidth, 2)
   const highlightX = highlightIdx >= 0 ? xOf(highlightIdx) - highlightWidth / 2 : 0
 
@@ -550,12 +551,14 @@ function CandlestickInner({
 
   const handleMouseDown = useCallback((e) => {
     if (bars.length <= n) return
+    setHovered(null)
+    onHoverStateChange?.(null)
     setDragState({
       startClientX: e.clientX,
       baseStart: safeStart,
       baseEnd: safeEnd,
     })
-  }, [bars.length, n, safeEnd, safeStart])
+  }, [bars.length, n, onHoverStateChange, safeEnd, safeStart])
 
   const handleMouseUp = useCallback(() => {
     setDragState(null)
