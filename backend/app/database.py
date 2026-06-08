@@ -181,6 +181,8 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN bar_predictor_enabled BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN bar_predictor_buy_min_bias REAL NOT NULL DEFAULT 0.3",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN bar_predictor_sell_min_bias REAL NOT NULL DEFAULT 0.3",
+        # PM crash protection: auto-restart engines next trading day after crash shutdown (default off)
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN crash_auto_restart BOOLEAN NOT NULL DEFAULT 0",
     ]
     for stmt in migrations:
         try:

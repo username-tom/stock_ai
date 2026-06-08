@@ -117,6 +117,7 @@ class PortfolioManagerSettingsRequest(BaseModel):
     crash_protection_enabled: Optional[bool] = None
     crash_protection_mode: Optional[str] = Field(default=None, pattern="^(percent|dollar)$")
     crash_protection_value: Optional[float] = Field(default=None, ge=0.0, le=1000000.0)
+    crash_auto_restart: Optional[bool] = None
     hold_positions_overnight: Optional[bool] = None
     premarket_order_placement_enabled: Optional[bool] = None
     eod_engine_shutoff_minutes_before_sell: Optional[int] = Field(default=None, ge=0, le=480)
@@ -193,3 +194,16 @@ async def toggle_manager():
     from app.services.portfolio_manager import get_manager_settings, update_manager_settings
     current = get_manager_settings()
     return update_manager_settings({"enabled": not current["enabled"]})
+
+
+@router.post("/manager/reset-crash")
+async def reset_crash_shutdown():
+    """Manually clear a crash-triggered shutdown to re-enable PM operations."""
+    ensure_sandbox_write_allowed(allow_while_ib=True)
+    from app.services.portfolio_manager import _state
+    _state["crash_triggered_day"] = None
+    _state["crash_triggered_at"] = None
+    _state["crash_trigger_reason"] = None
+    _state["crash_last_triggered_day"] = None
+    _state["crash_shutdown_active"] = False
+    return {"ok": True, "message": "Crash shutdown cleared — PM operations will resume on next tick"}

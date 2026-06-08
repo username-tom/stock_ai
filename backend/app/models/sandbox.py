@@ -120,6 +120,7 @@ class PortfolioManagerSettings(Base):
     crash_protection_enabled = Column(Boolean, default=False, nullable=False)
     crash_protection_mode = Column(String(20), default="percent", nullable=False)
     crash_protection_value = Column(Float, default=0.0, nullable=False)
+    crash_auto_restart = Column(Boolean, default=False, nullable=False)
     hold_positions_overnight = Column(Boolean, default=True, nullable=False)
     premarket_order_placement_enabled = Column(Boolean, default=False, nullable=False)
     eod_engine_shutoff_minutes_before_sell = Column(Integer, default=120, nullable=False)

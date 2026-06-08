@@ -203,6 +203,7 @@ _settings: dict[str, Any] = {
     "crash_protection_enabled": False,
     "crash_protection_mode": "percent",   # percent | dollar
     "crash_protection_value": 0.0,
+    "crash_auto_restart": False,          # auto re-enable engines next trading day after crash shutdown
     "hold_positions_overnight": False,    # strict day-trade default: flatten before close
     "premarket_order_placement_enabled": False,  # allow IB order placement outside regular session
     "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
@@ -235,6 +236,10 @@ _state: dict[str, Any] = {
     "crash_triggered_day": None,
     "crash_triggered_at": None,
     "crash_trigger_reason": None,
+    # Persists across day rolls; cleared only when engines are successfully re-enabled.
+    "crash_last_triggered_day": None,
+    # True while PM is blocked by crash shutdown (used by UI indicator).
+    "crash_shutdown_active": False,
 }
 
 
@@ -449,6 +454,7 @@ async def _load_settings_from_db() -> None:
             _crash_mode = str(getattr(row, "crash_protection_mode", "percent") or "percent").strip().lower()
             _settings["crash_protection_mode"] = _crash_mode if _crash_mode in {"percent", "dollar"} else "percent"
             _settings["crash_protection_value"] = max(0.0, float(getattr(row, "crash_protection_value", 0.0) or 0.0))
+            _settings["crash_auto_restart"] = bool(getattr(row, "crash_auto_restart", False))
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", False))
             _settings["premarket_order_placement_enabled"] = bool(getattr(row, "premarket_order_placement_enabled", False))
             _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
@@ -596,6 +602,7 @@ async def _save_settings_to_db() -> None:
             "dollar" if str(_settings.get("crash_protection_mode", "percent")).strip().lower() == "dollar" else "percent"
         )
         row.crash_protection_value = max(0.0, float(_settings.get("crash_protection_value", 0.0) or 0.0))
+        row.crash_auto_restart = bool(_settings.get("crash_auto_restart", False))
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", False)
         row.premarket_order_placement_enabled = bool(_settings.get("premarket_order_placement_enabled", False))
         row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
@@ -664,6 +671,7 @@ def update_manager_settings(new: dict) -> dict:
               "stop_loss_sell_market_enabled",
               "stop_loss_value", "take_profit_value",
               "crash_protection_enabled", "crash_protection_mode", "crash_protection_value",
+              "crash_auto_restart",
               "hold_positions_overnight", "premarket_order_placement_enabled", "eod_engine_shutoff_minutes_before_sell", "eod_sell_window_minutes",
               "ai_tag_strategy_enabled", "ai_sentiment_change_enabled", "ai_tag_strategies", "ai_tag_allow_overnight",
               "ai_tag_action_mode", "ai_external_sentiment_weight",
@@ -2586,7 +2594,27 @@ async def _reenable_all_engines_for_trading_day_start() -> int:
     Positions with ``pm_managed=True`` are skipped — the Portfolio Manager is
     holding those through its own AI-tag logic (direct buy or long-hold mode)
     and will handle the exit itself via TP/SL or tag change.
+
+    When ``crash_auto_restart`` is False and a crash was triggered on a previous
+    day, the re-enable is skipped so the user must manually reset the shutdown.
     """
+    # Respect crash_auto_restart: if a crash occurred and auto-restart is off, block re-enable
+    crash_auto_restart = bool(_settings.get("crash_auto_restart", False))
+    last_crash_day = _state.get("crash_last_triggered_day")
+    current_day = _current_trading_day_key_et()
+    if last_crash_day and last_crash_day != current_day and not crash_auto_restart:
+        _state["crash_shutdown_active"] = True
+        _log_activity(
+            "Trading-day start: engine re-enable skipped — crash shutdown active "
+            "(enable 'Auto-restart after crash' to auto-resume, or use Reset Crash to resume now)"
+        )
+        return 0
+    # If auto-restart is enabled and there was a previous crash, clear the blocked state
+    if last_crash_day and last_crash_day != current_day and crash_auto_restart:
+        _state["crash_last_triggered_day"] = None
+        _state["crash_shutdown_active"] = False
+        _log_activity("Trading-day start: crash auto-restart — resuming normal operations")
+
     ib_owned_symbols: set[str] = set()
     try:
         from app.services.ib_service import ib_service
@@ -2634,6 +2662,121 @@ def _current_trading_day_key_et() -> str:
         return datetime.now(tz=_ET).strftime("%Y%m%d")
     except Exception:
         return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+async def _get_today_simulated_realized_gain() -> float:
+    """Return the sum of realized P&L from today's simulated SELL trades (ET day boundary)."""
+    try:
+        from app.services.sandbox_engine import _ET
+        today_start = datetime.now(tz=_ET).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(timezone.utc)
+    except Exception:
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        from sqlalchemy import select as sa_select, func as sa_func
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                sa_select(sa_func.coalesce(sa_func.sum(SandboxTrade.pnl), 0.0)).where(
+                    SandboxTrade.side == "SELL",
+                    SandboxTrade.pnl.isnot(None),
+                    SandboxTrade.created_at >= today_start,
+                )
+            )
+            return float(result.scalar() or 0.0)
+    except Exception as exc:
+        logger.warning("PM crash check: failed to query today's realized gain: %s", exc)
+        return 0.0
+
+
+async def _check_crash_protection_simulated() -> None:
+    """Check daily realized gain for simulated mode; trigger crash shutdown if threshold breached."""
+    crash_enabled = bool(_settings.get("crash_protection_enabled", False))
+    crash_mode = "dollar" if str(_settings.get("crash_protection_mode", "percent")).strip().lower() == "dollar" else "percent"
+    crash_value = max(0.0, float(_settings.get("crash_protection_value", 0.0) or 0.0))
+    crash_day = _current_trading_day_key_et()
+
+    # Reset daily crash state on new trading day
+    if _state.get("crash_baseline_day") != crash_day:
+        _state["crash_baseline_day"] = crash_day
+        _state["crash_baseline_equity"] = None
+        _state["crash_triggered_day"] = None
+        _state["crash_triggered_at"] = None
+        _state["crash_trigger_reason"] = None
+
+    # Already triggered today
+    if _state.get("crash_triggered_day") == crash_day:
+        _state["crash_shutdown_active"] = True
+        return
+
+    # Only clear crash_shutdown_active if there's no previous-day crash block still in effect.
+    # (crash_last_triggered_day is set when crash_auto_restart=False blocks the day-start re-enable)
+    if not _state.get("crash_last_triggered_day"):
+        _state["crash_shutdown_active"] = False
+
+    if not crash_enabled or crash_value <= 0.0:
+        return
+
+    # Get baseline equity for percent mode threshold
+    baseline = 0.0
+    if crash_mode == "percent":
+        baseline = _state.get("crash_baseline_equity") or 0.0
+        if not isinstance(baseline, (int, float)) or baseline <= 0.0:
+            try:
+                from sqlalchemy import select as sa_select
+                from app.models.sandbox import SandboxAccount
+                async with AsyncSessionLocal() as db:
+                    acct_res = await db.execute(sa_select(SandboxAccount).limit(1))
+                    account = acct_res.scalar_one_or_none()
+                    baseline = float(account.total_funds) if account else 0.0
+            except Exception:
+                baseline = 0.0
+            _state["crash_baseline_equity"] = baseline
+        if baseline <= 0.0:
+            return
+
+    # Get today's realized gain from sandbox trades
+    daily_gain = await _get_today_simulated_realized_gain()
+
+    # Calculate loss threshold (as a negative number)
+    loss_threshold = (
+        crash_value / 100.0 * baseline
+        if crash_mode == "percent"
+        else crash_value
+    )
+    breached = daily_gain <= -loss_threshold
+
+    if not breached:
+        return
+
+    # Trigger crash protection
+    limit_str = f"{crash_value:.2f}% of account" if crash_mode == "percent" else f"${crash_value:.2f}"
+    reason_str = f"daily realized gain ${daily_gain:.2f} breached -{limit_str} loss limit"
+    _state["crash_triggered_day"] = crash_day
+    _state["crash_triggered_at"] = datetime.now(timezone.utc).isoformat()
+    _state["crash_trigger_reason"] = reason_str
+    _state["crash_last_triggered_day"] = crash_day
+    _state["crash_shutdown_active"] = True
+    _log_activity(f"PM crash protection triggered: {reason_str}")
+
+    # Disable all strategy engines
+    try:
+        from sqlalchemy import select as sa_select
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                sa_select(SandboxPosition).where(
+                    SandboxPosition.strategy_name.isnot(None),
+                    SandboxPosition.strategy_enabled == True,  # noqa: E712
+                )
+            )
+            engine_rows: list[SandboxPosition] = res.scalars().all()
+            for row in engine_rows:
+                row.strategy_enabled = False
+            if engine_rows:
+                await db.commit()
+                _log_activity(f"PM crash protection: disabled {len(engine_rows)} engine(s) for the rest of the day")
+    except Exception as exc:
+        logger.warning("PM crash protection: failed to disable engines: %s", exc)
 
 
 async def _process_ib_engine_signals() -> None:
@@ -2718,34 +2861,48 @@ async def _process_ib_engine_signals() -> None:
         _state["crash_trigger_reason"] = None
 
     crash_triggered_today = _state.get("crash_triggered_day") == crash_day
-    if crash_enabled and crash_value > 0.0 and current_equity > 0.0:
-        baseline = _state.get("crash_baseline_equity")
-        if not isinstance(baseline, (int, float)) or baseline <= 0.0:
-            _state["crash_baseline_equity"] = float(current_equity)
-            baseline = float(current_equity)
+    if crash_triggered_today:
+        _state["crash_shutdown_active"] = True
+    else:
+        _state["crash_shutdown_active"] = False
 
-        threshold = (
-            baseline * (1.0 - crash_value / 100.0)
+    if crash_enabled and crash_value > 0.0 and not crash_triggered_today:
+        # Use equity as baseline for percent-mode threshold calculation
+        if current_equity > 0.0:
+            baseline = _state.get("crash_baseline_equity")
+            if not isinstance(baseline, (int, float)) or baseline <= 0.0:
+                _state["crash_baseline_equity"] = float(current_equity)
+                baseline = float(current_equity)
+        else:
+            baseline = float(_state.get("crash_baseline_equity") or 0.0)
+
+        # Get today's realized P&L from IB session
+        daily_realized_gain = 0.0
+        try:
+            daily_realized_gain = float(account_summary.get("RealizedPnL") or 0.0)
+        except Exception:
+            daily_realized_gain = 0.0
+
+        # Calculate loss threshold
+        loss_threshold = (
+            crash_value / 100.0 * baseline
             if crash_mode == "percent"
-            else baseline - crash_value
+            else crash_value
         )
-        if threshold < 0.0:
-            threshold = 0.0
-        breached = current_equity <= threshold
+        breached = loss_threshold > 0.0 and daily_realized_gain <= -loss_threshold
 
-        if breached and not crash_triggered_today:
-            reason = (
-                f"drawdown {crash_value:.2f}%"
-                if crash_mode == "percent"
-                else f"drawdown ${crash_value:.2f}"
+        if breached:
+            limit_str = f"{crash_value:.2f}% of account" if crash_mode == "percent" else f"${crash_value:.2f}"
+            reason_str = (
+                f"daily realized gain ${daily_realized_gain:.2f} breached "
+                f"-{limit_str} loss limit (baseline equity ${baseline:.2f})"
             )
             _state["crash_triggered_day"] = crash_day
             _state["crash_triggered_at"] = datetime.now(timezone.utc).isoformat()
-            _state["crash_trigger_reason"] = (
-                f"{reason}: equity ${current_equity:.2f} <= threshold ${threshold:.2f} "
-                f"(baseline ${baseline:.2f})"
-            )
-            _log_activity(f"PM crash protection triggered ({_state['crash_trigger_reason']})")
+            _state["crash_trigger_reason"] = reason_str
+            _state["crash_last_triggered_day"] = crash_day
+            _state["crash_shutdown_active"] = True
+            _log_activity(f"PM crash protection triggered: {reason_str}")
 
             async with AsyncSessionLocal() as db:
                 from sqlalchemy import select as sa_select
@@ -3348,6 +3505,24 @@ async def run_portfolio_manager() -> None:
                 except Exception as exc:
                     logger.warning("PM day-start engine re-enable error: %s", exc)
                 _state["last_engine_reenable_day"] = day_key
+
+        # For simulated mode: check crash protection based on today's realized gain.
+        # IB mode crash check runs inside _process_ib_engine_signals with broker data.
+        try:
+            from app.services.ib_service import ib_service as _ib_svc
+            _ib_connected = _ib_svc.is_connected
+        except Exception:
+            _ib_connected = False
+        if not _ib_connected:
+            try:
+                await _check_crash_protection_simulated()
+            except Exception as exc:
+                logger.warning("PM simulated crash check error: %s", exc)
+
+        # Gate all trading operations for the rest of this tick if crash is active.
+        _crash_day_now = _current_trading_day_key_et()
+        if _state.get("crash_triggered_day") == _crash_day_now or _state.get("crash_shutdown_active"):
+            continue
 
         # Cancel pending orders when sentiment worsens or entering EOD sell window
         try:

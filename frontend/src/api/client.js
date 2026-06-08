@@ -122,3 +122,4 @@ export const updatePortfolioManagerSettings = (payload) => api.patch('/sandbox/m
 export const getPortfolioManagerActivityLog = ({ page = 1, pageSize = 100, day = undefined } = {}) =>
   api.get('/sandbox/manager/activity-log', { params: { page, page_size: pageSize, ...(day ? { day } : {}) } }).then(r => r.data)
 export const togglePortfolioManager = () => api.post('/sandbox/manager/toggle').then(r => r.data)
+export const resetCrashShutdown = () => api.post('/sandbox/manager/reset-crash').then(r => r.data)

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
-  ChartBarIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon,
+  ChartBarIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings, getPortfolioManagerActivityLog, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getPortfolioManagerActivityLog, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus, togglePortfolioManager, resetCrashShutdown } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandboxConstants'
 import { fmtMoney } from './sandboxHelpers'
@@ -308,6 +308,8 @@ function buildDraftFromSettings(settings) {
     crash_protection_enabled: settings.crash_protection_enabled ?? false,
     crash_protection_mode: crashProtectionMode,
     crash_protection_value: crashProtectionValue,
+    crash_auto_restart: settings.crash_auto_restart ?? false,
+    pm_enabled: settings.enabled ?? false,
     default_strategy_name: settings.default_strategy_name ?? INTRADAY_1M_TEMPLATE,
     intraday_1m_template_params: {
       orb_bars: Number(settings.intraday_1m_template_params?.orb_bars ?? 5),
@@ -888,6 +890,16 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     },
   })
 
+  const togglePmMut = useMutation({
+    mutationFn: togglePortfolioManager,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] }),
+  })
+
+  const resetCrashMut = useMutation({
+    mutationFn: resetCrashShutdown,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['portfolio-manager-state'] }),
+  })
+
   useEffect(() => {
     if (isLoading || !managerData) return
     setSavedStates(prev => {
@@ -1101,6 +1113,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       crash_protection_enabled: !!draft.crash_protection_enabled,
       crash_protection_mode: (draft.crash_protection_mode === 'dollar' ? 'dollar' : 'percent'),
       crash_protection_value: Math.max(0, Number(draft.crash_protection_value ?? 0)),
+      crash_auto_restart: !!draft.crash_auto_restart,
+      enabled: !!draft.pm_enabled,
       hold_positions_overnight: draft.hold_positions_overnight,
       premarket_order_placement_enabled: draft.premarket_order_placement_enabled,
       eod_sell_window_minutes: Number(draft.eod_sell_window_minutes),
@@ -1375,15 +1389,25 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-dark-700 text-slate-400 border border-dark-600 uppercase tracking-wide">
               {activeProfile}
             </span>
-            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold border ${
-              settings.enabled
-                ? 'bg-violet-900/30 text-violet-300 border-violet-700/40'
-                : 'bg-dark-700 text-slate-500 border-dark-600'
-            }`}>
+            <button
+              onClick={() => togglePmMut.mutate()}
+              disabled={togglePmMut.isPending}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold border transition-colors ${
+                settings.enabled
+                  ? 'bg-violet-900/30 text-violet-300 border-violet-700/40 hover:bg-violet-900/50'
+                  : 'bg-dark-700 text-slate-400 border-dark-600 hover:bg-dark-600'
+              }`}
+              title={settings.enabled ? 'Click to disable PM' : 'Click to enable PM'}
+            >
               {settings.enabled
                 ? <><CheckCircleIcon className="h-3 w-3" />Active</>
                 : <><XCircleIcon className="h-3 w-3" />Inactive</>}
-            </span>
+            </button>
+            {managerData?.crash_shutdown_active && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-rose-900/40 text-rose-300 border border-rose-700/60 animate-pulse">
+                <ExclamationTriangleIcon className="h-3 w-3" />CRASH SHUTDOWN
+              </span>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {onShowOverview && (
@@ -1408,8 +1432,39 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
             >
               {updateMut.isPending ? 'Saving…' : 'Save'}
             </button>
+            {managerData?.crash_shutdown_active && (
+              <button
+                onClick={() => resetCrashMut.mutate()}
+                disabled={resetCrashMut.isPending}
+                className="text-xs bg-rose-700 hover:bg-rose-600 text-white font-semibold rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                title="Clear crash shutdown and resume PM operations"
+              >
+                {resetCrashMut.isPending ? 'Resetting…' : '⚠ Reset Crash'}
+              </button>
+            )}
           </div>
         </div>
+
+        {/* Crash Shutdown Banner */}
+        {managerData?.crash_shutdown_active && (
+          <div className="rounded-lg border border-rose-700/60 bg-rose-900/20 px-3 py-2 flex flex-wrap items-start gap-2">
+            <ExclamationTriangleIcon className="h-4 w-4 text-rose-400 mt-0.5 shrink-0" />
+            <div className="flex-1 min-w-0 space-y-0.5">
+              <p className="text-xs font-semibold text-rose-300">PM halted — crash protection triggered</p>
+              {managerData.crash_trigger_reason && (
+                <p className="text-[11px] text-rose-400/80 break-words">{managerData.crash_trigger_reason}</p>
+              )}
+              {managerData.crash_triggered_at && (
+                <p className="text-[11px] text-rose-500/70">
+                  Triggered at {new Date(managerData.crash_triggered_at).toLocaleTimeString()}
+                  {settings.crash_auto_restart
+                    ? ' · Will auto-restart next trading day'
+                    : ' · All engines paused until manually reset or next session (auto-restart off)'}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider min-w-[56px]">Preset</span>
@@ -1578,11 +1633,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           <ChartBarIcon className="h-3.5 w-3.5" />
           SL sell execution: {(settings.stop_loss_sell_market_enabled ?? true) ? 'Market (fast)' : 'Limit (auto-priced)'}
         </span>
-        <span className={`flex items-center gap-1 ${(settings.crash_protection_enabled ?? false) ? 'text-rose-300' : 'text-slate-600'}`}>
+        <span className={`flex items-center gap-1 ${managerData?.crash_shutdown_active ? 'text-rose-400 font-semibold' : (settings.crash_protection_enabled ?? false) ? 'text-rose-300' : 'text-slate-600'}`}>
           <ChartBarIcon className="h-3.5 w-3.5" />
-          {(settings.crash_protection_enabled ?? false)
-            ? `Crash protection: ${settings.crash_protection_mode === 'dollar' ? '$' : ''}${Number(settings.crash_protection_value ?? 0).toFixed(2)}${settings.crash_protection_mode === 'dollar' ? '' : '%'} drawdown`
-            : 'Crash protection off'}
+          {managerData?.crash_shutdown_active
+            ? '⚠ PM halted — crash shutdown active'
+            : (settings.crash_protection_enabled ?? false)
+              ? `Crash protection: daily loss limit ${settings.crash_protection_mode === 'dollar' ? '-$' : '-'}${Number(settings.crash_protection_value ?? 0).toFixed(2)}${settings.crash_protection_mode === 'dollar' ? '' : '% of account'}${settings.crash_auto_restart ? ' · auto-restart' : ' · manual restart'}`
+              : 'Crash protection off'}
         </span>
         <span className="flex items-center gap-1">
           <ChartBarIcon className="h-3.5 w-3.5" />
@@ -1864,7 +1921,24 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
           </div>
 
           <fieldset disabled={!editSettings || updateMut.isPending} className="space-y-3 disabled:opacity-70">
-
+            {/* ── PM Master Enable/Disable ── */}
+            <SettingRow
+              label="Portfolio Manager"
+              hint="Master on/off switch for the Portfolio Manager. When disabled, PM stops all rebalancing, sentiment routing, and IB signal processing."
+            >
+              <label className="flex items-center gap-2 cursor-pointer">
+                <div
+                  className={`relative w-9 h-5 rounded-full transition-colors ${(draft.pm_enabled ?? false) ? 'bg-violet-600' : 'bg-dark-600'}`}
+                  onClick={() => {
+                    if (!editSettings) return
+                    updateDraft(d => ({ ...d, pm_enabled: !(d.pm_enabled ?? false) }))
+                  }}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(draft.pm_enabled ?? false) ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs text-slate-300">{(draft.pm_enabled ?? false) ? 'Enabled' : 'Disabled'}</span>
+              </label>
+            </SettingRow>
             {/* ── Fund Reallocation & Deployment ── */}
             <CollapsibleSection
               title="Fund Reallocation & Deployment"
@@ -2847,7 +2921,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
               <SettingRow
                 label="Crash Protection (Daily Kill Switch)"
-                hint="When triggered, PM submits market sells for all held symbols and shuts down all engines for the rest of the day."
+                hint="Monitors today's realized gain (closed trades P&L). When the daily loss exceeds the threshold, PM liquidates all IB positions, disables all engines, and halts all operations for the rest of the trading day."
               >
                 <div className="space-y-2">
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -2902,9 +2976,28 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                         onChange={e => updateDraft(d => ({ ...d, crash_protection_value: e.target.value }))}
                         className="input w-28 text-sm py-1.5"
                       />
-                      {(draft.crash_protection_mode ?? 'percent') !== 'dollar' && <span className="text-slate-400 text-sm">%</span>}
+                      {(draft.crash_protection_mode ?? 'percent') !== 'dollar' && <span className="text-slate-400 text-sm">% of account</span>}
                     </div>
+                    <span className="text-[11px] text-slate-500">daily realized loss limit</span>
                   </div>
+
+                  {/* Auto-restart after crash */}
+                  <label className="flex items-center gap-2 cursor-pointer mt-1">
+                    <div
+                      className={`relative w-9 h-5 rounded-full transition-colors ${(draft.crash_auto_restart ?? false) ? 'bg-amber-600' : 'bg-dark-600'}`}
+                      onClick={() => {
+                        if (!editSettings) return
+                        updateDraft(d => ({ ...d, crash_auto_restart: !(d.crash_auto_restart ?? false) }))
+                      }}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(draft.crash_auto_restart ?? false) ? 'translate-x-4' : ''}`} />
+                    </div>
+                    <span className="text-xs text-slate-300">
+                      {(draft.crash_auto_restart ?? false)
+                        ? 'Auto-restart next trading day'
+                        : 'Manual restart required after crash (default)'}
+                    </span>
+                  </label>
                 </div>
               </SettingRow>
 

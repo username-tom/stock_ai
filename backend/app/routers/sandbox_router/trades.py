@@ -167,7 +167,9 @@ async def get_trades(
     if ib_service.is_connected and requested_profile != "simulated":
         return {"trades": [], "source": "ib"}
 
-    q = select(SandboxTrade).order_by(SandboxTrade.created_at.desc()).limit(limit)
+    q = select(SandboxTrade).order_by(SandboxTrade.created_at.desc())
+    if int(limit or 0) > 0:
+        q = q.limit(limit)
     if symbol:
         q = q.where(SandboxTrade.symbol == symbol.upper())
     result = await db.execute(q)
@@ -271,8 +273,10 @@ async def get_analytics(
                     normalized = derived
                 else:
                     normalized = explicit
-            elif derived is not None and side == "SELL":
-                normalized = derived
+            # For IB history rows where SELL pnl is missing, do not invent a
+            # realized value from reconstructed basis. Replays can drift when
+            # fills/cost bases are incomplete; keep metrics on explicit broker
+            # pnl only so daily/weekly/monthly/total remain coherent.
 
             by_id[tid] = normalized
 
@@ -471,8 +475,8 @@ async def get_realized_metrics(
                     normalized = derived
                 else:
                     normalized = explicit
-            elif derived is not None and side == "SELL":
-                normalized = derived
+            # For IB realized-metrics, only count explicit broker pnl for SELL
+            # rows; skip synthetic derivation when pnl is missing.
 
             by_id[tid] = normalized
 

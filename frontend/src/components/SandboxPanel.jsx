@@ -502,7 +502,7 @@ export default function SandboxPanel() {
   // all recent trades (for notification + activity log)
   const { data: allTradesData } = useQuery({
     queryKey: ['sandbox-trades-all', activeProfile],
-    queryFn: () => getSandboxTrades(undefined, 200, activeProfile),
+    queryFn: () => getSandboxTrades(undefined, 0, activeProfile),
     enabled: hasPrimaryData && activeProfile === 'simulated',
     refetchInterval: appSettings.sandbox_trades_ms,
   })
@@ -512,7 +512,7 @@ export default function SandboxPanel() {
   // IB trade history – PAPER / LIVE orders persisted in the Trade table
   const { data: ibTradeHistoryData } = useQuery({
     queryKey: ['ib-trade-history', ibMode ?? 'paper'],
-    queryFn: () => getTradeHistory(200, (ibMode ?? 'paper').toUpperCase()),
+    queryFn: () => getTradeHistory(0, (ibMode ?? 'paper').toUpperCase()),
     enabled: ibConnected && hasPrimaryData,
     refetchInterval: appSettings.sandbox_trades_ms,
   })
@@ -630,7 +630,6 @@ export default function SandboxPanel() {
       })
       return [...tradeEntries, ...retained]
         .sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
-        .slice(0, 500)
     })
   }, [activeTrades, activeProfile])
 
@@ -708,7 +707,7 @@ export default function SandboxPanel() {
           }),
           time: new Date().toLocaleTimeString(),
           ts: Date.now(),
-        }, ...prev].slice(0, 500))
+        }, ...prev])
       }
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
@@ -758,7 +757,7 @@ export default function SandboxPanel() {
         sub: pos?.strategy_name?.split(':')[0],
         time: new Date().toLocaleTimeString(),
         ts: Date.now(),
-      }, ...prev].slice(0, 500))
+      }, ...prev])
     },
   })
   const toggleAllEnginesMut = useMutation({
@@ -772,7 +771,7 @@ export default function SandboxPanel() {
         label: 'All sandbox engines toggled',
         time: new Date().toLocaleTimeString(),
         ts: Date.now(),
-      }, ...prev].slice(0, 500))
+      }, ...prev])
     },
   })
   const toggleManagerMut = useMutation({
@@ -786,7 +785,7 @@ export default function SandboxPanel() {
         label: `Portfolio Manager ${enabled ? 'enabled' : 'disabled'}`,
         time: new Date().toLocaleTimeString(),
         ts: Date.now(),
-      }, ...prev].slice(0, 500))
+      }, ...prev])
     },
   })
   const setIbModeMut = useMutation({
@@ -883,7 +882,7 @@ export default function SandboxPanel() {
         sub: data.strategy_name ?? 'none',
         time: new Date().toLocaleTimeString(),
         ts: Date.now(),
-      }, ...prev].slice(0, 500))
+      }, ...prev])
     },
   })
   const bulkCapMut = useMutation({
@@ -898,7 +897,7 @@ export default function SandboxPanel() {
         sub: `${data.max_allocation_mode} ${data.max_allocation_mode === 'percent' ? `${Number(data.max_allocation_value).toFixed(2)}%` : `$${Number(data.max_allocation_value).toFixed(2)}`}`,
         time: new Date().toLocaleTimeString(),
         ts: Date.now(),
-      }, ...prev].slice(0, 500))
+      }, ...prev])
     },
   })
 
@@ -963,7 +962,7 @@ export default function SandboxPanel() {
       syncFromIb: true,
       time: new Date().toLocaleTimeString(),
       ts: Date.now(),
-    }, ...prev].slice(0, 500))
+    }, ...prev])
   }
   function handleIbWatchlistAdd(symbol) {
     const sym = (symbol || '').trim().toUpperCase()

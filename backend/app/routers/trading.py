@@ -687,7 +687,10 @@ async def trade_history(
         mode_norm = mode.strip().upper()
         if mode_norm in {"SIMULATED", "PAPER", "LIVE"}:
             q = q.where(Trade.mode == TradingMode(mode_norm))
-    result = await db.execute(q.order_by(Trade.created_at.desc()).limit(limit))
+    q = q.order_by(Trade.created_at.desc())
+    if int(limit or 0) > 0:
+        q = q.limit(limit)
+    result = await db.execute(q)
     trades = result.scalars().all()
 
     # Keep IB activity/history views in sync with actual order state.
@@ -695,7 +698,7 @@ async def trade_history(
     # were filled/cancelled but no explicit mutation endpoint was called.
     await _reconcile_pending_ib_trades(db, trades)
 
-    result = await db.execute(q.order_by(Trade.created_at.desc()).limit(limit))
+    result = await db.execute(q)
     trades = result.scalars().all()
 
     return {

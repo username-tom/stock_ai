@@ -268,6 +268,7 @@ export default function PortfolioOverview({
   const ibCashValue = numOrNull(accountData?.cash_value)
   const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
   const ibRealizedPnl = numOrNull(accountData?.realized_pnl)
+  const ibRealizedPnlFromMetrics = numOrNull(realizedMetrics?.realized_pnl_sum)
   const totalFundsSource = String(accountData?.total_funds_source ?? '').toLowerCase()
   const usingPaperCapBase = !isSimulated && activeProfile === 'paper' && totalFundsSource === 'paper_max_allocation_sum'
   const performanceBase = (() => {
@@ -309,7 +310,7 @@ export default function PortfolioOverview({
   const headlineUnrealized = isSimulated
     ? (breakdownUnrealizedPnl ?? totalUnrealizedPnl)
     : (ibUnrealizedPnl ?? breakdownUnrealizedPnl ?? totalUnrealizedPnl)
-  const headlineRealized = isSimulated ? totalRealizedPnl : ibRealizedPnl
+  const headlineRealized = isSimulated ? totalRealizedPnl : (ibRealizedPnlFromMetrics ?? ibRealizedPnl)
 
   // Fallback period metrics from cumulative curve if backend metrics are temporarily unavailable.
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
@@ -710,22 +711,27 @@ export default function PortfolioOverview({
   const displayEquity = isSimulated ? totalEquity : footerMarketValue
   const displayUnrealized = isSimulated ? headlineUnrealized : footerUnrealizedValue
   const displayRealized = isSimulated ? headlineRealized : footerRealizedValue
-  const effectiveDailyPnl = isSimulated ? dailyPnl : ibChartDerived.dailyPnl
-  const effectiveWeeklyPnl = isSimulated ? weeklyPnl : ibChartDerived.weeklyPnl
-  const effectiveMonthlyPnl = isSimulated ? monthlyPnl : ibChartDerived.monthlyPnl
+  // Keep period cards on one coherent source: realized-metrics first, then chart fallback.
+  const effectiveDailyPnl = dailyPnl ?? (isSimulated ? null : ibChartDerived.dailyPnl)
+  const effectiveWeeklyPnl = weeklyPnl ?? (isSimulated ? null : ibChartDerived.weeklyPnl)
+  const effectiveMonthlyPnl = monthlyPnl ?? (isSimulated ? null : ibChartDerived.monthlyPnl)
   const effectiveDailyPnlPct = (performanceBase > 0 && effectiveDailyPnl != null) ? (effectiveDailyPnl / performanceBase) * 100 : null
   const effectiveWeeklyPnlPct = (performanceBase > 0 && effectiveWeeklyPnl != null) ? (effectiveWeeklyPnl / performanceBase) * 100 : null
   const effectiveMonthlyPnlPct = (performanceBase > 0 && effectiveMonthlyPnl != null) ? (effectiveMonthlyPnl / performanceBase) * 100 : null
   const effectiveDailyAnnualizedPct = annualizePnlForPeriod(effectiveDailyPnl, 1)
   const effectiveWeeklyAnnualizedPct = annualizePnlForPeriod(effectiveWeeklyPnl, 5)
   const effectiveMonthlyAnnualizedPct = annualizePnlForPeriod(effectiveMonthlyPnl, 21)
-  const displayAvgDailyRealizedPnl = isSimulated ? avgDailyRealizedPnl : avgDailyRealizedPnlFallback
-  const displayRealizedTradeDays = isSimulated ? realizedTradeDays : realizedTradeDaysFallback
-  const displayAnnualizedReturnPct = isSimulated ? annualizedReturnPct : annualizedReturnPctFallback
-  const displayAnnualizedReturnSource = isSimulated
-    ? annualizedReturnSource
-    : (annualizedReturnPctFallback != null ? 'ib-trade-log' : 'unavailable')
-  const displayElapsedDays = isSimulated ? elapsedDays : elapsedTradingDaysFallback
+  const displayAvgDailyRealizedPnl = avgDailyRealizedPnl
+  const displayRealizedTradeDays = realizedTradeDays
+  const displayAnnualizedReturnSource = annualizedReturnSource
+  const displayElapsedDays = elapsedDays
+  const displayAnnualizedReturnPct = (
+    displayElapsedDays != null
+    && displayElapsedDays >= 5
+    && annualizedReturnPct != null
+  )
+    ? annualizedReturnPct
+    : null
   const effectiveMaxGain = isSimulated ? simulatedCurveExtremes.maxGain : ibChartDerived.maxGain
   const effectiveMaxDrawdown = isSimulated ? simulatedCurveExtremes.maxDrawdown : ibChartDerived.maxDrawdown
   const effectiveMaxGainPct = performanceBase > 0 ? (effectiveMaxGain / performanceBase) * 100 : null
@@ -912,7 +918,7 @@ export default function PortfolioOverview({
           )}
         </div>
         <div className={`card ${displayRealized != null && displayRealized >= 0 ? 'border-emerald-700/20' : displayRealized != null ? 'border-red-700/20' : ''}`}>
-          <div className="text-xs text-slate-500 mb-1">Realised P&amp;L</div>
+          <div className="text-xs text-slate-500 mb-1">Realised P&amp;L (Cumulative)</div>
           <div className={`text-xl font-bold ${displayRealized == null ? 'text-slate-400' : displayRealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{displayRealized == null ? '—' : fmt(displayRealized)}</div>
           <div className="text-xs text-slate-500 mt-0.5">{topRealizedPct == null ? '—' : `${topRealizedPct.toFixed(2)}% of ${performanceBaseLabel}`}</div>
         </div>
@@ -944,7 +950,7 @@ export default function PortfolioOverview({
       {/* Tertiary stat cards: period and long-horizon performance */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className={`card ${effectiveDailyPnl != null && effectiveDailyPnl !== 0 ? (effectiveDailyPnl >= 0 ? 'border-emerald-700/20' : 'border-red-700/20') : ''}`}>
-          <div className="text-xs text-slate-500 mb-1">Today&apos;s P&amp;L</div>
+          <div className="text-xs text-slate-500 mb-1">Today&apos;s Realised P&amp;L</div>
           <div className="flex items-baseline justify-between gap-3">
             <div className={`text-xl font-bold ${effectiveDailyPnl == null ? 'text-slate-400' : effectiveDailyPnl > 0 ? 'text-emerald-400' : effectiveDailyPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
               {effectiveDailyPnl == null ? '—' : fmt(effectiveDailyPnl)}
@@ -997,8 +1003,13 @@ export default function PortfolioOverview({
             {displayAnnualizedReturnPct == null ? '—' : `${displayAnnualizedReturnPct >= 0 ? '+' : ''}${displayAnnualizedReturnPct.toFixed(2)}%`}
           </div>
           <div className="text-xs text-slate-500 mt-0.5">
-            {displayElapsedDays == null ? 'No realised history yet' : `${displayElapsedDays} trading day${displayElapsedDays !== 1 ? 's' : ''} from trade log`}
-            {displayAnnualizedReturnSource !== 'unavailable' ? ` · ${displayAnnualizedReturnSource}` : ''}
+            {displayElapsedDays == null
+              ? 'No realised history yet'
+              : displayElapsedDays < 5
+              ? `${displayElapsedDays} trading day${displayElapsedDays !== 1 ? 's' : ''} (need 5+ for annualization)`
+              : `${displayElapsedDays} trading day${displayElapsedDays !== 1 ? 's' : ''} from trade log`
+            }
+            {displayAnnualizedReturnPct != null && displayAnnualizedReturnSource !== 'unavailable' ? ` · ${displayAnnualizedReturnSource}` : ''}
           </div>
         </div>
       </div>
