@@ -443,6 +443,9 @@ async def remove_symbol(
                 note="IB watchlist removal: return idle allocation to pool",
             ))
         pos.is_on_watchlist = False
+        pos.strategy_enabled = False
+        pos.pm_managed = False
+        pos.sentiment_mode = None
     else:
         await db.delete(pos)
 

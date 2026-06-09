@@ -1064,6 +1064,7 @@ async def _apply_sentiment_strategies() -> None:
         from sqlalchemy import select as sa_select
         res = await db.execute(
             sa_select(SandboxPosition).where(
+                SandboxPosition.is_on_watchlist == True,  # noqa: E712
                 SandboxPosition.sentiment_mode.isnot(None),
             )
         )
@@ -3111,6 +3112,7 @@ async def _check_crash_protection_simulated() -> None:
         async with AsyncSessionLocal() as db:
             res = await db.execute(
                 sa_select(SandboxPosition).where(
+                    SandboxPosition.is_on_watchlist == True,  # noqa: E712
                     SandboxPosition.strategy_name.isnot(None),
                     SandboxPosition.strategy_enabled == True,  # noqa: E712
                 )
@@ -3144,6 +3146,7 @@ async def _process_ib_engine_signals() -> None:
         from sqlalchemy import select as sa_select
         res = await db.execute(
             sa_select(SandboxPosition).where(
+                SandboxPosition.is_on_watchlist == True,  # noqa: E712
                 SandboxPosition.strategy_enabled == True,  # noqa: E712
                 SandboxPosition.strategy_name.isnot(None),
             )
@@ -3284,6 +3287,7 @@ async def _process_ib_engine_signals() -> None:
 
                 res = await db.execute(
                     sa_select(SandboxPosition).where(
+                        SandboxPosition.is_on_watchlist == True,  # noqa: E712
                         SandboxPosition.strategy_name.isnot(None),
                         SandboxPosition.strategy_enabled == True,  # noqa: E712
                     )
@@ -3847,7 +3851,12 @@ async def refresh_sentiment_routing() -> None:
     """Refresh sentiment_groups from current position routing data and apply strategies if scores exist."""
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
-        res = await db.execute(sa_select(SandboxPosition).where(SandboxPosition.sentiment_mode.isnot(None)))
+        res = await db.execute(
+            sa_select(SandboxPosition).where(
+                SandboxPosition.is_on_watchlist == True,  # noqa: E712
+                SandboxPosition.sentiment_mode.isnot(None),
+            )
+        )
         positions: list[SandboxPosition] = res.scalars().all()
         market_syms = [p.symbol for p in positions if p.sentiment_mode == "market"]
         symbol_syms = [p.symbol for p in positions if p.sentiment_mode == "symbol"]

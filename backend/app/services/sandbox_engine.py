@@ -1352,6 +1352,7 @@ async def _tick(loop: asyncio.AbstractEventLoop) -> None:
 
         pos_res = await db.execute(
             sa_select(SandboxPosition).where(
+                SandboxPosition.is_on_watchlist == True,  # noqa: E712
                 SandboxPosition.strategy_enabled == True,  # noqa: E712
                 SandboxPosition.strategy_name.isnot(None),
             )

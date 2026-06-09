@@ -475,8 +475,8 @@ async def get_realized_metrics(
                     normalized = derived
                 else:
                     normalized = explicit
-            # For IB realized-metrics, only count explicit broker pnl for SELL
-            # rows; skip synthetic derivation when pnl is missing.
+            elif derived is not None and side == "SELL":
+                normalized = derived
 
             by_id[tid] = normalized
 
@@ -493,7 +493,7 @@ async def get_realized_metrics(
         total_deposited = 0.0
 
         def _created_at(t: Trade):
-            return t.created_at
+            return t.filled_at or t.created_at
 
         def _pnl(t: Trade) -> float:
             return float(t.pnl or 0.0)

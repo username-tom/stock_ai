@@ -448,8 +448,8 @@ export default function Dashboard() {
   }, [fiveSecActive, histData])
 
   const chartPrevClose =
-    quotesMap?.[chartSymbol]?.previous_close ??
     histData?.prev_close ??
+    quotesMap?.[chartSymbol]?.previous_close ??
     null
 
   return (

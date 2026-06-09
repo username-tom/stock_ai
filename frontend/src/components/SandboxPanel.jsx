@@ -223,9 +223,9 @@ export default function SandboxPanel() {
   const ibConnected = ibStatus?.connected === true
   const ibSelectedMode = ibStatus?.mode ?? 'paper'
   const ibMode = ibConnected ? (ibStatus?.mode ?? 'paper') : null
-  const activeProfile = ibConnected
-    ? (portfolioView === 'simulated' ? 'simulated' : (ibMode ?? 'paper'))
-    : 'simulated'
+  const activeProfile = portfolioView === 'simulated'
+    ? 'simulated'
+    : (ibMode ?? ibSelectedMode ?? 'paper')
   const viewIbMode = activeProfile === 'simulated' ? null : activeProfile
   useEffect(() => { activeProfileRef.current = activeProfile }, [activeProfile])
   const { data: ibPositionsData } = useQuery({
@@ -368,12 +368,16 @@ export default function SandboxPanel() {
   })
   const quotes = quotesData ?? {}
   const getOwnedMarketPrice = pos => {
+    const quotePrice = Number(quotes[pos.symbol]?.last_price)
+    const liveQuotePrice = Number.isFinite(quotePrice) && quotePrice > 0 ? quotePrice : null
     const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
     const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
+
+    // Keep one canonical display source across the UI: live quote first.
+    if (liveQuotePrice != null) return liveQuotePrice
+
     if (activeProfile !== 'simulated' && ibMarketPrice != null) return ibMarketPrice
     if (activeProfile !== 'simulated') return null
-    const quotePrice = quotes[pos.symbol]?.last_price
-    if (quotePrice != null) return quotePrice
     if (ibMarketPrice != null) return ibMarketPrice
     const shares = Number(pos.shares ?? 0)
     const marketValue = Number(pos.market_value ?? 0)
@@ -559,9 +563,9 @@ export default function SandboxPanel() {
 
   // IB trade history – PAPER / LIVE orders persisted in the Trade table
   const { data: ibTradeHistoryData } = useQuery({
-    queryKey: ['ib-trade-history', ibMode ?? 'paper'],
-    queryFn: () => getTradeHistory(0, (ibMode ?? 'paper').toUpperCase()),
-    enabled: ibConnected && hasPrimaryData,
+    queryKey: ['ib-trade-history', activeProfile],
+    queryFn: () => getTradeHistory(0, String(activeProfile).toUpperCase()),
+    enabled: hasPrimaryData && activeProfile !== 'simulated',
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const ibTradeHistory = ibTradeHistoryData?.trades ?? []
@@ -586,9 +590,7 @@ export default function SandboxPanel() {
     const prev = prevIbSessionRef.current
     const switchedIntoIb = ibConnected && !prev.connected
     const switchedIbMode = ibConnected && prev.connected && ibMode !== prev.mode
-    if (!ibConnected) {
-      setPortfolioView('simulated')
-    } else if (switchedIntoIb || switchedIbMode) {
+    if (switchedIntoIb || switchedIbMode) {
       setPortfolioView(ibMode ?? 'paper')
     }
     if (switchedIntoIb || switchedIbMode) {
@@ -697,6 +699,11 @@ export default function SandboxPanel() {
       const next = current.filter(sym => sym !== symbol)
       writeDashboardWatchlist(next)
       setIbWatchlistSymbols(next)
+      setActivities(prev => prev.filter((activity) => {
+        const sameProfile = String(activity.profile ?? 'simulated').toLowerCase() === String(activeProfileRef.current).toLowerCase()
+        const activitySymbol = String(activity.symbol ?? '').trim().toUpperCase()
+        return !sameProfile || activitySymbol !== String(symbol).trim().toUpperCase()
+      }))
       qc.invalidateQueries({ queryKey: ['sandbox-positions'] })
       qc.invalidateQueries({ queryKey: ['ib-positions'] })
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
@@ -1111,9 +1118,21 @@ export default function SandboxPanel() {
     }
   }
 
+  const visibleActivitySymbols = useMemo(
+    () => new Set(positions.map(p => String(p?.symbol ?? '').trim().toUpperCase()).filter(Boolean)),
+    [positions],
+  )
+
   const visibleActivities = useMemo(
-    () => activities.filter(a => String(a.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase()),
-    [activities, activeProfile],
+    () => activities.filter((activity) => {
+      const sameProfile = String(activity.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase()
+      if (!sameProfile) return false
+      if (activeProfile !== 'simulated') return true
+      const activitySymbol = String(activity.symbol ?? '').trim().toUpperCase()
+      if (!activitySymbol) return true
+      return visibleActivitySymbols.has(activitySymbol)
+    }),
+    [activities, activeProfile, visibleActivitySymbols],
   )
 
   return (

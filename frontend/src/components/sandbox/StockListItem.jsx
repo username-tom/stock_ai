@@ -69,14 +69,16 @@ function StockListItem({ pos, quote, sector, pmScore, managerSettings = null, ac
   // Memoize calculations to ensure they update on quote/pos changes
   const calculations = useMemo(() => {
     const shares = Number(pos.shares ?? 0)
+    const quotePrice = Number(quote?.last_price)
+    const liveQuotePrice = Number.isFinite(quotePrice) && quotePrice > 0 ? quotePrice : null
     const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
     const marketValuePrice = shares > 0 && Number.isFinite(Number(pos.market_value)) && Number(pos.market_value) > 0
       ? Number(pos.market_value) / shares
       : null
     const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
     const mp = ibMode
-      ? ibMarketPrice ?? quote?.last_price ?? marketValuePrice ?? null
-      : quote?.last_price ?? ibMarketPrice ?? marketValuePrice ?? (shares > 0 ? pos.avg_cost : null)
+      ? liveQuotePrice ?? ibMarketPrice ?? marketValuePrice ?? null
+      : liveQuotePrice ?? ibMarketPrice ?? marketValuePrice ?? (shares > 0 ? pos.avg_cost : null)
     const mpNum = Number.isFinite(Number(mp)) ? Number(mp) : null
     const equity = mpNum != null ? (mpNum * pos.shares) : null
     const unrealised = equity != null ? (equity - pos.avg_cost * pos.shares) : 0

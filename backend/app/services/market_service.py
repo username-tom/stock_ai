@@ -1196,12 +1196,20 @@ async def _fetch_yf_history(sym: str, period: str, interval_override: str | None
             day = r["date"][:5]
             if day not in days_seen:
                 days_seen.append(day)
+
         keep = set(days_seen[-n_days:])
-        prev_day_records = [r for r in records if r["date"][:5] not in keep]
-        regular_prev = [r for r in prev_day_records if "09:30" <= r["date"][6:] <= "16:00"]
-        prev_day_close_records = regular_prev if regular_prev else prev_day_records
-        if prev_day_close_records:
-            prev_close = prev_day_close_records[-1]["close"]
+
+        # Use the most recent completed trading day before the visible window.
+        # For a 2D intraday chart that means yesterday's close, not the close
+        # from two trading days ago.
+        if len(days_seen) >= 2:
+            prev_day = days_seen[-2]
+            prev_day_records = [r for r in records if r["date"][:5] == prev_day]
+            regular_prev = [r for r in prev_day_records if "09:30" <= r["date"][6:] <= "16:00"]
+            prev_day_close_records = regular_prev if regular_prev else prev_day_records
+            if prev_day_close_records:
+                prev_close = prev_day_close_records[-1]["close"]
+
         records = [r for r in records if r["date"][:5] in keep]
 
     if period == "2w":

@@ -190,15 +190,17 @@ export default function PortfolioOverview({
     })
   }, [positions, isSimulated, ibPositionsBySymbol])
   const resolveMarketPrice = (pos, fallbackQuote = quotes?.[pos.symbol]) => {
+    const quotePrice = Number(fallbackQuote?.last_price)
+    const liveQuotePrice = Number.isFinite(quotePrice) && quotePrice > 0 ? quotePrice : null
     const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
     const marketValuePrice = Math.abs(Number(pos?.shares ?? 0)) > 0 && Number.isFinite(Number(pos.market_value)) && Math.abs(Number(pos.market_value)) > 0
       ? Math.abs(Number(pos.market_value) / Number(pos.shares ?? 1))
       : null
     const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
-    if (!isSimulated) {
-      return ibMarketPrice ?? fallbackQuote?.last_price ?? marketValuePrice ?? null
-    }
-    return fallbackQuote?.last_price ?? ibMarketPrice ?? marketValuePrice ?? Number(pos.avg_cost ?? 0)
+
+    if (liveQuotePrice != null) return liveQuotePrice
+    if (!isSimulated) return ibMarketPrice ?? marketValuePrice ?? null
+    return ibMarketPrice ?? marketValuePrice ?? Number(pos.avg_cost ?? 0)
   }
   const effectivePieData = useMemo(() => {
     if (isSimulated) return pieData
