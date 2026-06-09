@@ -256,10 +256,9 @@ export default function SandboxPanel() {
   })
   const hasPrimaryData = Boolean(accountData) && Boolean(posData)
   const rawPositions = posData?.positions ?? []
-  const visibleRawPositions = useMemo(
-    () => rawPositions.filter(p => p?.is_on_watchlist !== false),
-    [rawPositions],
-  )
+  // Show every position the backend returns — including symbols that were
+  // removed from the watchlist but are still held (e.g. SPY). Nothing is hidden.
+  const visibleRawPositions = useMemo(() => rawPositions, [rawPositions])
 
   // Force-refresh table/account payloads immediately on profile transition
   // (simulated <-> paper/live and paper <-> live), rather than waiting for
@@ -286,7 +285,11 @@ export default function SandboxPanel() {
   // Ensure every sidebar stock stays in dashboard watchlist, prioritizing
   // currently visible sidebar symbols when the list is at capacity.
   useEffect(() => {
-    const sidebarSymbols = normalizeSymbolList((visibleRawPositions ?? []).map(p => p?.symbol))
+    const sidebarSymbols = normalizeSymbolList(
+      (visibleRawPositions ?? [])
+        .filter(p => p?.is_on_watchlist !== false)
+        .map(p => p?.symbol),
+    )
     if (!sidebarSymbols.length) return
     const current = readDashboardWatchlist()
     const next = mergePinnedWatchlist(current, sidebarSymbols)

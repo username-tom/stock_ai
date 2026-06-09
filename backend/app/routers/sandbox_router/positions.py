@@ -211,13 +211,20 @@ async def get_positions(
                 "pending_reroll_last_at": None,
             }
 
+        owned_ib_symbols = set(ib_by_symbol.keys())
         watched_local_symbols = {
             p.symbol for p in local_rows if p.symbol and bool(getattr(p, "is_on_watchlist", True))
         }
         hidden_local_symbols = {
             p.symbol for p in local_rows if p.symbol and not bool(getattr(p, "is_on_watchlist", True))
         }
-        symbols = sorted((watched_local_symbols | set(ib_by_symbol.keys())) - hidden_local_symbols)
+        # Always surface positions that are actually owned in IB (e.g. a symbol
+        # removed from the watchlist while still holding shares). Only hide
+        # off-watchlist rows that hold no shares (leftover metadata).
+        symbols = sorted(
+            (watched_local_symbols | owned_ib_symbols)
+            - (hidden_local_symbols - owned_ib_symbols)
+        )
         enriched = await asyncio.gather(
             *[_to_position(symbol, ib_by_symbol.get(symbol)) for symbol in symbols],
             return_exceptions=False,

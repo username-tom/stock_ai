@@ -261,6 +261,24 @@ function CandlestickInner({
   if (prevClose != null) refPrices.push(prevClose)
   for (const line of safePriceLines) refPrices.push(Number(line.price))
 
+  /* Include any enabled indicator overlays in the axis bounds so lines like the
+     Bollinger upper/lower bands or moving averages are never clamped flat
+     against the top/bottom of the plot. These are added to refPrices so the
+     IQR outlier fence below never filters them out. */
+  const indicatorKeys = []
+  if (indicators?.bb === true) indicatorKeys.push('upper', 'lower')
+  if (indicators?.ma9 === true) indicatorKeys.push('ma_9')
+  if (indicators?.ma20 === true) indicatorKeys.push('ma_20')
+  if (indicators?.ma50 === true) indicatorKeys.push('ma_50')
+  if (indicators?.ma100 === true) indicatorKeys.push('ma_100')
+  if (indicators?.ma200 === true) indicatorKeys.push('ma_200')
+  for (const bar of visibleBars) {
+    for (const key of indicatorKeys) {
+      const v = bar?.[key]
+      if (Number.isFinite(v)) refPrices.push(v)
+    }
+  }
+
   let scalePrices = [...barPrices, ...refPrices]
   if (isIntraday && barPrices.length >= 40) {
     const sorted = [...barPrices].sort((a, b) => a - b)

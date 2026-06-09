@@ -1,16 +1,12 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo } from 'react'
 import {
   ChevronUpIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
   ArrowTrendingUpIcon,
   ArrowTrendingDownIcon,
   CpuChipIcon,
   SignalIcon,
   ClockIcon,
 } from '@heroicons/react/24/outline'
-
-const PAGE_SIZE = 25
 
 const DATE_FILTERS = [
   { value: 'today',   label: 'Today' },
@@ -73,10 +69,7 @@ function formatActivityTimestamp(activity) {
 export default function ActivityLog({ activities }) {
   const [open, setOpen] = useState(false)
   const [dateFilter, setDateFilter] = useState('all')
-  const [page, setPage] = useState(0)
-
-  // Reset to page 0 whenever filter changes or activities list is replaced
-  useEffect(() => { setPage(0) }, [dateFilter, activities])
+  const [expanded, setExpanded] = useState({})
 
   const filtered = useMemo(() => {
     if (dateFilter === 'all') return activities
@@ -84,9 +77,26 @@ export default function ActivityLog({ activities }) {
     return activities.filter(a => (a.ts ?? Date.now()) >= start)
   }, [activities, dateFilter])
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
-  const safePage = Math.min(page, totalPages - 1)
-  const pageItems = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE)
+  // Group every event by its position symbol so per-symbol churn stays
+  // contained inside a collapsible section instead of flooding the log.
+  const groups = useMemo(() => {
+    const bySymbol = new Map()
+    for (const a of filtered) {
+      const symbol = String(a?.symbol ?? '').trim().toUpperCase() || 'SYSTEM'
+      if (!bySymbol.has(symbol)) bySymbol.set(symbol, [])
+      bySymbol.get(symbol).push(a)
+    }
+    const out = [...bySymbol.entries()].map(([symbol, items]) => ({
+      symbol,
+      items,
+      latestTs: items.reduce((m, x) => Math.max(m, Number(x?.ts) || 0), 0),
+    }))
+    out.sort((a, b) => b.latestTs - a.latestTs)
+    return out
+  }, [filtered])
+
+  const toggleGroup = (symbol) =>
+    setExpanded(prev => ({ ...prev, [symbol]: !prev[symbol] }))
 
   const badgeCount = dateFilter === 'all'
     ? activities.length
@@ -117,49 +127,56 @@ export default function ActivityLog({ activities }) {
             </div>
           </div>
 
-          {/* Activity list — scrolls, takes remaining height */}
+          {/* Grouped activity list — scrolls, takes remaining height */}
           <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-dark-700">
-            {filtered.length === 0 ? (
+            {groups.length === 0 ? (
               <div className="px-3 py-4 text-xs text-slate-600 text-center">No activity</div>
             ) : (
-              pageItems.map((a, i) => (
-                <div key={i} className="px-3 py-2 flex items-start gap-2 hover:bg-dark-750 transition-colors">
-                  <div className="mt-0.5">
-                    <ActivityIcon type={a.type} side={a.side} />
+              groups.map(group => {
+                const isOpen = Boolean(expanded[group.symbol])
+                const last = group.items[0]
+                return (
+                  <div key={group.symbol}>
+                    {/* Position section header */}
+                    <button
+                      onClick={() => toggleGroup(group.symbol)}
+                      className="w-full px-3 py-2 flex items-center gap-2 hover:bg-dark-750 transition-colors text-left"
+                    >
+                      <ChevronUpIcon
+                        className={`h-3 w-3 text-slate-500 flex-shrink-0 transition-transform duration-200 ${isOpen ? '' : 'rotate-180'}`}
+                      />
+                      <span className="text-xs font-semibold text-slate-200 flex-shrink-0">{group.symbol}</span>
+                      <span className="text-[10px] text-slate-500 flex-1 min-w-0 truncate">
+                        {!isOpen && last ? last.label : ''}
+                      </span>
+                      <span className="bg-dark-600 text-slate-400 border border-dark-500 rounded-full px-1.5 py-px text-[10px] leading-none flex-shrink-0">
+                        {group.items.length}
+                      </span>
+                    </button>
+
+                    {/* Position events */}
+                    {isOpen && (
+                      <div className="bg-dark-900 divide-y divide-dark-700 border-t border-dark-700">
+                        {group.items.map((a, i) => (
+                          <div key={i} className="pl-7 pr-3 py-2 flex items-start gap-2 hover:bg-dark-750 transition-colors">
+                            <div className="mt-0.5">
+                              <ActivityIcon type={a.type} side={a.side} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs text-slate-300 leading-snug truncate">{a.label}</p>
+                              {a.notes && <p className="text-[10px] text-amber-300 truncate mt-0.5">{a.notes}</p>}
+                              {!a.notes && a.sub && <p className="text-[10px] text-slate-600 truncate mt-0.5">{a.sub}</p>}
+                            </div>
+                            <span className="text-[10px] text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">{formatActivityTimestamp(a)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-slate-300 leading-snug truncate">{a.label}</p>
-                    {a.notes && <p className="text-[10px] text-amber-300 truncate mt-0.5">{a.notes}</p>}
-                    {!a.notes && a.sub && <p className="text-[10px] text-slate-600 truncate mt-0.5">{a.sub}</p>}
-                  </div>
-                  <span className="text-[10px] text-slate-600 whitespace-nowrap flex-shrink-0 mt-0.5">{formatActivityTimestamp(a)}</span>
-                </div>
-              ))
+                )
+              })
             )}
           </div>
-
-          {/* Pagination footer — never scrolls */}
-          {totalPages > 1 && (
-            <div className="shrink-0 px-3 py-1.5 border-t border-dark-600 flex items-center justify-between">
-              <button
-                onClick={() => setPage(p => Math.max(0, p - 1))}
-                disabled={safePage === 0}
-                className="p-0.5 text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >
-                <ChevronLeftIcon className="h-3.5 w-3.5" />
-              </button>
-              <span className="text-[10px] text-slate-500">
-                {safePage + 1} / {totalPages} &middot; {filtered.length} total
-              </span>
-              <button
-                onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
-                disabled={safePage === totalPages - 1}
-                className="p-0.5 text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              >
-                <ChevronRightIcon className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          )}
         </div>
       )}
 

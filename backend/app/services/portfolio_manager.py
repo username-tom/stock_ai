@@ -3254,12 +3254,19 @@ async def _process_ib_engine_signals() -> None:
         else:
             baseline = float(_state.get("crash_baseline_equity") or 0.0)
 
-        # Get today's realized P&L from IB session
-        daily_realized_gain = 0.0
-        try:
-            daily_realized_gain = float(account_summary.get("RealizedPnL") or 0.0)
-        except Exception:
-            daily_realized_gain = 0.0
+        # Get today's realized P&L. Use the app's own recorded SELL trades (the
+        # same figure shown as "Today's Realised P&L" in the UI) rather than IB's
+        # account-summary RealizedPnL, which is unreliable in paper accounts
+        # (frequently 0) and reports a cumulative/lifetime value instead of the
+        # current trading day's session P&L.
+        daily_realized_gain = await _get_today_simulated_realized_gain()
+        if daily_realized_gain == 0.0:
+            # Fall back to IB's account-summary figure only when we have no
+            # recorded trades for today (e.g. fills not yet reconciled).
+            try:
+                daily_realized_gain = float(account_summary.get("RealizedPnL") or 0.0)
+            except Exception:
+                daily_realized_gain = 0.0
 
         # Calculate loss threshold
         loss_threshold = (

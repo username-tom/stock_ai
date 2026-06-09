@@ -269,7 +269,7 @@ export default function PriceChartPanel({
             prevClose={chartPrevClose}
             hidePremarketAfterOpen={false}
             showFloatingTooltip={false}
-            height={220}
+            height={440}
             viewWindow={syncedViewWindow}
             onViewWindowChange={setSyncedViewWindow}
             hoverState={syncedHoverState}

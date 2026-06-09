@@ -312,7 +312,9 @@ export default function PortfolioOverview({
   const headlineUnrealized = isSimulated
     ? (breakdownUnrealizedPnl ?? totalUnrealizedPnl)
     : (ibUnrealizedPnl ?? breakdownUnrealizedPnl ?? totalUnrealizedPnl)
-  const headlineRealized = isSimulated ? totalRealizedPnl : (ibRealizedPnlFromMetrics ?? ibRealizedPnl)
+  // In IB mode, IB's own account-summary RealizedPnL is authoritative; only fall
+  // back to the calculated trade-log figure when IB has not reported a value yet.
+  const headlineRealized = isSimulated ? totalRealizedPnl : (ibRealizedPnl ?? ibRealizedPnlFromMetrics)
 
   // Fallback period metrics from cumulative curve if backend metrics are temporarily unavailable.
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
@@ -689,7 +691,9 @@ export default function PortfolioOverview({
   const footerUnrealizedPct = footerMarketValue > 0 ? (footerUnrealizedValue / footerMarketValue) * 100 : null
   const topEquityValue = isSimulated ? totalEquity : footerMarketValue
   const topUnrealizedValue = isSimulated ? headlineUnrealized : footerUnrealizedValue
-  const topRealizedValue = isSimulated ? headlineRealized : footerRealizedValue
+  // Headline cumulative realized: prefer IB's authoritative value over the
+  // calculated per-symbol trade-log sum (footerRealizedValue) in IB mode.
+  const topRealizedValue = isSimulated ? headlineRealized : (ibRealizedPnl ?? footerRealizedValue)
   const topUnrealizedPct = topEquityValue > 0 ? (topUnrealizedValue / topEquityValue) * 100 : null
   const topRealizedPct = isSimulated
     ? realizedPnlPct
@@ -712,7 +716,9 @@ export default function PortfolioOverview({
 
   const displayEquity = isSimulated ? totalEquity : footerMarketValue
   const displayUnrealized = isSimulated ? headlineUnrealized : footerUnrealizedValue
-  const displayRealized = isSimulated ? headlineRealized : footerRealizedValue
+  // Headline "Realised P&L (Cumulative)" card: IB value is the source of truth in
+  // IB mode, falling back to the calculated trade-log sum only when IB is absent.
+  const displayRealized = isSimulated ? headlineRealized : (ibRealizedPnl ?? footerRealizedValue)
   // Keep period cards on one coherent source: realized-metrics first, then chart fallback.
   const effectiveDailyPnl = dailyPnl ?? (isSimulated ? null : ibChartDerived.dailyPnl)
   const effectiveWeeklyPnl = weeklyPnl ?? (isSimulated ? null : ibChartDerived.weeklyPnl)
