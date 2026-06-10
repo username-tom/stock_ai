@@ -8,6 +8,7 @@ import {
   CodeBracketIcon,
   BriefcaseIcon,
   Cog6ToothIcon,
+  CircleStackIcon,
 } from '@heroicons/react/24/outline'
 import LivePriceTicker from './LivePriceTicker'
 
@@ -18,6 +19,7 @@ const navItems = [
   { to: '/reports', label: 'Reports', icon: DocumentChartBarIcon },
   { to: '/trading', label: 'Trading', icon: BoltIcon },
   { to: '/scripts', label: 'Scripts', icon: CodeBracketIcon },
+  { to: '/data-library', label: 'Data Library', icon: CircleStackIcon },
   { to: '/settings', label: 'Settings', icon: Cog6ToothIcon },
 ]
 

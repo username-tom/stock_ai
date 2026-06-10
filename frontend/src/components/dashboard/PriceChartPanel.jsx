@@ -296,7 +296,7 @@ export default function PriceChartPanel({
           <SubplotChart
             data={histData?.data ?? []}
             warmupData={warmupData ?? undefined}
-            height={220}
+            height={440}
             indicators={indicators}
             period={chartPeriod}
             prevClose={chartPrevClose}

@@ -79,6 +79,14 @@ export default api
 export const getSettings = () => api.get('/settings').then(r => r.data)
 export const updateSettings = (payload) => api.patch('/settings', payload).then(r => r.data)
 
+// Data Library (locally stored historical 1m data)
+export const getDataLibrarySymbols = () =>
+  api.get('/data-library/symbols').then(r => r.data)
+export const getDataLibraryTradingDays = (start, end) =>
+  api.get('/data-library/trading-days', { params: { start, end } }).then(r => r.data)
+export const getDataLibraryHistory = (symbol, start, end, source = 'auto', interval = undefined) =>
+  api.get('/data-library/history', { params: { symbol, start, end, source, ...(interval ? { interval } : {}) } }).then(r => r.data)
+
 // Sandbox
 export const getSandboxAccount = (profile = undefined) =>
   api.get('/sandbox/account', { params: profile ? { profile } : {} }).then(r => r.data)

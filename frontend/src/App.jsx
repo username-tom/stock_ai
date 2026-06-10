@@ -9,6 +9,7 @@ const BacktestPanel = lazy(() => import('./components/BacktestPanel'))
 const ReportsPanel = lazy(() => import('./components/ReportsPanel'))
 const TradingPanel = lazy(() => import('./components/TradingPanel'))
 const ScriptsPanel = lazy(() => import('./components/ScriptsPanel'))
+const DataLibraryPanel = lazy(() => import('./components/DataLibraryPanel'))
 const SettingsPanel = lazy(() => import('./components/SettingsPanel'))
 
 class PanelErrorBoundary extends Component {
@@ -37,6 +38,7 @@ const PANELS = [
   { path: '/reports',   Component: ReportsPanel   },
   { path: '/trading',   Component: TradingPanel   },
   { path: '/scripts',   Component: ScriptsPanel   },
+  { path: '/data-library', Component: DataLibraryPanel },
   { path: '/settings',  Component: SettingsPanel  },
 ]
 

@@ -337,6 +337,199 @@ def get_intraday_cache_coverage(symbol: str, source: DataSource = "auto") -> dic
     }
 
 
+def list_intraday_cached_symbols() -> list[dict[str, object]]:
+    """Summarise the locally stored 1-minute intraday cache, grouped by symbol.
+
+    Scans the historical cache directory for ``<SYMBOL>__<source>__intraday.json``
+    files and returns one entry per symbol with per-source coverage details and
+    an aggregate ``ib_verified`` flag (True when any cached source is IB-verified).
+    """
+    out: dict[str, dict[str, object]] = {}
+    if not _HIST_CACHE_DIR.exists():
+        return []
+
+    suffix = "__intraday.json"
+    for path in sorted(_HIST_CACHE_DIR.glob(f"*{suffix}")):
+        stem = path.name[: -len(suffix)]
+        if "__" not in stem:
+            continue
+        symbol, source = stem.split("__", 1)
+        symbol = symbol.upper()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        rows = payload.get("rows") or []
+        if not rows:
+            continue
+        # Rows are persisted sorted ascending by timestamp.
+        oldest = rows[0].get("ts")
+        newest = rows[-1].get("ts")
+        ib_verified = bool(payload.get("ib_verified", source == "ib"))
+        entry = out.setdefault(
+            symbol,
+            {"symbol": symbol, "sources": [], "ib_verified": False, "rows": 0,
+             "oldest": None, "newest": None},
+        )
+        entry["sources"].append({  # type: ignore[union-attr]
+            "source": source,
+            "rows": int(len(rows)),
+            "oldest": oldest,
+            "newest": newest,
+            "interval": payload.get("interval"),
+            "ib_verified": ib_verified,
+            "ib_verified_at": payload.get("ib_verified_at"),
+        })
+
+    result: list[dict[str, object]] = []
+    for entry in out.values():
+        sources = entry["sources"]  # type: ignore[index]
+        entry["ib_verified"] = any(s["ib_verified"] for s in sources)
+        entry["rows"] = sum(s["rows"] for s in sources)
+        olds = [s["oldest"] for s in sources if s["oldest"]]
+        news = [s["newest"] for s in sources if s["newest"]]
+        entry["oldest"] = min(olds) if olds else None
+        entry["newest"] = max(news) if news else None
+        result.append(entry)
+
+    result.sort(key=lambda e: str(e["symbol"]))
+    return result
+
+
+# Display-interval rules: (max inclusive calendar-day span, interval label).
+_DATA_LIBRARY_INTERVAL_RULES: tuple[tuple[int, str], ...] = (
+    (2, "1m"),
+    (7, "5m"),
+    (31, "15m"),
+    (95, "1h"),
+)
+
+_RESAMPLE_RULE_MAP: dict[str, str] = {
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "1h": "60min",
+    "1d": "1D",
+}
+
+
+def choose_intraday_display_interval(start: str, end: str) -> str:
+    """Pick a sensible display interval from the requested date-range length."""
+    try:
+        start_d = pd.Timestamp(start).date()
+        end_d = pd.Timestamp(end).date()
+    except Exception:
+        return "1m"
+    span_days = (end_d - start_d).days + 1
+    for max_days, interval in _DATA_LIBRARY_INTERVAL_RULES:
+        if span_days <= max_days:
+            return interval
+    return "1d"
+
+
+def _resample_intraday_ohlcv(df: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Resample a 1-minute OHLCV frame to a coarser display interval."""
+    rule = _RESAMPLE_RULE_MAP.get(interval)
+    if not rule:
+        return df
+    agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    if "Volume" in df.columns:
+        agg["Volume"] = "sum"
+    resampled = df.resample(rule).agg(agg)
+    return resampled.dropna(subset=["Open", "High", "Low", "Close"])
+
+
+def load_intraday_history_records(
+    symbol: str,
+    start: str,
+    end: str,
+    source: DataSource = "auto",
+    interval: str | None = None,
+) -> dict[str, object]:
+    """Load locally cached intraday history for a date range, chart-ready.
+
+    Reads only from the local cache (never pulls from the network) and resamples
+    the 1-minute bars to a display interval derived from the requested range
+    length. Returns chart records compatible with the dashboard chart panels.
+    """
+    if source == "auto":
+        candidate_sources: list[str] = []
+        for s in (_resolve_source("auto"), "ib", "yfinance", "stooq"):
+            if s not in candidate_sources:
+                candidate_sources.append(s)
+    else:
+        candidate_sources = [source]
+
+    df: pd.DataFrame | None = None
+    used_source: str | None = None
+    meta: dict[str, object] = {}
+    for s in candidate_sources:
+        cached = _load_cached_df(symbol, s, start, end, intraday=True)
+        if cached is not None and not cached.empty:
+            df = _ensure_et_index(cached)
+            used_source = s
+            meta = _load_cache_meta(symbol, s, intraday=True)
+            break
+
+    display_interval = interval or choose_intraday_display_interval(start, end)
+
+    if df is None or df.empty:
+        return {
+            "symbol": symbol.upper(),
+            "source": used_source,
+            "interval": display_interval,
+            "ib_verified": False,
+            "ib_verified_at": None,
+            "data": [],
+        }
+
+    is_daily = display_interval == "1d"
+    if display_interval != "1m":
+        df = _resample_intraday_ohlcv(df, display_interval)
+
+    records: list[dict[str, object]] = []
+    for ts, row in df.iterrows():
+        dt = ts.to_pydatetime().astimezone(_ET)
+        label = dt.strftime("%Y-%m-%d") if is_daily else dt.strftime("%m/%d %H:%M")
+        vol = row.get("Volume") if "Volume" in df.columns else None
+        records.append({
+            "date": label,
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
+            "close": round(float(row["Close"]), 4),
+            "volume": int(vol) if vol is not None and not pd.isna(vol) else None,
+        })
+
+    # Previous-day reference close (used by charts for change colouring).
+    prev_close: float | None = None
+    try:
+        start_d = pd.Timestamp(start).date()
+        prior = _load_cached_df(
+            symbol,
+            used_source or "yfinance",
+            (start_d - timedelta(days=7)).isoformat(),
+            (start_d - timedelta(days=1)).isoformat(),
+            intraday=True,
+        )
+        if prior is not None and not prior.empty:
+            prev_close = round(float(_ensure_et_index(prior)["Close"].iloc[-1]), 4)
+    except Exception:
+        prev_close = None
+
+    result: dict[str, object] = {
+        "symbol": symbol.upper(),
+        "source": used_source,
+        "interval": display_interval,
+        "ib_verified": bool(meta.get("ib_verified", used_source == "ib")),
+        "ib_verified_at": str(meta.get("ib_verified_at") or "") or None,
+        "data": records,
+    }
+    if prev_close is not None:
+        result["prev_close"] = prev_close
+    return result
+
+
 def warm_intraday_cache(
     symbol: str,
     *,
