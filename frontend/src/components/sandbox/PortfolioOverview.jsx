@@ -270,6 +270,11 @@ export default function PortfolioOverview({
   const ibCashValue = numOrNull(accountData?.cash_value)
   const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
   const ibRealizedPnl = numOrNull(accountData?.realized_pnl)
+  // IB's authoritative account-level PnL (reqPnL), matching the TWS account window:
+  //   ib_daily_pnl       -> today's session P&L (the "today" figure the user reads)
+  //   ib_realized_today  -> IB's cumulative realized P&L
+  const ibDailyPnl = numOrNull(accountData?.ib_daily_pnl)
+  const ibRealizedTodayAuthoritative = numOrNull(accountData?.ib_realized_today)
   const ibRealizedPnlFromMetrics = numOrNull(realizedMetrics?.realized_pnl_sum)
   const totalFundsSource = String(accountData?.total_funds_source ?? '').toLowerCase()
   const usingPaperCapBase = !isSimulated && activeProfile === 'paper' && totalFundsSource === 'paper_max_allocation_sum'
@@ -690,14 +695,18 @@ export default function PortfolioOverview({
     : (footerMarketValue > 0 ? (footerRealizedValue / footerMarketValue) * 100 : null)
   const footerUnrealizedPct = footerMarketValue > 0 ? (footerUnrealizedValue / footerMarketValue) * 100 : null
   const topEquityValue = isSimulated ? totalEquity : footerMarketValue
-  const topUnrealizedValue = isSimulated ? headlineUnrealized : footerUnrealizedValue
+  const topUnrealizedValue = isSimulated ? headlineUnrealized : (ibUnrealizedPnl ?? footerUnrealizedValue)
   // Headline cumulative realized: prefer IB's authoritative value over the
   // calculated per-symbol trade-log sum (footerRealizedValue) in IB mode.
-  const topRealizedValue = isSimulated ? headlineRealized : (ibRealizedPnl ?? footerRealizedValue)
+  const topRealizedValue = isSimulated
+    ? headlineRealized
+    : (ibRealizedPnl ?? ibRealizedTodayAuthoritative ?? footerRealizedValue)
   const topUnrealizedPct = topEquityValue > 0 ? (topUnrealizedValue / topEquityValue) * 100 : null
+  // Realised % must use the same base as its label (performanceBaseLabel: alloc
+  // cap / net liq), not gross position value, otherwise the percentage is wrong.
   const topRealizedPct = isSimulated
     ? realizedPnlPct
-    : (topEquityValue > 0 ? (topRealizedValue / topEquityValue) * 100 : null)
+    : (performanceBase > 0 && topRealizedValue != null ? (topRealizedValue / performanceBase) * 100 : null)
   const simulatedCurveExtremes = useMemo(() => {
     let maxGainValue = 0
     let maxDrawdownValue = 0
@@ -715,12 +724,19 @@ export default function PortfolioOverview({
   }, [analytics?.cumulative_pnl])
 
   const displayEquity = isSimulated ? totalEquity : footerMarketValue
-  const displayUnrealized = isSimulated ? headlineUnrealized : footerUnrealizedValue
-  // Headline "Realised P&L (Cumulative)" card: IB value is the source of truth in
-  // IB mode, falling back to the calculated trade-log sum only when IB is absent.
-  const displayRealized = isSimulated ? headlineRealized : (ibRealizedPnl ?? footerRealizedValue)
-  // Keep period cards on one coherent source: realized-metrics first, then chart fallback.
-  const effectiveDailyPnl = dailyPnl ?? (isSimulated ? null : ibChartDerived.dailyPnl)
+  const displayUnrealized = isSimulated ? headlineUnrealized : (ibUnrealizedPnl ?? footerUnrealizedValue)
+  // Headline "Realised P&L (Cumulative)" card: IB's authoritative cumulative
+  // realized value is the source of truth in IB mode, falling back to the
+  // calculated trade-log sum only when IB is absent.
+  const displayRealized = isSimulated
+    ? headlineRealized
+    : (ibRealizedPnl ?? ibRealizedTodayAuthoritative ?? footerRealizedValue)
+  // "Today's Realised P&L" card: in IB mode use IB's authoritative daily P&L
+  // (the same figure shown in the TWS account window), falling back to the
+  // realized-metrics/chart-derived value only when IB's PnL feed is unavailable.
+  const effectiveDailyPnl = isSimulated
+    ? dailyPnl
+    : (ibDailyPnl ?? dailyPnl ?? ibChartDerived.dailyPnl)
   const effectiveWeeklyPnl = weeklyPnl ?? (isSimulated ? null : ibChartDerived.weeklyPnl)
   const effectiveMonthlyPnl = monthlyPnl ?? (isSimulated ? null : ibChartDerived.monthlyPnl)
   const effectiveDailyPnlPct = (performanceBase > 0 && effectiveDailyPnl != null) ? (effectiveDailyPnl / performanceBase) * 100 : null

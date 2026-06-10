@@ -114,6 +114,21 @@ async def get_account_info(
             "positions": [],
         })
 
+        # IB's authoritative account-level PnL (reqPnL): today's realized,
+        # today's total (daily), and current unrealized. These match what TWS
+        # shows and are preferred over our derived trade-ledger calculations.
+        ib_pnl = await ib_service.get_account_pnl()
+        ib_daily_pnl = None
+        ib_realized_today = None
+        ib_unrealized_live = None
+        if isinstance(ib_pnl, dict) and not ib_pnl.get("error"):
+            ib_daily_pnl = ib_pnl.get("daily_pnl")
+            ib_realized_today = ib_pnl.get("realized_pnl")
+            ib_unrealized_live = ib_pnl.get("unrealized_pnl")
+        # Prefer IB's live unrealized PnL when available.
+        if ib_unrealized_live is not None:
+            unrealized_pnl = ib_unrealized_live
+
         return {
             "total_funds": round(total_funds, 4) if total_funds is not None else None,
             "total_funds_source": total_funds_source,
@@ -125,6 +140,8 @@ async def get_account_info(
             "cash_value": round(cash_value, 4) if cash_value is not None else None,
             "unrealized_pnl": round(unrealized_pnl, 4) if unrealized_pnl is not None else None,
             "realized_pnl": round(realized_pnl, 4) if realized_pnl is not None else None,
+            "ib_daily_pnl": round(ib_daily_pnl, 4) if ib_daily_pnl is not None else None,
+            "ib_realized_today": round(ib_realized_today, 4) if ib_realized_today is not None else None,
             "updated_at": None,
             "source": "ib",
             "profile": mode,

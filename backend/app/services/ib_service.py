@@ -46,6 +46,12 @@ class _IBApiApp(EWrapper, EClient):
         self.account_summary_data: dict[int, dict] = {}
         self.account_summary_events: dict[int, threading.Event] = {}
 
+        # Account code(s) reported by IB on connect; required for reqPnL.
+        self.managed_accounts: list[str] = []
+        # Account-level PnL (reqPnL) keyed by reqId: dailyPnL/unrealizedPnL/realizedPnL.
+        self.pnl_data: dict[int, dict] = {}
+        self.pnl_events: dict[int, threading.Event] = {}
+
         self.positions: list[dict] = []
         self.positions_event = threading.Event()
 
@@ -85,6 +91,22 @@ class _IBApiApp(EWrapper, EClient):
             self.next_order_id = int(orderId)
         self.connected_event.set()
         self.next_id_event.set()
+
+    def managedAccounts(self, accountsList: str) -> None:
+        accounts = [a.strip() for a in str(accountsList or "").split(",") if a.strip()]
+        with self._lock:
+            self.managed_accounts = accounts
+
+    def pnl(self, reqId: int, dailyPnL: float, unrealizedPnL: float, realizedPnL: float) -> None:
+        with self._lock:
+            self.pnl_data[reqId] = {
+                "daily_pnl": float(dailyPnL) if dailyPnL is not None else None,
+                "unrealized_pnl": float(unrealizedPnL) if unrealizedPnL is not None else None,
+                "realized_pnl": float(realizedPnL) if realizedPnL is not None else None,
+            }
+        evt = self.pnl_events.get(reqId)
+        if evt is not None:
+            evt.set()
 
     def error(
         self,
@@ -409,6 +431,53 @@ class IBService:
             with self._app._lock:
                 self._app.account_summary_events.pop(req_id, None)
                 self._app.account_summary_data.pop(req_id, None)
+
+    async def get_account_pnl(self) -> dict:
+        """Return IB's authoritative account-level PnL via reqPnL.
+
+        Mirrors the figures shown in TWS:
+          - daily_pnl:      today's total P&L (realized + unrealized)
+          - realized_pnl:   today's realized P&L
+          - unrealized_pnl: current open-position P&L
+
+        These are IB's own calculations (cost basis, marks, commissions) and are
+        the only way to match what the user sees in their IB account window.
+        """
+        if not self.is_connected or not self._app:
+            return {"error": "Not connected to IB."}
+
+        with self._app._lock:
+            accounts = list(self._app.managed_accounts)
+        account = accounts[0] if accounts else None
+        if not account:
+            return {"error": "No managed IB account available for PnL request."}
+
+        req_id = self._next_req_id()
+        evt = threading.Event()
+        with self._app._lock:
+            self._app.pnl_data.pop(req_id, None)
+            self._app.pnl_events[req_id] = evt
+
+        try:
+            self._app.reqPnL(req_id, account, "")
+            done = await self._wait_event(evt, timeout=10)
+            try:
+                self._app.cancelPnL(req_id)
+            except Exception:
+                pass
+            if not done:
+                err = self._pop_req_error(req_id)
+                return {"error": err or "Timed out while fetching account PnL."}
+            with self._app._lock:
+                result = dict(self._app.pnl_data.get(req_id, {}))
+            return result or {"error": "No PnL data returned."}
+        except Exception as exc:
+            logger.error("get_account_pnl error: %s", exc)
+            return {"error": "Failed to retrieve account PnL."}
+        finally:
+            with self._app._lock:
+                self._app.pnl_events.pop(req_id, None)
+                self._app.pnl_data.pop(req_id, None)
 
     async def get_positions(self) -> list[dict]:
         if not self.is_connected or not self._app:

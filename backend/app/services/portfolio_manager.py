@@ -3036,6 +3036,106 @@ async def _get_today_simulated_realized_gain() -> float:
         return 0.0
 
 
+async def _get_today_ib_realized_gain(ib_mode: str) -> float:
+    """Return today's realized P&L for IB paper/live mode (ET day boundary).
+
+    Mirrors the realized-metrics endpoint: in IB mode the engine records fills in
+    the ``trades`` table (not ``sandbox_trades``), and most rows carry no explicit
+    ``pnl`` so the value must be derived via running average-cost over the full
+    filled history. Crash protection must read this same source so its daily
+    figure matches the "Today's Realised P&L" card the user sees.
+    """
+    from app.models.trade import Trade, TradingMode
+
+    try:
+        from app.services.sandbox_engine import _ET
+        today_start = datetime.now(tz=_ET).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).astimezone(timezone.utc)
+    except Exception:
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    mode = TradingMode.LIVE if str(ib_mode or "").strip().lower() == "live" else TradingMode.PAPER
+
+    def _to_utc(dt):
+        if dt is None:
+            return None
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+    try:
+        from sqlalchemy import select as sa_select
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                sa_select(Trade).where(Trade.mode == mode).order_by(Trade.created_at)
+            )
+            rows = res.scalars().all()
+    except Exception as exc:
+        logger.warning("PM crash check: failed to query IB realized gain: %s", exc)
+        return 0.0
+
+    # Running average-cost FIFO close, identical to the realized-metrics endpoint.
+    state_by_symbol: dict[str, dict[str, float]] = {}
+    total = 0.0
+    for t in rows:
+        status = str(getattr(getattr(t, "status", None), "value", getattr(t, "status", "")) or "").upper()
+        if status != "FILLED":
+            continue
+        sym = str(getattr(t, "symbol", "") or "").upper()
+        side = str(getattr(getattr(t, "side", None), "value", getattr(t, "side", "")) or "").upper()
+        qty = float(getattr(t, "quantity", 0.0) or 0.0)
+        px = float(getattr(t, "price", 0.0) or 0.0)
+        if not sym or qty <= 0.0 or px <= 0.0:
+            continue
+
+        st = state_by_symbol.get(sym) or {"qty": 0.0, "avg": 0.0}
+        derived: float | None = None
+        if side == "BUY":
+            if st["qty"] >= 0.0:
+                next_qty = st["qty"] + qty
+                st["avg"] = ((st["avg"] * st["qty"]) + (px * qty)) / next_qty if next_qty > 0 else 0.0
+                st["qty"] = next_qty
+            else:
+                if abs(st["qty"]) > qty:
+                    st["qty"] += qty
+                elif abs(st["qty"]) == qty:
+                    st["qty"] = 0.0
+                    st["avg"] = 0.0
+                else:
+                    st["qty"] = qty - abs(st["qty"])
+                    st["avg"] = px
+        elif side == "SELL":
+            if st["qty"] > 0.0 and st["avg"] > 0.0:
+                close_qty = min(qty, st["qty"])
+                if close_qty > 0.0:
+                    derived = round((px - st["avg"]) * close_qty, 4)
+                st["qty"] -= close_qty
+                if st["qty"] <= 0.0:
+                    st["avg"] = 0.0
+            else:
+                cur_short = abs(min(st["qty"], 0.0))
+                next_short = cur_short + qty
+                st["qty"] = -next_short
+                st["avg"] = ((st["avg"] * cur_short) + (px * qty)) / next_short if next_short > 0 else 0.0
+        state_by_symbol[sym] = st
+
+        explicit_raw = getattr(t, "pnl", None)
+        explicit = float(explicit_raw) if explicit_raw is not None else None
+        if explicit is not None and not (derived is not None and abs(explicit) < 1e-9 and side == "SELL"):
+            normalized = explicit
+        elif derived is not None and side == "SELL":
+            normalized = derived
+        else:
+            normalized = None
+        if normalized is None:
+            continue
+
+        ts = _to_utc(getattr(t, "filled_at", None) or getattr(t, "created_at", None))
+        if ts is not None and ts >= today_start:
+            total += float(normalized)
+
+    return float(total)
+
+
 async def _check_crash_protection_simulated() -> None:
     """Check daily realized gain for simulated mode; trigger crash shutdown if threshold breached."""
     crash_enabled = bool(_settings.get("crash_protection_enabled", False))
@@ -3254,19 +3354,32 @@ async def _process_ib_engine_signals() -> None:
         else:
             baseline = float(_state.get("crash_baseline_equity") or 0.0)
 
-        # Get today's realized P&L. Use the app's own recorded SELL trades (the
-        # same figure shown as "Today's Realised P&L" in the UI) rather than IB's
-        # account-summary RealizedPnL, which is unreliable in paper accounts
-        # (frequently 0) and reports a cumulative/lifetime value instead of the
-        # current trading day's session P&L.
-        daily_realized_gain = await _get_today_simulated_realized_gain()
-        if daily_realized_gain == 0.0:
-            # Fall back to IB's account-summary figure only when we have no
-            # recorded trades for today (e.g. fills not yet reconciled).
-            try:
-                daily_realized_gain = float(account_summary.get("RealizedPnL") or 0.0)
-            except Exception:
-                daily_realized_gain = 0.0
+        # Get today's P&L from IB's authoritative account-level PnL feed
+        # (reqPnL dailyPnL) — the same figure shown in the TWS account window and
+        # in the "Today's Realised P&L" card. This is IB's own calculation (cost
+        # basis, marks, commissions) so the kill-switch acts on the real number
+        # the user sees rather than an app-derived approximation.
+        daily_realized_gain = 0.0
+        ib_pnl_used = False
+        try:
+            ib_pnl = await ib_service.get_account_pnl()
+            if isinstance(ib_pnl, dict) and not ib_pnl.get("error"):
+                _daily = ib_pnl.get("daily_pnl")
+                if _daily is not None:
+                    daily_realized_gain = float(_daily)
+                    ib_pnl_used = True
+        except Exception as exc:
+            logger.warning("PM crash check: IB account PnL unavailable: %s", exc)
+
+        if not ib_pnl_used:
+            # Fall back to the app-derived IB trade-ledger figure, then to IB's
+            # account-summary RealizedPnL, only when the live PnL feed is absent.
+            daily_realized_gain = await _get_today_ib_realized_gain(ib_mode)
+            if daily_realized_gain == 0.0:
+                try:
+                    daily_realized_gain = float(account_summary.get("RealizedPnL") or 0.0)
+                except Exception:
+                    daily_realized_gain = 0.0
 
         # Calculate loss threshold
         loss_threshold = (
