@@ -370,8 +370,48 @@ export default function SandboxPanel() {
     refetchInterval: appSettings.sandbox_quotes_ms,
   })
   const quotes = quotesData ?? {}
+  // The header/quote (/quote) and the chart (/history) are served by separate
+  // endpoints with independent 60s caches, so the quote's last_price can drift
+  // away from the latest candle during fast moves. Sync the selected symbol's
+  // quote to its most recent chart bar (shared cache key with PositionDetail's
+  // chart) so the price shown in the detail header, position table, and sidebar
+  // all match the candles for that symbol.
+  const { data: selectedHistData } = useQuery({
+    queryKey: ['history', selectedSymbol, '1d', '1m'],
+    queryFn: () => getHistory(selectedSymbol, '1d', '1m'),
+    enabled: !!selectedSymbol,
+    staleTime: 120000,
+    refetchInterval: appSettings.portfolio_detail_ms,
+  })
+  const syncedQuotes = useMemo(() => {
+    const sym = selectedSymbol
+    const q = sym ? quotes[sym] : null
+    if (!sym || !q) return quotes
+    const bars = selectedHistData?.data ?? []
+    let close = null
+    for (let i = bars.length - 1; i >= 0; i--) {
+      const c = Number(bars[i]?.close)
+      if (Number.isFinite(c) && c > 0) { close = c; break }
+    }
+    if (close == null) return quotes
+    const prev = Number(q.previous_close)
+    const hasPrev = Number.isFinite(prev) && prev > 0
+    const dayLow = Number(q.day_low)
+    const dayHigh = Number(q.day_high)
+    return {
+      ...quotes,
+      [sym]: {
+        ...q,
+        last_price: close,
+        change: hasPrev ? close - prev : q.change,
+        change_pct: hasPrev ? ((close - prev) / prev) * 100 : q.change_pct,
+        day_low: Number.isFinite(dayLow) ? Math.min(dayLow, close) : q.day_low,
+        day_high: Number.isFinite(dayHigh) ? Math.max(dayHigh, close) : q.day_high,
+      },
+    }
+  }, [quotes, selectedSymbol, selectedHistData])
   const getOwnedMarketPrice = pos => {
-    const quotePrice = Number(quotes[pos.symbol]?.last_price)
+    const quotePrice = Number(syncedQuotes[pos.symbol]?.last_price)
     const liveQuotePrice = Number.isFinite(quotePrice) && quotePrice > 0 ? quotePrice : null
     const storedMarketPrice = Number(pos.market_price ?? pos.last_price)
     const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
@@ -1152,7 +1192,7 @@ export default function SandboxPanel() {
         totalRealizedPnl={totalRealizedPnl}
         managerSettings={managerState?.settings ?? null}
         positions={positions}
-        quotes={quotes}
+        quotes={syncedQuotes}
         sectors={sectors}
         selectedSymbol={selectedSymbol}
         pmScores={managerState?.scores ?? {}}
@@ -1451,7 +1491,7 @@ export default function SandboxPanel() {
               positions={positions}
               positionsRefreshing={isAccountFetching || isPositionsFetching}
               ibPositions={viewIbMode ? (ibPositionsData?.positions ?? []) : []}
-              quotes={quotes}
+              quotes={syncedQuotes}
               totalEquity={totalEquity}
               totalUnrealizedPnl={totalUnrealizedPnl}
               totalRealizedPnl={totalRealizedPnl}
@@ -1478,7 +1518,7 @@ export default function SandboxPanel() {
               selectedMarketValue={selectedMarketValue}
               selectedUnrealised={selectedUnrealised}
               accountData={accountData}
-              quotes={quotes}
+              quotes={syncedQuotes}
               trades={trades}
               activities={visibleActivities}
               engineState={engineState}

@@ -2206,7 +2206,10 @@ async def _attempt_ib_eod_liquidation() -> None:
     }
 
     ai_allow_overnight = bool(_settings.get("ai_tag_allow_overnight", True))
-    ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
+    # AI-tag decisions must use the same gate that maintains _state["ai_tags"]
+    # (matrix routing). Otherwise the cache goes stale while the UI shows live
+    # classifications, causing decisions to act on an outdated tag.
+    ai_enabled = _use_matrix_sentiment_routing()
     now = datetime.now(timezone.utc)
     cooldown_s = 30
 
@@ -2810,7 +2813,10 @@ async def _cancel_bearish_pending_orders() -> None:
         in_eod_window = not hold_overnight and _is_in_eod_sell_window(eod_mins)
 
         market_score = float(_compute_market_classification().get("score", 0.0))
-        ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
+        # AI-tag decisions must use the same gate that maintains _state["ai_tags"]
+        # (matrix routing). Otherwise the cache goes stale while the UI shows live
+        # classifications, causing decisions to act on an outdated tag.
+        ai_enabled = _use_matrix_sentiment_routing()
         drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.0))
         pending_cancel_after_bars = max(0, int(_settings.get("pending_cancel_after_bars", 3) or 3))
         bar_minutes = _interval_to_minutes(str(_settings.get("sentiment_interval", "1m") or "1m"))
@@ -3462,7 +3468,10 @@ async def _process_ib_engine_signals() -> None:
     take_profit_pct = float(2.5 if _take_profit_pct is None else _take_profit_pct)
     stop_loss_value = max(0.0, float(_settings.get("stop_loss_value", 0.0) or 0.0))
     take_profit_value = max(0.0, float(_settings.get("take_profit_value", 0.0) or 0.0))
-    ai_enabled = bool(_settings.get("ai_sentiment_change_enabled", True))
+    # AI-tag decisions must use the same gate that maintains _state["ai_tags"]
+    # (matrix routing). Otherwise the cache goes stale while the UI shows live
+    # classifications, causing buys to be blocked by an outdated tag.
+    ai_enabled = _use_matrix_sentiment_routing()
     allow_order_placement = _ib_order_placement_allowed_now()
 
     order_candidates: list[dict[str, Any]] = []
