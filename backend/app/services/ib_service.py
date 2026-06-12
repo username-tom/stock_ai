@@ -19,6 +19,7 @@ try:
     from ibapi.common import BarData, OrderId, TickerId
     from ibapi.contract import Contract
     from ibapi.order import Order
+    from ibapi.execution import ExecutionFilter
     from ibapi.wrapper import EWrapper
 
     IB_AVAILABLE = True
@@ -30,6 +31,7 @@ except ImportError:
     BarData = object  # type: ignore[assignment]
     OrderId = int  # type: ignore[assignment]
     TickerId = int  # type: ignore[assignment]
+    ExecutionFilter = object  # type: ignore[assignment]
     IB_AVAILABLE = False
     logger.warning("ibapi not installed; IB features are unavailable.")
 
@@ -51,6 +53,9 @@ class _IBApiApp(EWrapper, EClient):
         # Account-level PnL (reqPnL) keyed by reqId: dailyPnL/unrealizedPnL/realizedPnL.
         self.pnl_data: dict[int, dict] = {}
         self.pnl_events: dict[int, threading.Event] = {}
+        # Per-position PnL (reqPnLSingle) keyed by reqId: value/unrealizedPnL etc.
+        self.pnl_single_data: dict[int, dict] = {}
+        self.pnl_single_events: dict[int, threading.Event] = {}
 
         self.positions: list[dict] = []
         self.positions_event = threading.Event()
@@ -66,6 +71,13 @@ class _IBApiApp(EWrapper, EClient):
         self.open_orders_event = threading.Event()
         self.order_status: dict[int, str] = {}
         self.order_avg_fill_price: dict[int, float] = {}
+
+        # Executions + commission reports (authoritative realized PnL per fill).
+        # Keyed by reqId for the execution list; commission reports are keyed by
+        # execId and joined to executions after execDetailsEnd.
+        self.executions: dict[int, list[dict]] = {}
+        self.executions_event: dict[int, threading.Event] = {}
+        self.commission_reports: dict[str, dict] = {}
 
         self.request_errors: dict[int, list[str]] = {}
         self.loop_error: str | None = None
@@ -108,6 +120,27 @@ class _IBApiApp(EWrapper, EClient):
         if evt is not None:
             evt.set()
 
+    def pnlSingle(
+        self,
+        reqId: int,
+        pos,
+        dailyPnL: float,
+        unrealizedPnL: float,
+        realizedPnL: float,
+        value: float,
+    ) -> None:
+        with self._lock:
+            self.pnl_single_data[reqId] = {
+                "pos": float(pos) if pos is not None else None,
+                "daily_pnl": float(dailyPnL) if dailyPnL is not None else None,
+                "unrealized_pnl": float(unrealizedPnL) if unrealizedPnL is not None else None,
+                "realized_pnl": float(realizedPnL) if realizedPnL is not None else None,
+                "value": float(value) if value is not None else None,
+            }
+        evt = self.pnl_single_events.get(reqId)
+        if evt is not None:
+            evt.set()
+
     def error(
         self,
         reqId: int,
@@ -145,6 +178,7 @@ class _IBApiApp(EWrapper, EClient):
                     "symbol": contract.symbol,
                     "secType": contract.secType,
                     "exchange": contract.exchange,
+                    "con_id": getattr(contract, "conId", None),
                     "quantity": pos,
                     "avg_cost": round(avgCost, 4),
                     "market_price": None,
@@ -260,6 +294,56 @@ class _IBApiApp(EWrapper, EClient):
                 self.open_orders[int(orderId)]["filled"] = float(filled)
                 self.open_orders[int(orderId)]["remaining"] = float(remaining)
                 self.open_orders[int(orderId)]["avg_fill_price"] = float(avgFillPrice)
+
+    def execDetails(self, reqId: int, contract: Any, execution: Any) -> None:
+        try:
+            row = {
+                "exec_id": str(getattr(execution, "execId", "") or ""),
+                "symbol": str(getattr(contract, "symbol", "") or "").upper(),
+                "side": str(getattr(execution, "side", "") or "").upper(),  # BOT / SLD
+                "shares": float(getattr(execution, "shares", 0.0) or 0.0),
+                "price": float(getattr(execution, "price", 0.0) or 0.0),
+                "perm_id": int(getattr(execution, "permId", 0) or 0),
+                "order_id": int(getattr(execution, "orderId", 0) or 0),
+                "time": str(getattr(execution, "time", "") or ""),
+                "realized_pnl": None,
+                "commission": None,
+            }
+        except Exception:
+            return
+        with self._lock:
+            self.executions.setdefault(int(reqId), []).append(row)
+
+    def execDetailsEnd(self, reqId: int) -> None:
+        evt = self.executions_event.get(int(reqId))
+        if evt is not None:
+            evt.set()
+
+    def commissionReport(self, commissionReport: Any) -> None:
+        try:
+            exec_id = str(getattr(commissionReport, "execId", "") or "")
+            if not exec_id:
+                return
+            realized = getattr(commissionReport, "realizedPNL", None)
+            commission = getattr(commissionReport, "commission", None)
+            # IB sends DBL_MAX (~1.79e308) for realizedPNL on opening trades.
+            realized_val = (
+                None
+                if realized is None or abs(float(realized)) >= 1.0e307
+                else float(realized)
+            )
+            commission_val = (
+                None
+                if commission is None or abs(float(commission)) >= 1.0e307
+                else float(commission)
+            )
+        except Exception:
+            return
+        with self._lock:
+            self.commission_reports[exec_id] = {
+                "realized_pnl": realized_val,
+                "commission": commission_val,
+            }
 
 
 class IBService:
@@ -470,7 +554,21 @@ class IBService:
                 return {"error": err or "Timed out while fetching account PnL."}
             with self._app._lock:
                 result = dict(self._app.pnl_data.get(req_id, {}))
-            return result or {"error": "No PnL data returned."}
+            if not result:
+                return {"error": "No PnL data returned."}
+            # IB sends DBL_MAX (~1.7976931348623157e+308) for fields that are not
+            # yet computed; treat those as missing rather than passing the
+            # sentinel through as a real (astronomically large) PnL value.
+            _IB_UNSET = 1.0e307
+            cleaned: dict = {}
+            for key in ("daily_pnl", "unrealized_pnl", "realized_pnl"):
+                val = result.get(key)
+                cleaned[key] = None if (val is None or abs(float(val)) >= _IB_UNSET) else float(val)
+            logger.info(
+                "IB account PnL for %s: daily=%s realized=%s unrealized=%s",
+                account, cleaned["daily_pnl"], cleaned["realized_pnl"], cleaned["unrealized_pnl"],
+            )
+            return cleaned
         except Exception as exc:
             logger.error("get_account_pnl error: %s", exc)
             return {"error": "Failed to retrieve account PnL."}
@@ -478,6 +576,119 @@ class IBService:
             with self._app._lock:
                 self._app.pnl_events.pop(req_id, None)
                 self._app.pnl_data.pop(req_id, None)
+
+    async def get_executions(self) -> list[dict]:
+        """Return today's IB executions with IB's own realized PnL per fill.
+
+        Uses ``reqExecutions`` + ``commissionReport`` so realized P&L matches the
+        TWS account window exactly (IB cost basis, FIFO, commissions). IB only
+        returns executions for the current trading day, so this is the
+        authoritative source for *today's* realized gain and for backfilling the
+        local trade ledger. Each row: symbol, side (BUY/SELL), shares, price,
+        order_id, perm_id, time, realized_pnl (None for opening fills),
+        commission.
+        """
+        if not self.is_connected or not self._app:
+            return []
+
+        req_id = self._next_req_id()
+        evt = threading.Event()
+        with self._app._lock:
+            self._app.executions.pop(req_id, None)
+            self._app.executions_event[req_id] = evt
+
+        try:
+            self._app.reqExecutions(req_id, ExecutionFilter())
+            done = await self._wait_event(evt, timeout=10)
+            if not done:
+                return []
+            # commissionReport callbacks may arrive immediately after
+            # execDetailsEnd; give them a brief window to populate.
+            await asyncio.sleep(0.3)
+            with self._app._lock:
+                rows = [dict(r) for r in self._app.executions.get(req_id, [])]
+                reports = dict(self._app.commission_reports)
+
+            for row in rows:
+                rep = reports.get(row.get("exec_id", ""))
+                if rep:
+                    row["realized_pnl"] = rep.get("realized_pnl")
+                    row["commission"] = rep.get("commission")
+                # Normalize IB side codes (BOT/SLD) to BUY/SELL.
+                side = str(row.get("side") or "").upper()
+                row["side"] = "BUY" if side in {"BOT", "BUY"} else "SELL" if side in {"SLD", "SELL"} else side
+            return rows
+        except Exception as exc:
+            logger.error("get_executions error: %s", exc)
+            return []
+        finally:
+            with self._app._lock:
+                self._app.executions_event.pop(req_id, None)
+                self._app.executions.pop(req_id, None)
+
+    async def get_positions_pnl(self) -> dict[str, dict]:
+        """Return IB's authoritative per-position PnL via reqPnLSingle.
+
+        ``pnlSingle`` reports each position's current market ``value`` and
+        ``unrealizedPnL`` using IB's own marks and cost basis, so the per-symbol
+        figures sum exactly to the account-level ``UnrealizedPnL`` (and
+        ``GrossPositionValue``). This keeps the breakdown table rows and their
+        footer total consistent with IB. Returns
+        ``{symbol: {unrealized_pnl, market_value, market_price, quantity}}``.
+        """
+        if not self.is_connected or not self._app:
+            return {}
+        with self._app._lock:
+            accounts = list(self._app.managed_accounts)
+        account = accounts[0] if accounts else None
+        if not account:
+            return {}
+
+        positions = await self.get_positions()
+        out: dict[str, dict] = {}
+        _IB_UNSET = 1.0e307
+        for p in positions:
+            con_id = p.get("con_id")
+            symbol = str(p.get("symbol") or "").upper()
+            qty = float(p.get("quantity") or 0.0)
+            if not con_id or not symbol or qty == 0.0:
+                continue
+            req_id = self._next_req_id()
+            evt = threading.Event()
+            with self._app._lock:
+                self._app.pnl_single_data.pop(req_id, None)
+                self._app.pnl_single_events[req_id] = evt
+            try:
+                self._app.reqPnLSingle(req_id, account, "", int(con_id))
+                done = await self._wait_event(evt, timeout=5)
+                try:
+                    self._app.cancelPnLSingle(req_id)
+                except Exception:
+                    pass
+                if not done:
+                    continue
+                with self._app._lock:
+                    data = dict(self._app.pnl_single_data.get(req_id, {}))
+            except Exception as exc:
+                logger.warning("get_positions_pnl error for %s: %s", symbol, exc)
+                continue
+            finally:
+                with self._app._lock:
+                    self._app.pnl_single_events.pop(req_id, None)
+                    self._app.pnl_single_data.pop(req_id, None)
+
+            unreal = data.get("unrealized_pnl")
+            value = data.get("value")
+            unreal = None if (unreal is None or abs(float(unreal)) >= _IB_UNSET) else float(unreal)
+            value = None if (value is None or abs(float(value)) >= _IB_UNSET) else float(value)
+            market_price = (value / qty) if (value is not None and qty != 0.0) else None
+            out[symbol] = {
+                "unrealized_pnl": unreal,
+                "market_value": value,
+                "market_price": market_price,
+                "quantity": qty,
+            }
+        return out
 
     async def get_positions(self) -> list[dict]:
         if not self.is_connected or not self._app:

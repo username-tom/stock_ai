@@ -6,7 +6,13 @@ export const fmtMoney = n => n == null ? '—' : `$${Number(n).toFixed(2)}`
 export const stratLabel = t => t.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 export const defaultParams = type => Object.fromEntries((STRATEGY_PARAM_UI[type] || []).map(f => [f.key, f.default]))
 export function getVisibleTradePnl(tradeLike) {
-  const pnl = Number(tradeLike?.pnl)
+  // A missing/null pnl means the broker did not report a realized result for
+  // this fill — it is NOT a $0 breakeven trade. Coercing null→0 here previously
+  // counted hundreds of unreported IB SELL fills as breakeven, collapsing the
+  // win rate. Treat null/undefined/'' as "no realized pnl" (return null).
+  const raw = tradeLike?.pnl
+  if (raw == null || raw === '') return null
+  const pnl = Number(raw)
   if (!Number.isFinite(pnl)) return null
   const side = String(tradeLike?.side ?? '').trim().toUpperCase()
   if (side !== 'SELL') return null

@@ -198,9 +198,31 @@ export default function PortfolioOverview({
       : null
     const ibMarketPrice = Number.isFinite(storedMarketPrice) && storedMarketPrice > 0 ? storedMarketPrice : null
 
+    if (!isSimulated) {
+      // IB mode: prefer IB's own mark (market_price / market_value) so the MKT
+      // VALUE and UNREALISED GAIN columns — and their footer totals — match IB's
+      // account-level UnrealizedPnL. The live quote feed can diverge from IB's
+      // marks (different source/timing), which previously made the per-row sum
+      // disagree with the IB total shown in the footer. Fall back to the live
+      // quote only when IB has not reported a mark yet.
+      return ibMarketPrice ?? marketValuePrice ?? liveQuotePrice ?? null
+    }
     if (liveQuotePrice != null) return liveQuotePrice
-    if (!isSimulated) return ibMarketPrice ?? marketValuePrice ?? null
     return ibMarketPrice ?? marketValuePrice ?? Number(pos.avg_cost ?? 0)
+  }
+  // Resolve a position's unrealized P&L. In IB mode, IB's own per-position
+  // unrealized (reqPnLSingle, exposed by the backend as pos.unrealized_pnl)
+  // reconciles to the account-level UnrealizedPnL, so prefer it; recomputing
+  // from the displayed mark can diverge from IB's cost basis/mark and make the
+  // rows + footer disagree with the headline IB total. Fall back to the
+  // mark-based estimate (and always recompute in simulated mode).
+  const resolvePositionUnrealized = (pos, mp, shares, avgCost) => {
+    if (!isSimulated) {
+      const ibUnreal = Number(pos?.unrealized_pnl)
+      if (Number.isFinite(ibUnreal)) return ibUnreal
+    }
+    if (!Number.isFinite(Number(mp)) || shares === 0) return null
+    return (Number(mp) - avgCost) * shares
   }
   const effectivePieData = useMemo(() => {
     if (isSimulated) return pieData
@@ -269,13 +291,10 @@ export default function PortfolioOverview({
   const ibBuyingPower = numOrNull(accountData?.buying_power)
   const ibCashValue = numOrNull(accountData?.cash_value)
   const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
-  const ibRealizedPnl = numOrNull(accountData?.realized_pnl)
-  // IB's authoritative account-level PnL (reqPnL), matching the TWS account window:
-  //   ib_daily_pnl       -> today's session P&L (the "today" figure the user reads)
-  //   ib_realized_today  -> IB's cumulative realized P&L
-  const ibDailyPnl = numOrNull(accountData?.ib_daily_pnl)
-  const ibRealizedTodayAuthoritative = numOrNull(accountData?.ib_realized_today)
-  const ibRealizedPnlFromMetrics = numOrNull(realizedMetrics?.realized_pnl_sum)
+  // NOTE: IB account-summary RealizedPnL and reqPnL dailyPnL are intentionally
+  // NOT used for the realized cards. IB's RealizedPnL is only session/daily (not
+  // cumulative) and dailyPnL folds in unrealized marks; the app trade ledger is
+  // the authoritative cumulative + per-period realized source.
   const totalFundsSource = String(accountData?.total_funds_source ?? '').toLowerCase()
   const usingPaperCapBase = !isSimulated && activeProfile === 'paper' && totalFundsSource === 'paper_max_allocation_sum'
   const performanceBase = (() => {
@@ -302,8 +321,7 @@ export default function PortfolioOverview({
       if (shares === 0) continue
       const avgCost = Number(pos._effAvgCost ?? 0)
       const mp = resolveMarketPrice(pos, quotes[pos.symbol])
-      if (!Number.isFinite(Number(mp))) continue
-      const unreal = (mp - avgCost) * shares
+      const unreal = resolvePositionUnrealized(pos, mp, shares, avgCost)
       if (Number.isFinite(unreal)) {
         sum += unreal
         hasAny = true
@@ -319,7 +337,10 @@ export default function PortfolioOverview({
     : (ibUnrealizedPnl ?? breakdownUnrealizedPnl ?? totalUnrealizedPnl)
   // In IB mode, IB's own account-summary RealizedPnL is authoritative; only fall
   // back to the calculated trade-log figure when IB has not reported a value yet.
-  const headlineRealized = isSimulated ? totalRealizedPnl : (ibRealizedPnl ?? ibRealizedPnlFromMetrics)
+  // IB's account-summary RealizedPnL is only session/daily, not cumulative, so it
+  // must NOT feed the cumulative card. The app trade ledger (per-position
+  // realized_pnl sum) is the authoritative cumulative source IB does not expose.
+  const headlineRealized = isSimulated ? totalRealizedPnl : totalRealizedPnl
 
   // Fallback period metrics from cumulative curve if backend metrics are temporarily unavailable.
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
@@ -397,13 +418,14 @@ export default function PortfolioOverview({
             derived = (px - avg) * qty
           }
         }
-        if (!isSimulated && Number.isFinite(explicit) && Math.abs(explicit) < 1e-9 && Number.isFinite(derived)) {
-          return { symbol, pnl: derived, date: parsePointDate(row.date) }
-        }
+        // In IB mode, only trust explicit broker-reported pnl. Deriving from a
+        // reconstructed avg-cost basis over the incomplete IB fill ledger (most
+        // fills carry no pnl) fabricates phantom losses, inflating the daily/
+        // weekly/monthly figures far beyond the real realized total.
         if (Number.isFinite(explicit)) {
           return { symbol, pnl: explicit, date: parsePointDate(row.date) }
         }
-        if (Number.isFinite(derived)) {
+        if (isSimulated && Number.isFinite(derived)) {
           return { symbol, pnl: derived, date: parsePointDate(row.date) }
         }
         return null
@@ -677,16 +699,22 @@ export default function PortfolioOverview({
     const shares = Number(pos._effShares ?? 0)
     const avgCost = Number(pos._effAvgCost ?? 0)
     const mp = Number(resolveMarketPrice(pos, quotes[pos.symbol]))
-    if (!Number.isFinite(shares) || shares === 0 || !Number.isFinite(mp)) continue
-    const mv = shares * mp
-    if (Number.isFinite(mv)) breakdownMarketValueTotal += mv
-    const unreal = (mp - avgCost) * shares
+    if (!Number.isFinite(shares) || shares === 0) continue
+    if (Number.isFinite(mp)) {
+      const mv = shares * mp
+      if (Number.isFinite(mv)) breakdownMarketValueTotal += mv
+    }
+    const unreal = resolvePositionUnrealized(pos, mp, shares, avgCost)
     if (Number.isFinite(unreal)) breakdownUnrealizedTotal += unreal
   }
   const footerRealizedValue = isSimulated
     ? totalRealizedPnl
     : breakdownRealizedTotal
   const footerMarketValue = isSimulated ? totalEquity : breakdownMarketValueTotal
+  // Footer Total must equal the SUM of the displayed rows so the UNREALISED
+  // column always adds up. Each row now uses IB's per-position mark
+  // (reqPnLSingle value/unrealized), which reconciles to IB's account-level
+  // UnrealizedPnL — so this is both internally consistent and IB-accurate.
   const footerUnrealizedValue = isSimulated
     ? headlineUnrealized
     : breakdownUnrealizedTotal
@@ -696,11 +724,12 @@ export default function PortfolioOverview({
   const footerUnrealizedPct = footerMarketValue > 0 ? (footerUnrealizedValue / footerMarketValue) * 100 : null
   const topEquityValue = isSimulated ? totalEquity : footerMarketValue
   const topUnrealizedValue = isSimulated ? headlineUnrealized : (ibUnrealizedPnl ?? footerUnrealizedValue)
-  // Headline cumulative realized: prefer IB's authoritative value over the
-  // calculated per-symbol trade-log sum (footerRealizedValue) in IB mode.
+  // Cumulative realized: the app trade ledger (footerRealizedValue) is the
+  // source of truth. IB's account RealizedPnL is session-only and would not
+  // match the breakdown total or sidebar, so it is not used here.
   const topRealizedValue = isSimulated
     ? headlineRealized
-    : (ibRealizedPnl ?? ibRealizedTodayAuthoritative ?? footerRealizedValue)
+    : footerRealizedValue
   const topUnrealizedPct = topEquityValue > 0 ? (topUnrealizedValue / topEquityValue) * 100 : null
   // Realised % must use the same base as its label (performanceBaseLabel: alloc
   // cap / net liq), not gross position value, otherwise the percentage is wrong.
@@ -725,18 +754,19 @@ export default function PortfolioOverview({
 
   const displayEquity = isSimulated ? totalEquity : footerMarketValue
   const displayUnrealized = isSimulated ? headlineUnrealized : (ibUnrealizedPnl ?? footerUnrealizedValue)
-  // Headline "Realised P&L (Cumulative)" card: IB's authoritative cumulative
-  // realized value is the source of truth in IB mode, falling back to the
-  // calculated trade-log sum only when IB is absent.
+  // Headline "Realised P&L (Cumulative)" card: the app trade-ledger sum is the
+  // authoritative cumulative figure (IB only exposes a session RealizedPnL),
+  // and it matches the breakdown total and sidebar mini-card.
   const displayRealized = isSimulated
     ? headlineRealized
-    : (ibRealizedPnl ?? ibRealizedTodayAuthoritative ?? footerRealizedValue)
-  // "Today's Realised P&L" card: in IB mode use IB's authoritative daily P&L
-  // (the same figure shown in the TWS account window), falling back to the
-  // realized-metrics/chart-derived value only when IB's PnL feed is unavailable.
+    : footerRealizedValue
+  // "Today's Realised P&L" card: show REALISED-only P&L (today's booked SELL
+  // pnl from IB's own fills via realized-metrics), NOT IB's reqPnL dailyPnL,
+  // which is today's realized + unrealized TOTAL and would understate the
+  // realised loss whenever open positions carry offsetting unrealized gains.
   const effectiveDailyPnl = isSimulated
     ? dailyPnl
-    : (ibDailyPnl ?? dailyPnl ?? ibChartDerived.dailyPnl)
+    : (dailyPnl ?? ibChartDerived.dailyPnl)
   const effectiveWeeklyPnl = weeklyPnl ?? (isSimulated ? null : ibChartDerived.weeklyPnl)
   const effectiveMonthlyPnl = monthlyPnl ?? (isSimulated ? null : ibChartDerived.monthlyPnl)
   const effectiveDailyPnlPct = (performanceBase > 0 && effectiveDailyPnl != null) ? (effectiveDailyPnl / performanceBase) * 100 : null
@@ -1108,7 +1138,7 @@ export default function PortfolioOverview({
                     const cashRemaining = isSimulated
                       ? Math.max(0, Number(pos.allocated_funds ?? 0) - (avgCost * shares + pendingCost))
                       : null
-                    const unreal = hasMarketPrice ? ((mv ?? 0) - costBasis) : null
+                    const unreal = resolvePositionUnrealized(pos, mp, shares, avgCost)
                     const unrealPct = (unreal != null && Math.abs(costBasis) > 0) ? (unreal / Math.abs(costBasis)) * 100 : null
                     const storedRealized = Number(pos.realized_pnl ?? 0)
                     const realizedValue = storedRealized

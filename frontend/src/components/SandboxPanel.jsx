@@ -176,6 +176,14 @@ export default function SandboxPanel() {
   const [allocInput, setAllocInput] = useState('')
   const [tradeForm, setTradeForm] = useState({ side: 'BUY', quantity: '', price: '', reason: 'manual' })
   const [tradeMsg, setTradeMsg] = useState(null)
+  const [removeNotice, setRemoveNotice] = useState(null)
+
+  // Auto-dismiss the position-removal notice shown on the overview.
+  useEffect(() => {
+    if (!removeNotice) return
+    const t = setTimeout(() => setRemoveNotice(null), 7000)
+    return () => clearTimeout(t)
+  }, [removeNotice])
 
   // Consume ?symbol= param on navigation from dashboard
   useEffect(() => {
@@ -716,9 +724,13 @@ export default function SandboxPanel() {
 
       const retained = prev.filter(a => {
         const sameProfile = String(a.profile ?? 'simulated').toLowerCase() === String(activeProfile).toLowerCase()
+        // Never carry activities from a different profile — this prevents
+        // simulated trades from leaking into IB views (and vice versa).
+        if (!sameProfile) return false
+        // Same-profile persisted trades are rebuilt fresh from activeTrades.
         // Keep IB sync snapshots (open orders/positions) so inline symbol logs
         // can show activity even when there is no persisted trade record yet.
-        if (a.type === 'trade' && sameProfile && !a.syncFromIb) return false
+        if (a.type === 'trade' && !a.syncFromIb) return false
         return true
       })
       return [...tradeEntries, ...retained]
@@ -728,16 +740,8 @@ export default function SandboxPanel() {
 
   // mutations
   const removeSymbolMut = useMutation({
-    mutationFn: async (s) => {
-      if (!ibConnected) {
-        return removeSandboxSymbol(s, activeProfile)
-      }
-
-      // Remove from backend watchlist metadata (and release any idle allocation).
-      await removeSandboxSymbol(s, activeProfile)
-      return { symbol: s }
-    },
-    onSuccess: (_, symbol) => {
+    mutationFn: async (s) => removeSandboxSymbol(s, activeProfile),
+    onSuccess: (data, symbol) => {
       const current = readDashboardWatchlist()
       const next = current.filter(sym => sym !== symbol)
       writeDashboardWatchlist(next)
@@ -752,6 +756,28 @@ export default function SandboxPanel() {
       qc.invalidateQueries({ queryKey: ['sandbox-account'] })
       qc.invalidateQueries({ queryKey: ['sandbox-analytics'] })
       setSelectedSymbol(prev => (prev === symbol ? null : prev))
+
+      // Surface a clear indication, especially when shares were liquidated.
+      const liq = data?.liquidated
+      const watchlistRemoved = Boolean(data?.watchlist_removed)
+      let text
+      if (liq && String(liq.status).toUpperCase() === 'ALREADY_PENDING') {
+        text = `${symbol}: SELL already in progress (${liq.pending_quantity ?? ''} pending)${watchlistRemoved ? ' · removed from watchlist' : ''}`
+      } else if (liq && liq.status) {
+        // IB market SELL submitted to the broker.
+        text = `${symbol}: market SELL ${liq.quantity} submitted to IB${liq.ib_order_id != null ? ` · Order #${liq.ib_order_id}` : ''}${watchlistRemoved ? ' · removed from watchlist' : ''}`
+      } else if (liq && Number(liq.quantity) > 0) {
+        // Simulated liquidation filled immediately.
+        const pnl = liq.pnl != null ? ` · PnL: ${fmt(liq.pnl)}` : ''
+        text = `${symbol}: sold ${liq.quantity} @ $${Number(liq.price ?? 0).toFixed(2)}${pnl} · removed`
+      } else {
+        text = watchlistRemoved ? `${symbol} removed from watchlist` : `${symbol} removed`
+      }
+      setRemoveNotice({ type: 'success', text })
+    },
+    onError: (err, symbol) => {
+      const detail = err?.response?.data?.detail || err?.message || 'Failed to remove position.'
+      setRemoveNotice({ type: 'error', text: `${symbol}: ${detail}` })
     },
   })
   const updatePosMut = useMutation({
@@ -1204,6 +1230,24 @@ export default function SandboxPanel() {
 
       {/* Right panel */}
       <main className="flex-1 overflow-y-auto bg-dark-900 min-h-0">
+        {removeNotice && (
+          <div className="sticky top-0 z-40 px-6 pt-3">
+            <div className={`flex items-start justify-between gap-3 rounded-lg border px-4 py-2.5 shadow-lg text-sm ${
+              removeNotice.type === 'error'
+                ? 'bg-red-950/80 border-red-700/50 text-red-200'
+                : 'bg-emerald-950/80 border-emerald-700/50 text-emerald-200'
+            }`}>
+              <span className="min-w-0">{removeNotice.text}</span>
+              <button
+                className="shrink-0 text-current/70 hover:text-current"
+                onClick={() => setRemoveNotice(null)}
+                aria-label="Dismiss"
+              >
+                <XMarkIcon className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        )}
         <div className="sticky top-0 z-30 border-b border-dark-700 bg-dark-900/85 backdrop-blur-xl backdrop-saturate-150 shadow-[0_8px_24px_rgba(0,0,0,0.22)] supports-[backdrop-filter]:bg-dark-900/70">
           {/* Toolbar */}
           <div className="flex items-center justify-between px-6 py-2.5 border-b border-dark-700/80 bg-dark-800/50">

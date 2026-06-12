@@ -182,3 +182,66 @@ async def offload_simulated_state(db: AsyncSession) -> str:
     """Persist the simulated portfolio snapshot to local storage."""
     snapshot = await build_simulated_state_snapshot(db)
     return save_portfolio_state("simulated", snapshot)
+
+
+async def reconcile_ib_realized_pnl(db: AsyncSession, mode) -> int:
+    """Backfill local trade-ledger pnl from IB's own per-execution realized PnL.
+
+    IB's ``commissionReport.realizedPNL`` is the authoritative realized result
+    (IB cost basis, FIFO, commissions) that matches the TWS account window. Most
+    IB SELL fills are recorded locally with ``pnl=None`` by the PM/engine, so the
+    realized cards previously had to exclude them. This joins today's IB
+    executions back to the FILLED SELL ``Trade`` rows (by ib_order_id) and writes
+    the real pnl, making the ledger match IB. IB only returns current-day
+    executions, so this runs incrementally each poll and accumulates over time.
+
+    Returns the number of rows updated.
+    """
+    from app.models.trade import Trade, OrderSide, OrderStatus
+
+    if not ib_service.is_connected:
+        return 0
+
+    try:
+        executions = await ib_service.get_executions()
+    except Exception:
+        return 0
+    if not executions:
+        return 0
+
+    # Aggregate IB realized pnl per order id across partial fills (SELLs only).
+    realized_by_order: dict[int, float] = {}
+    for ex in executions:
+        if str(ex.get("side") or "").upper() != "SELL":
+            continue
+        rp = ex.get("realized_pnl")
+        oid = int(ex.get("order_id") or 0)
+        if rp is None or oid <= 0:
+            continue
+        realized_by_order[oid] = round(realized_by_order.get(oid, 0.0) + float(rp), 4)
+
+    if not realized_by_order:
+        return 0
+
+    res = await db.execute(
+        select(Trade).where(
+            Trade.mode == mode,
+            Trade.side == OrderSide.SELL,
+            Trade.status == OrderStatus.FILLED,
+            Trade.ib_order_id.in_(list(realized_by_order.keys())),
+        )
+    )
+    rows = res.scalars().all()
+    updated = 0
+    for row in rows:
+        target = realized_by_order.get(int(row.ib_order_id or 0))
+        if target is None:
+            continue
+        # Only write when missing or materially different to avoid churn.
+        if row.pnl is None or abs(float(row.pnl) - target) > 1e-6:
+            row.pnl = target
+            updated += 1
+    if updated:
+        await db.commit()
+    return updated
+

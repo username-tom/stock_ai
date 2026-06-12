@@ -116,13 +116,16 @@ async def place_trade(req: TradeRequest, db: AsyncSession = Depends(get_db)):
         pos.total_invested += total
         # Note: total_funds is unchanged — cash is now equity (shares × avg_cost)
     elif side == "SELL":
-        if pos.shares < req.quantity:
+        # Tolerate tiny float dust so selling the full held amount never trips
+        # the guard or leaves a negative/residual share count behind.
+        if round(pos.shares - req.quantity, 6) < -1e-9:
             raise HTTPException(400, f"Insufficient shares. Held: {pos.shares}, Sell: {req.quantity}")
         pnl = round((req.price - pos.avg_cost) * req.quantity, 4)
-        pos.shares -= req.quantity
+        pos.shares = max(0.0, round(pos.shares - req.quantity, 6))
         pos.allocated_funds += total
         pos.realized_pnl += pnl
-        if pos.shares == 0:
+        if pos.shares <= 1e-9:
+            pos.shares = 0.0
             pos.avg_cost = 0.0
         # Realized P/L changes total_funds: gains add to cash, losses reduce it.
         account = await get_account(db)
@@ -284,6 +287,12 @@ async def get_analytics(
 
     if use_ib:
         mode = TradingMode.PAPER if requested_profile == "paper" else TradingMode.LIVE
+        # Backfill missing SELL pnl from IB executions so chart/win-loss match TWS.
+        try:
+            from app.routers.sandbox_router._helpers import reconcile_ib_realized_pnl
+            await reconcile_ib_realized_pnl(db, mode)
+        except Exception:
+            pass
         trades_res = await db.execute(
             select(Trade).where(Trade.mode == mode).order_by(Trade.created_at)
         )
@@ -469,14 +478,12 @@ async def get_realized_metrics(
 
             state_by_symbol[sym] = st
 
-            normalized = None
-            if explicit is not None:
-                if derived is not None and abs(explicit) < 1e-9 and side == "SELL":
-                    normalized = derived
-                else:
-                    normalized = explicit
-            elif derived is not None and side == "SELL":
-                normalized = derived
+            # Use ONLY explicit broker-reported pnl. The IB fill ledger is
+            # incomplete (most rows carry no pnl and BUY/SELL pairs may not be
+            # matched), so deriving realized pnl from a reconstructed avg-cost
+            # basis fabricates large phantom losses and makes daily/weekly/
+            # monthly/total diverge from the per-symbol breakdown the user sees.
+            normalized = explicit if explicit is not None else None
 
             by_id[tid] = normalized
 
@@ -484,6 +491,13 @@ async def get_realized_metrics(
 
     if use_ib:
         mode = TradingMode.PAPER if requested_profile == "paper" else TradingMode.LIVE
+        # Backfill missing SELL pnl from IB's own per-execution realized PnL so
+        # the ledger (and every realized card derived from it) matches TWS.
+        try:
+            from app.routers.sandbox_router._helpers import reconcile_ib_realized_pnl
+            await reconcile_ib_realized_pnl(db, mode)
+        except Exception:
+            pass
         trades_res = await db.execute(
             select(Trade)
             .where(Trade.mode == mode)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -123,9 +124,24 @@ async def get_positions(
             if str(p.get("symbol") or "").strip()
         }
         market_price_by_symbol = await fetch_ib_market_prices(list(ib_by_symbol.keys()))
+        # IB's own per-position PnL (value + unrealized via reqPnLSingle). These
+        # sum exactly to the account-level UnrealizedPnL/GrossPositionValue, so
+        # the breakdown rows and footer match IB instead of drifting from the
+        # separate quote feed.
+        try:
+            ib_pnl_by_symbol = await ib_service.get_positions_pnl()
+        except Exception:
+            ib_pnl_by_symbol = {}
 
         mode = requested_profile if requested_profile in {"paper", "live"} else "paper"
         trade_mode = TradingMode.LIVE if mode == "live" else TradingMode.PAPER
+        # Backfill missing SELL pnl from IB's per-execution realized PnL so the
+        # per-symbol REALISED GAIN column matches IB (and the overview totals).
+        try:
+            from app.routers.sandbox_router._helpers import reconcile_ib_realized_pnl
+            await reconcile_ib_realized_pnl(db, trade_mode)
+        except Exception:
+            pass
         pnl_res = await db.execute(
             select(Trade.symbol, Trade.pnl).where(
                 Trade.mode == trade_mode,
@@ -169,9 +185,26 @@ async def get_positions(
                 if market_price <= 0 and ib_market_price > 0:
                     market_price = ib_market_price
 
+            # Prefer IB's authoritative per-position PnL (reqPnLSingle): value
+            # and unrealized use IB marks/cost basis and reconcile to the
+            # account totals. Fall back to the quote-derived estimate only when
+            # IB has not reported a single-position PnL yet.
+            ib_single = ib_pnl_by_symbol.get(symbol) or {}
+            ib_single_unreal = ib_single.get("unrealized_pnl")
+            ib_single_value = ib_single.get("market_value")
+            ib_single_mp = ib_single.get("market_price")
+            if ib_single_mp is not None and ib_single_mp > 0:
+                market_price = float(ib_single_mp)
+
             has_market_price = market_price > 0
-            market_value = (quantity * market_price) if has_market_price else None
-            unrealized = ((market_price - avg_cost) * quantity) if has_market_price else None
+            if ib_single_value is not None:
+                market_value = float(ib_single_value)
+            else:
+                market_value = (quantity * market_price) if has_market_price else None
+            if ib_single_unreal is not None:
+                unrealized = float(ib_single_unreal)
+            else:
+                unrealized = ((market_price - avg_cost) * quantity) if has_market_price else None
             local_created_at = local.created_at.astimezone().isoformat() if local and local.created_at else None
 
             return {
@@ -243,7 +276,15 @@ async def get_positions(
         return {"positions": enriched}
 
     result = await db.execute(select(SandboxPosition).order_by(SandboxPosition.symbol))
-    positions = result.scalars().all()
+    # Mirror watchlist removals across modes: hide off-watchlist rows that hold
+    # no shares/pending (e.g. removed while connected to IB), but always keep
+    # rows that still hold shares so liquidations remain visible.
+    positions = [
+        p for p in result.scalars().all()
+        if bool(getattr(p, "is_on_watchlist", True))
+        or float(p.shares or 0.0) > 0
+        or float(p.pending_shares or 0.0) > 0
+    ]
     pos_dicts = [position_dict(p) for p in positions]
     insights = await _load_ai_insights([p["symbol"] for p in pos_dicts])
     return {"positions": [{**p, **insights.get(p["symbol"], {})} for p in pos_dicts]}
@@ -423,18 +464,23 @@ async def remove_symbol(
 ):
     requested_profile = (profile or (settings.TRADING_MODE if ib_service.is_connected else "simulated") or "simulated").lower()
     use_ib = requested_profile in {"paper", "live"} and ib_service.is_connected
-    if use_ib:
-        ensure_sandbox_write_allowed(allow_while_ib=True)
-    else:
-        ensure_sandbox_write_allowed()
+    # Removing a position (and liquidating any held shares) is always permitted,
+    # even while IB is connected — including simulated-only leftovers viewed via
+    # the SIM tab. This keeps the sim/IB watchlist in sync from either mode.
+    ensure_sandbox_write_allowed(allow_while_ib=True)
     symbol = symbol.upper()
     result = await db.execute(select(SandboxPosition).where(SandboxPosition.symbol == symbol))
     pos = result.scalar_one_or_none()
     if not pos:
         raise HTTPException(404, "Position not found.")
 
+    liquidated = None
+
     if use_ib:
-        # In IB mode this is a watchlist removal, not a hard delete.
+        # In IB mode this is a watchlist removal. If shares are still held in IB,
+        # place a market SELL to liquidate them before removing from the watchlist.
+        liquidated = await _liquidate_ib_position(symbol, requested_profile, db)
+
         # Return any idle allocation back to the unallocated pool.
         settled_cost = float(pos.shares or 0.0) * float(pos.avg_cost or 0.0)
         pending_cost = float(pos.pending_shares or 0.0) * float(pos.pending_avg_cost or 0.0)
@@ -454,6 +500,9 @@ async def remove_symbol(
         pos.pm_managed = False
         pos.sentiment_mode = None
     else:
+        # Simulated mode: liquidate any held shares (record a SELL trade and
+        # book realized PnL) before hard-deleting the row.
+        liquidated = await _liquidate_simulated_position(pos, db)
         await db.delete(pos)
 
     await db.commit()
@@ -462,6 +511,165 @@ async def remove_symbol(
         "status": "ok",
         "symbol": symbol,
         "watchlist_removed": bool(use_ib),
+        "liquidated": liquidated,
+    }
+
+
+async def _liquidate_simulated_position(pos: SandboxPosition, db: AsyncSession) -> Optional[dict]:
+    """Sell all settled shares of a simulated position at market and book PnL.
+
+    Returns a summary dict of the executed SELL, or ``None`` when nothing was held.
+    """
+    from app.models.sandbox import SandboxTrade, SandboxAccount
+
+    qty = float(pos.shares or 0.0)
+    if qty <= 0:
+        return None
+
+    avg_cost = float(pos.avg_cost or 0.0)
+    price = await _resolve_simulated_exit_price(pos.symbol)
+    if price is None or price <= 0:
+        # No live quote available — fall back to cost basis so the position is
+        # closed flat rather than silently discarded.
+        price = avg_cost
+
+    total = round(qty * price, 4)
+    pnl = round((price - avg_cost) * qty, 4)
+
+    pos.shares = 0.0
+    pos.allocated_funds = round(float(pos.allocated_funds or 0.0) + total, 4)
+    pos.realized_pnl = round(float(pos.realized_pnl or 0.0) + pnl, 4)
+    pos.avg_cost = 0.0
+
+    account_res = await db.execute(select(SandboxAccount).limit(1))
+    account = account_res.scalar_one_or_none()
+    if account is not None:
+        account.total_funds = round(float(account.total_funds or 0.0) + pnl, 4)
+
+    db.add(SandboxTrade(
+        symbol=pos.symbol,
+        side="SELL",
+        quantity=qty,
+        price=price,
+        total=total,
+        strategy_name=pos.strategy_name,
+        reason="Watchlist removal: liquidate held shares",
+        pnl=pnl,
+    ))
+    return {"side": "SELL", "quantity": qty, "price": round(price, 4), "pnl": pnl}
+
+
+async def _resolve_simulated_exit_price(symbol: str) -> Optional[float]:
+    """Best-effort current market price for a simulated liquidation."""
+    try:
+        from app.services import market_service
+
+        quote = await market_service.get_quote(symbol)
+        if isinstance(quote, dict):
+            for key in ("last_price", "last", "price", "close"):
+                candidate = quote.get(key)
+                if candidate is None:
+                    continue
+                try:
+                    value = float(candidate)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    return value
+    except Exception as exc:
+        logger.debug("Simulated exit price lookup failed for %s: %s", symbol, exc)
+    return None
+
+
+async def _liquidate_ib_position(
+    symbol: str, requested_profile: str, db: AsyncSession
+) -> Optional[dict]:
+    """Place a market SELL for any IB-held shares of *symbol* and persist a Trade.
+
+    Returns a summary dict of the submitted order, or ``None`` when no shares
+    are held in IB (or an open SELL already covers the held quantity).
+    """
+    held_qty = 0.0
+    try:
+        ib_positions = await ib_service.get_positions()
+        for item in ib_positions or []:
+            if str(item.get("symbol") or "").upper() == symbol:
+                held_qty = float(item.get("quantity") or 0.0)
+                break
+    except Exception as exc:
+        logger.debug("IB position lookup failed for %s: %s", symbol, exc)
+        return None
+
+    # Only long positions can be liquidated with a SELL. A non-positive quantity
+    # means we are flat or already short — never place a SELL that would open or
+    # deepen a short position.
+    if held_qty <= 0:
+        return None
+
+    # Guard against double-liquidation: if a SELL order is already working for
+    # this symbol (e.g. a prior removal whose market order has not filled yet),
+    # do not place another order. Only sell the quantity not already covered by
+    # open SELL orders so we never oversell into a short.
+    pending_sell_qty = 0.0
+    try:
+        open_orders = await ib_service.get_open_orders()
+        active_status = {"PendingSubmit", "ApiPending", "PreSubmitted", "Submitted"}
+        for order in open_orders or []:
+            if (
+                str(order.get("symbol") or "").upper() == symbol
+                and str(order.get("side") or "").upper() == "SELL"
+                and str(order.get("status") or "") in active_status
+            ):
+                remaining = order.get("remaining")
+                if remaining is None:
+                    remaining = order.get("quantity")
+                pending_sell_qty += max(0.0, float(remaining or 0.0))
+    except Exception as exc:
+        logger.debug("IB open-order lookup failed for %s: %s", symbol, exc)
+
+    sell_qty = round(held_qty - pending_sell_qty, 6)
+    if sell_qty <= 0:
+        # An existing open SELL already covers the held quantity.
+        return {
+            "side": "SELL",
+            "quantity": 0.0,
+            "status": "ALREADY_PENDING",
+            "pending_quantity": round(pending_sell_qty, 6),
+        }
+
+    result = await ib_service.place_order(
+        symbol=symbol,
+        side="SELL",
+        quantity=sell_qty,
+        order_type="MKT",
+    )
+    if result.get("error"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to place SELL order for {symbol}: {result['error']}",
+        )
+
+    from app.models.trade import Trade, TradingMode, OrderSide, OrderStatus
+
+    ib_status = str(result.get("status") or "").upper()
+    is_filled = ib_status == "FILLED"
+    mode = TradingMode.LIVE if requested_profile == "live" else TradingMode.PAPER
+    db.add(Trade(
+        symbol=symbol,
+        side=OrderSide.SELL,
+        quantity=sell_qty,
+        price=0.0,
+        status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
+        mode=mode,
+        ib_order_id=result.get("ib_order_id"),
+        strategy_name="watchlist_removal_liquidation",
+        filled_at=datetime.now(timezone.utc) if is_filled else None,
+    ))
+    return {
+        "side": "SELL",
+        "quantity": sell_qty,
+        "ib_order_id": result.get("ib_order_id"),
+        "status": ib_status or "SUBMITTED",
     }
 
 

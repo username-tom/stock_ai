@@ -829,14 +829,21 @@ export default function PositionDetail({
                 )}
               </div>
             </div>
-            <button className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded-lg px-2.5 py-1.5 hover:bg-red-900/20 transition-colors"
+            <button className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 border border-red-800/40 rounded-lg px-2.5 py-1.5 hover:bg-red-900/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={removeSymbolMut.isPending}
               onClick={() => {
-                const msg = ibMode
+                if (removeSymbolMut.isPending) return
+                const base = ibMode
                   ? `Remove ${selectedSymbol} from watchlist?`
                   : `Remove ${selectedSymbol} from sandbox?`
-                if (window.confirm(msg)) removeSymbolMut.mutate(selectedSymbol)
+                const sellWarning = hasPosition
+                  ? ibMode
+                    ? `\n\nThis will place a market SELL order to liquidate ${Math.abs(selectedShares)} held share(s) before removing.`
+                    : `\n\nThis will sell ${Math.abs(selectedShares)} held share(s) at market and book realized P/L before removing.`
+                  : ''
+                if (window.confirm(`${base}${sellWarning}`)) removeSymbolMut.mutate(selectedSymbol)
               }}>
-              <TrashIcon className="h-3.5 w-3.5" />{ibMode ? 'Remove Watchlist' : 'Remove'}
+              <TrashIcon className="h-3.5 w-3.5" />{removeSymbolMut.isPending ? 'Removing…' : (ibMode ? 'Remove Watchlist' : 'Remove')}
             </button>
           </div>
           {/* Summary cards */}

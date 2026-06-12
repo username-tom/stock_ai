@@ -964,6 +964,49 @@ async def _execute_trade(
                 )
 
 
+# ── invariant self-heal ──────────────────────────────────────────────────── #
+
+async def _heal_negative_shares() -> None:
+    """Clamp any persisted negative share counts back to zero.
+
+    Long-only simulated positions must never hold negative ``shares`` or
+    ``pending_shares``. If a negative value is ever found (legacy data or an
+    older binary that lacked the SELL clamp), correct it in place and log it
+    so the corruption is visible but no longer requires a manual fix.
+    """
+    from sqlalchemy import select as sa_select, or_ as sa_or
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            sa_select(SandboxPosition).where(
+                sa_or(
+                    SandboxPosition.shares < 0,
+                    SandboxPosition.pending_shares < 0,
+                )
+            )
+        )
+        bad = result.scalars().all()
+        if not bad:
+            return
+        for pos in bad:
+            if (pos.shares or 0.0) < 0:
+                logger.warning(
+                    "Healing negative shares for %s: %s -> 0.0",
+                    pos.symbol, pos.shares,
+                )
+                pos.shares = 0.0
+                pos.avg_cost = 0.0
+            if (pos.pending_shares or 0.0) < 0:
+                logger.warning(
+                    "Healing negative pending_shares for %s: %s -> 0.0",
+                    pos.symbol, pos.pending_shares,
+                )
+                pos.pending_shares = 0.0
+                pos.pending_avg_cost = 0.0
+                pos.pending_since = None
+        await db.commit()
+
+
 # ── pending-order settlement ─────────────────────────────────────────────── #
 
 PENDING_SETTLE_SECONDS = 3  # align simulated pending delay with IB order-status observation window
@@ -1060,7 +1103,7 @@ async def _settle_pending_shares() -> None:
                     "BUY",
                     float(position.pending_shares),
                     pending_price,
-                    str(position.pending_reason or "signal"),
+                    str(getattr(position, "pending_reason", None) or "signal"),
                     f"cancelled: drifted outside fill range (requested={pending_price:.4f})",
                 )
                 _mark_pending_reroll_state(
@@ -1078,7 +1121,7 @@ async def _settle_pending_shares() -> None:
                     "BUY",
                     float(position.pending_shares),
                     pending_price,
-                    str(position.pending_reason or "signal"),
+                    str(getattr(position, "pending_reason", None) or "signal"),
                     "waiting: price within drift range but not yet eligible to fill",
                 )
                 _mark_pending_reroll_state(
@@ -1102,7 +1145,7 @@ async def _settle_pending_shares() -> None:
                     "BUY",
                     float(position.pending_shares),
                     pending_price,
-                    str(position.pending_reason or "signal"),
+                    str(getattr(position, "pending_reason", None) or "signal"),
                     f"missed fill: buy fill probability {buy_fill_rate_eff:.2f}%",
                 )
                 _mark_pending_reroll_state(
@@ -1342,6 +1385,11 @@ async def _settle_pending_shares() -> None:
 async def _tick(loop: asyncio.AbstractEventLoop) -> None:
     """One engine tick — load all enabled positions and process them."""
     global _last_tick
+
+    # Self-heal any positions whose share counts went negative (e.g. legacy
+    # corruption or an older binary that lacked the clamp). Shares can never be
+    # negative in a long-only sandbox, so clamp the invariant before trading.
+    await _heal_negative_shares()
 
     # Settle any pending (open-order) shares whose delay has elapsed
     await _settle_pending_shares()

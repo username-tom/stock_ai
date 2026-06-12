@@ -31,7 +31,12 @@ export default function SandboxSidebar({
   onAddIbWatchlistSymbol,
 }) {
   const qc = useQueryClient()
-  const ibUnrealizedPnl = totalUnrealizedPnl
+  // In IB mode the account-level UnrealizedPnL from IB is authoritative (it uses
+  // IB's own marks); the quote-derived position sum can drift and mismatch the
+  // main overview card. Realized stays on the trade-ledger sum, the only
+  // cumulative source IB does not expose.
+  const ibAcctUnrealized = Number(accountData?.unrealized_pnl)
+  const ibUnrealizedPnl = (ibMode && Number.isFinite(ibAcctUnrealized)) ? ibAcctUnrealized : totalUnrealizedPnl
   const ibRealizedPnl = totalRealizedPnl
   const totalFundsSource = String(accountData?.total_funds_source ?? '').toLowerCase()
   const fundsLabel = ibMode
