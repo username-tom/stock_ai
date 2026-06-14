@@ -187,6 +187,14 @@ async def _migrate(conn):
         "ALTER TABLE portfolio_manager_settings ADD COLUMN bar_predictor_sell_min_bias REAL NOT NULL DEFAULT 0.3",
         # PM crash protection: auto-restart engines next trading day after crash shutdown (default off)
         "ALTER TABLE portfolio_manager_settings ADD COLUMN crash_auto_restart BOOLEAN NOT NULL DEFAULT 0",
+        # AI trade bot (locally-run Ollama model) configuration
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_enabled BOOLEAN NOT NULL DEFAULT 0",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_prompt TEXT NOT NULL DEFAULT 'Help me make money using the positions in watchlist.'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_model VARCHAR(120) NOT NULL DEFAULT ''",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_interval_s INTEGER NOT NULL DEFAULT 300",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_use_local_1m BOOLEAN NOT NULL DEFAULT 1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_use_news BOOLEAN NOT NULL DEFAULT 1",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_max_context_bars INTEGER NOT NULL DEFAULT 60",
     ]
     for stmt in migrations:
         try:

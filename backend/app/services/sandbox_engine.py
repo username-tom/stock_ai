@@ -1394,6 +1394,18 @@ async def _tick(loop: asyncio.AbstractEventLoop) -> None:
     # Settle any pending (open-order) shares whose delay has elapsed
     await _settle_pending_shares()
 
+    # When the AI trade bot is the active decision-maker, it owns all entries
+    # and exits (and their guardrails). Skip the strategy-signal engine so the
+    # two modes never trade the same positions simultaneously. The pending-fill
+    # settler above still runs so the AI bot's simulated orders fill normally.
+    try:
+        from app.services.portfolio_manager import get_manager_settings
+        if bool(get_manager_settings().get("ai_bot_enabled", False)):
+            _last_tick = datetime.now(timezone.utc)
+            return
+    except Exception:
+        pass
+
     async with AsyncSessionLocal() as db:
         from sqlalchemy import select as sa_select
         from app.models.custom_script import CustomScript

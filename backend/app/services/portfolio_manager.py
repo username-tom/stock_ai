@@ -208,6 +208,14 @@ _settings: dict[str, Any] = {
     "crash_protection_mode": "percent",   # percent | dollar
     "crash_protection_value": 0.0,
     "crash_auto_restart": False,          # auto re-enable engines next trading day after crash shutdown
+    # ── AI trade bot (locally-run Ollama model) ──────────────────────────── #
+    "ai_bot_enabled": False,              # when True, AI bot drives decisions instead of sentiment matrix
+    "ai_bot_prompt": "Help me make money using the positions in watchlist.",
+    "ai_bot_model": "",                  # Ollama model tag; "" => auto-pick first installed model
+    "ai_bot_interval_s": 300,             # how often the bot consults the model
+    "ai_bot_use_local_1m": True,          # feed locally cached 1m bars into the prompt context
+    "ai_bot_use_news": True,              # feed related financial news headlines into the context
+    "ai_bot_max_context_bars": 60,        # cap of recent 1m bars per symbol to keep context bounded
     "hold_positions_overnight": False,    # strict day-trade default: flatten before close
     "premarket_order_placement_enabled": False,  # allow IB order placement outside regular session
     "eod_engine_shutoff_minutes_before_sell": 120,  # minutes before sell window to block new buys
@@ -305,6 +313,12 @@ def get_manager_settings() -> dict:
 
 
 def get_manager_state() -> dict:
+    ai_bot_status: dict = {}
+    try:
+        from app.services.ai_bot import get_state as _ai_bot_state
+        ai_bot_status = _ai_bot_state()
+    except Exception:
+        ai_bot_status = {}
     return {
         **_state,
         "last_transfer_at": _state["last_transfer_at"].isoformat() if _state["last_transfer_at"] else None,
@@ -312,6 +326,7 @@ def get_manager_state() -> dict:
         "market_classification": _state.get("market_classification"),
         "sentiment_groups": _state.get("sentiment_groups", {"market": [], "symbol": []}),
         "ai_tags": _state.get("ai_tags", {}),
+        "ai_bot": ai_bot_status,
         "settings": get_manager_settings(),
     }
 
@@ -459,6 +474,15 @@ async def _load_settings_from_db() -> None:
             _settings["crash_protection_mode"] = _crash_mode if _crash_mode in {"percent", "dollar"} else "percent"
             _settings["crash_protection_value"] = max(0.0, float(getattr(row, "crash_protection_value", 0.0) or 0.0))
             _settings["crash_auto_restart"] = bool(getattr(row, "crash_auto_restart", False))
+            _settings["ai_bot_enabled"] = bool(getattr(row, "ai_bot_enabled", False))
+            _settings["ai_bot_prompt"] = str(
+                getattr(row, "ai_bot_prompt", None) or "Help me make money using the positions in watchlist."
+            )
+            _settings["ai_bot_model"] = str(getattr(row, "ai_bot_model", "") or "")
+            _settings["ai_bot_interval_s"] = max(30, int(getattr(row, "ai_bot_interval_s", 300) or 300))
+            _settings["ai_bot_use_local_1m"] = bool(getattr(row, "ai_bot_use_local_1m", True))
+            _settings["ai_bot_use_news"] = bool(getattr(row, "ai_bot_use_news", True))
+            _settings["ai_bot_max_context_bars"] = max(10, min(500, int(getattr(row, "ai_bot_max_context_bars", 60) or 60)))
             _settings["hold_positions_overnight"] = bool(getattr(row, "hold_positions_overnight", False))
             _settings["premarket_order_placement_enabled"] = bool(getattr(row, "premarket_order_placement_enabled", False))
             _settings["eod_engine_shutoff_minutes_before_sell"] = int(getattr(row, "eod_engine_shutoff_minutes_before_sell", 120) or 120)
@@ -616,6 +640,15 @@ async def _save_settings_to_db() -> None:
         )
         row.crash_protection_value = max(0.0, float(_settings.get("crash_protection_value", 0.0) or 0.0))
         row.crash_auto_restart = bool(_settings.get("crash_auto_restart", False))
+        row.ai_bot_enabled = bool(_settings.get("ai_bot_enabled", False))
+        row.ai_bot_prompt = str(
+            _settings.get("ai_bot_prompt") or "Help me make money using the positions in watchlist."
+        )
+        row.ai_bot_model = str(_settings.get("ai_bot_model", "") or "")
+        row.ai_bot_interval_s = max(30, int(_settings.get("ai_bot_interval_s", 300) or 300))
+        row.ai_bot_use_local_1m = bool(_settings.get("ai_bot_use_local_1m", True))
+        row.ai_bot_use_news = bool(_settings.get("ai_bot_use_news", True))
+        row.ai_bot_max_context_bars = max(10, min(500, int(_settings.get("ai_bot_max_context_bars", 60) or 60)))
         row.hold_positions_overnight = _settings.get("hold_positions_overnight", False)
         row.premarket_order_placement_enabled = bool(_settings.get("premarket_order_placement_enabled", False))
         row.eod_engine_shutoff_minutes_before_sell = int(_settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
@@ -705,7 +738,9 @@ def update_manager_settings(new: dict) -> dict:
               "auto_trade_buy_price_offset_pct", "auto_trade_sell_price_offset_pct",
               "sentiment_matrix_strategies", "sentiment_matrix_actions",
               "pm_hold_duration_days", "pm_hold_duration_bars", "pm_hold_extended_multiplier", "pm_hold_trailing_pct",
-              "bar_predictor_enabled", "bar_predictor_buy_min_bias", "bar_predictor_sell_min_bias"}
+              "bar_predictor_enabled", "bar_predictor_buy_min_bias", "bar_predictor_sell_min_bias",
+              "ai_bot_enabled", "ai_bot_prompt", "ai_bot_model", "ai_bot_interval_s",
+              "ai_bot_use_local_1m", "ai_bot_use_news", "ai_bot_max_context_bars"}
     for k, v in new.items():
         if k in allowed:
             _settings[k] = v
@@ -774,6 +809,14 @@ def update_manager_settings(new: dict) -> dict:
             _settings["position_overrides"] = {}
     if "pm_hold_duration_bars" in new:
         _settings["pm_hold_duration_bars"] = max(0, int(_settings.get("pm_hold_duration_bars", 20) or 0))
+    if "ai_bot_interval_s" in new:
+        _settings["ai_bot_interval_s"] = max(30, int(_settings.get("ai_bot_interval_s", 300) or 300))
+    if "ai_bot_max_context_bars" in new:
+        _settings["ai_bot_max_context_bars"] = max(10, min(500, int(_settings.get("ai_bot_max_context_bars", 60) or 60)))
+    if "ai_bot_prompt" in new:
+        _settings["ai_bot_prompt"] = str(_settings.get("ai_bot_prompt") or "").strip() or "Help me make money using the positions in watchlist."
+    if "ai_bot_model" in new:
+        _settings["ai_bot_model"] = str(_settings.get("ai_bot_model", "") or "").strip()
     if "auto_trade_buy_price_offset_mode" in new:
         _settings["auto_trade_buy_price_offset_mode"] = (
             "dollar" if str(_settings.get("auto_trade_buy_price_offset_mode", "percent")).strip().lower() == "dollar" else "percent"
@@ -4045,6 +4088,13 @@ async def run_portfolio_manager() -> None:
         # Gate all trading operations for the rest of this tick if crash is active.
         _crash_day_now = _current_trading_day_key_et()
         if _state.get("crash_triggered_day") == _crash_day_now or _state.get("crash_shutdown_active"):
+            continue
+
+        # When the AI trade bot is the active decision-maker, it owns all
+        # entries, exits, and their guardrails (EOD liquidation, SL/TP). Skip
+        # the sentiment-matrix execution path so the two modes never trade the
+        # same positions. Crash protection above still runs as a hard guardrail.
+        if bool(_settings.get("ai_bot_enabled", False)):
             continue
 
         # Cancel pending orders when sentiment worsens or entering EOD sell window

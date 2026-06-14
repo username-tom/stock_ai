@@ -4,7 +4,7 @@ import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
   ChartBarIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings, getPortfolioManagerActivityLog, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus, togglePortfolioManager, resetCrashShutdown } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getPortfolioManagerActivityLog, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus, togglePortfolioManager, resetCrashShutdown, getAiBotModels } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandboxConstants'
 import { fmtMoney } from './sandboxHelpers'
@@ -365,6 +365,14 @@ function buildDraftFromSettings(settings) {
     bar_predictor_enabled: settings.bar_predictor_enabled ?? false,
     bar_predictor_buy_min_bias: settings.bar_predictor_buy_min_bias ?? 0.3,
     bar_predictor_sell_min_bias: settings.bar_predictor_sell_min_bias ?? 0.3,
+    // AI trade bot (locally-run Ollama model)
+    ai_bot_enabled: settings.ai_bot_enabled ?? false,
+    ai_bot_prompt: settings.ai_bot_prompt ?? 'Help me make money using the positions in watchlist.',
+    ai_bot_model: settings.ai_bot_model ?? '',
+    ai_bot_interval_s: settings.ai_bot_interval_s ?? 300,
+    ai_bot_use_local_1m: settings.ai_bot_use_local_1m ?? true,
+    ai_bot_use_news: settings.ai_bot_use_news ?? true,
+    ai_bot_max_context_bars: settings.ai_bot_max_context_bars ?? 60,
     sim_buy_fill_rate_pct: settings.sim_buy_fill_rate_pct ?? 80,
     sim_sell_fill_rate_pct: settings.sim_sell_fill_rate_pct ?? 90,
     auto_trade_buy_price_offset_mode: settings.auto_trade_buy_price_offset_mode ?? 'percent',
@@ -819,7 +827,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const [sentimentError, setSentimentError] = useState(null)
   const [importNotice, setImportNotice] = useState(null)
   const [presetNotice, setPresetNotice] = useState(null)
-  const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, barPredictor: false, risk: false, pmValues: false })
+  const [openSections, setOpenSections] = useState({ reallocation: false, sentiment: false, sentimentStrategy: false, aiTag: false, barPredictor: false, risk: false, pmValues: false, aiBot: false })
   const [pmTab, setPmTab] = useState('settings')
   const [pmLogPage, setPmLogPage] = useState(1)
   const [pmLogPageSize, setPmLogPageSize] = useState(100)
@@ -864,6 +872,15 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
     staleTime: 300_000,
   })
   const templates = (templatesData?.templates ?? []).filter(t => !t.filename.startsWith('_'))
+
+  const { data: aiBotData } = useQuery({
+    queryKey: ['ai-bot-models'],
+    queryFn: getAiBotModels,
+    staleTime: 60_000,
+    refetchInterval: 30_000,
+  })
+  const aiBotModels = aiBotData?.models ?? []
+  const aiBotState = managerData?.ai_bot ?? aiBotData?.state ?? {}
 
   const updateMut = useMutation({
     mutationFn: updatePortfolioManagerSettings,
@@ -1160,6 +1177,13 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       bar_predictor_enabled: draft.bar_predictor_enabled,
       bar_predictor_buy_min_bias: Number(draft.bar_predictor_buy_min_bias ?? 0.3),
       bar_predictor_sell_min_bias: Number(draft.bar_predictor_sell_min_bias ?? 0.3),
+      ai_bot_enabled: !!draft.ai_bot_enabled,
+      ai_bot_prompt: (draft.ai_bot_prompt ?? '').trim() || 'Help me make money using the positions in watchlist.',
+      ai_bot_model: (draft.ai_bot_model ?? '').trim(),
+      ai_bot_interval_s: Math.max(30, Math.floor(Number(draft.ai_bot_interval_s ?? 300) || 300)),
+      ai_bot_use_local_1m: !!draft.ai_bot_use_local_1m,
+      ai_bot_use_news: !!draft.ai_bot_use_news,
+      ai_bot_max_context_bars: Math.max(10, Math.min(500, Math.floor(Number(draft.ai_bot_max_context_bars ?? 60) || 60))),
       sim_buy_fill_rate_pct: Number(draft.sim_buy_fill_rate_pct),
       sim_sell_fill_rate_pct: Number(draft.sim_sell_fill_rate_pct),
       auto_trade_buy_price_offset_mode: (draft.auto_trade_buy_price_offset_mode === 'dollar' ? 'dollar' : 'percent'),
@@ -1959,6 +1983,156 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 <span className="text-xs text-slate-300">{(draft.pm_enabled ?? false) ? 'Enabled' : 'Disabled'}</span>
               </label>
             </SettingRow>
+            {/* ── AI Trade Bot (Ollama) ── */}
+            <CollapsibleSection
+              title="AI Trade Bot (Ollama)"
+              badge={draft.ai_bot_enabled ? 'AI Bot active' : 'Sentiment matrix'}
+              isOpen={openSections.aiBot}
+              onToggle={() => toggleSection('aiBot')}
+            >
+              <SettingRow
+                label="Trading Mode"
+                hint="Toggle between the current Sentiment Matrix engine and the locally-run AI trade bot. When the AI bot is active, it owns all entries and exits (for both Simulated and IB modes); the sentiment matrix and per-symbol strategy engines are paused."
+              >
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => editSettings && updateDraft(d => ({ ...d, ai_bot_enabled: false }))}
+                    className={`flex-1 px-3 py-1.5 rounded-md text-xs font-semibold border transition-colors ${!draft.ai_bot_enabled
+                      ? 'bg-violet-900/40 border-violet-600/50 text-violet-200'
+                      : 'bg-dark-700 border-dark-600 text-slate-400 hover:text-slate-200'}`}
+                  >
+                    Sentiment Matrix
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => editSettings && updateDraft(d => ({ ...d, ai_bot_enabled: true }))}
+                    className={`flex-1 px-3 py-1.5 rounded-md text-xs font-semibold border transition-colors ${draft.ai_bot_enabled
+                      ? 'bg-emerald-900/40 border-emerald-600/50 text-emerald-200'
+                      : 'bg-dark-700 border-dark-600 text-slate-400 hover:text-slate-200'}`}
+                  >
+                    AI Bot
+                  </button>
+                </div>
+              </SettingRow>
+
+              {/* Live status */}
+              <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                  <span className="text-slate-500">Status:</span>
+                  <span className={`ml-2 font-mono ${aiBotState?.running ? 'text-emerald-400' : 'text-slate-400'}`}>
+                    {aiBotState?.running ? 'running' : 'idle'}
+                  </span>
+                </div>
+                <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                  <span className="text-slate-500">Model:</span>
+                  <span className="ml-2 font-mono text-slate-300">{aiBotState?.last_model || draft.ai_bot_model || 'auto'}</span>
+                </div>
+                <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                  <span className="text-slate-500">Session:</span>
+                  <span className="ml-2 font-mono text-slate-300">{aiBotState?.session_day || '—'}</span>
+                </div>
+                <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                  <span className="text-slate-500">Last run:</span>
+                  <span className="ml-2 font-mono text-slate-300">
+                    {aiBotState?.last_run_at ? new Date(aiBotState.last_run_at).toLocaleTimeString() : '—'}
+                  </span>
+                </div>
+              </div>
+              {aiBotState?.last_error && (
+                <div className="flex items-start gap-2 text-[11px] text-amber-300 bg-amber-900/20 border border-amber-700/30 rounded px-2 py-1.5">
+                  <ExclamationTriangleIcon className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                  <span>{aiBotState.last_error}</span>
+                </div>
+              )}
+
+              <SettingRow
+                label="Prompt"
+                hint="Instruction sent to the model each cycle alongside the live watchlist, positions, 1-minute data and news. The bot still cannot override the hard guardrails below."
+              >
+                <textarea
+                  className="input w-full text-xs font-mono min-h-[72px] resize-y"
+                  disabled={!editSettings}
+                  value={draft.ai_bot_prompt ?? ''}
+                  placeholder="Help me make money using the positions in watchlist."
+                  onChange={e => updateDraft(d => ({ ...d, ai_bot_prompt: e.target.value }))}
+                />
+              </SettingRow>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <SettingRow label="Local Model" hint="Locally-installed Ollama model. Leave on Auto to use the first installed model.">
+                  <select
+                    className="input text-xs w-full"
+                    disabled={!editSettings}
+                    value={draft.ai_bot_model ?? ''}
+                    onChange={e => updateDraft(d => ({ ...d, ai_bot_model: e.target.value }))}
+                  >
+                    <option value="">Auto (first installed)</option>
+                    {aiBotModels.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                    {draft.ai_bot_model && !aiBotModels.includes(draft.ai_bot_model) && (
+                      <option value={draft.ai_bot_model}>{draft.ai_bot_model} (not installed)</option>
+                    )}
+                  </select>
+                </SettingRow>
+                <SettingRow label="Think Interval (s)" hint="How often the bot consults the model (min 30s).">
+                  <input
+                    type="number" min={30} step={30}
+                    className="input text-xs w-full"
+                    disabled={!editSettings}
+                    value={draft.ai_bot_interval_s ?? 300}
+                    onChange={e => updateDraft(d => ({ ...d, ai_bot_interval_s: e.target.value }))}
+                  />
+                </SettingRow>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <SettingRow label="Local 1m Data" hint="Feed recent locally-cached 1-minute bars.">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <div
+                      className={`relative w-9 h-5 rounded-full transition-colors ${(draft.ai_bot_use_local_1m ?? true) ? 'bg-emerald-600' : 'bg-dark-600'}`}
+                      onClick={() => editSettings && updateDraft(d => ({ ...d, ai_bot_use_local_1m: !(d.ai_bot_use_local_1m ?? true) }))}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(draft.ai_bot_use_local_1m ?? true) ? 'translate-x-4' : ''}`} />
+                    </div>
+                    <span className="text-xs text-slate-300">{(draft.ai_bot_use_local_1m ?? true) ? 'On' : 'Off'}</span>
+                  </label>
+                </SettingRow>
+                <SettingRow label="Financial News" hint="Feed related internet financial news headlines.">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <div
+                      className={`relative w-9 h-5 rounded-full transition-colors ${(draft.ai_bot_use_news ?? true) ? 'bg-emerald-600' : 'bg-dark-600'}`}
+                      onClick={() => editSettings && updateDraft(d => ({ ...d, ai_bot_use_news: !(d.ai_bot_use_news ?? true) }))}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(draft.ai_bot_use_news ?? true) ? 'translate-x-4' : ''}`} />
+                    </div>
+                    <span className="text-xs text-slate-300">{(draft.ai_bot_use_news ?? true) ? 'On' : 'Off'}</span>
+                  </label>
+                </SettingRow>
+                <SettingRow label="Max Context Bars" hint="Cap of recent 1m bars per symbol (keeps context bounded).">
+                  <input
+                    type="number" min={10} max={500} step={10}
+                    className="input text-xs w-full"
+                    disabled={!editSettings}
+                    value={draft.ai_bot_max_context_bars ?? 60}
+                    onChange={e => updateDraft(d => ({ ...d, ai_bot_max_context_bars: e.target.value }))}
+                  />
+                </SettingRow>
+              </div>
+
+              <div className="flex items-start gap-2 text-[11px] text-slate-400 bg-dark-700/40 border border-dark-600 rounded px-2 py-2">
+                <ExclamationTriangleIcon className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 text-amber-400" />
+                <span>
+                  Hard guardrails are always enforced regardless of the model's output:
+                  <span className="text-slate-300"> end-of-day liquidation</span> (when overnight holding is off),
+                  <span className="text-slate-300"> stop-loss / take-profit</span>, and
+                  <span className="text-slate-300"> crash protection</span>. Configure them in the
+                  <span className="text-slate-300"> Risk Controls</span> section. The bot resets its working
+                  session every trading day. Works in both Simulated and IB modes.
+                </span>
+              </div>
+            </CollapsibleSection>
             {/* ── Fund Reallocation & Deployment ── */}
             <CollapsibleSection
               title="Fund Reallocation & Deployment"

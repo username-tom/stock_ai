@@ -177,4 +177,15 @@ class PortfolioManagerSettings(Base):
     bar_predictor_enabled = Column(Boolean, default=False, nullable=False)
     bar_predictor_buy_min_bias = Column(Float, default=0.3, nullable=False)
     bar_predictor_sell_min_bias = Column(Float, default=0.3, nullable=False)
+    # ── AI trade bot (locally-run Ollama model) ──────────────────────────── #
+    # When enabled, the AI bot drives trade decisions instead of the sentiment
+    # matrix engine. The same risk settings above (SL/TP, crash protection,
+    # EOD liquidation via hold_positions_overnight) are still hard-enforced.
+    ai_bot_enabled = Column(Boolean, default=False, nullable=False)
+    ai_bot_prompt = Column(Text, nullable=False, server_default=text("'Help me make money using the positions in watchlist.'"))
+    ai_bot_model = Column(String(120), nullable=False, server_default=text("''"))
+    ai_bot_interval_s = Column(Integer, default=300, nullable=False)
+    ai_bot_use_local_1m = Column(Boolean, default=True, nullable=False)
+    ai_bot_use_news = Column(Boolean, default=True, nullable=False)
+    ai_bot_max_context_bars = Column(Integer, default=60, nullable=False)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

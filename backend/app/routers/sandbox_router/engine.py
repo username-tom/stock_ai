@@ -162,12 +162,27 @@ class PortfolioManagerSettingsRequest(BaseModel):
     bar_predictor_buy_min_bias: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     bar_predictor_sell_min_bias: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     position_overrides: Optional[dict[str, dict[str, Any]]] = None
+    # AI trade bot (locally-run Ollama model)
+    ai_bot_enabled: Optional[bool] = None
+    ai_bot_prompt: Optional[str] = Field(default=None, max_length=8000)
+    ai_bot_model: Optional[str] = Field(default=None, max_length=120)
+    ai_bot_interval_s: Optional[int] = Field(default=None, ge=30, le=86400)
+    ai_bot_use_local_1m: Optional[bool] = None
+    ai_bot_use_news: Optional[bool] = None
+    ai_bot_max_context_bars: Optional[int] = Field(default=None, ge=10, le=500)
 
 
 @router.get("/manager/state")
 async def get_manager_state():
     from app.services.portfolio_manager import get_manager_state
     return get_manager_state()
+
+
+@router.get("/manager/ai-bot/models")
+async def get_ai_bot_models():
+    """List locally-installed Ollama models available to the AI trade bot."""
+    from app.services.ai_bot import list_installed_models, get_state
+    return {"models": await list_installed_models(), "state": get_state()}
 
 
 @router.get("/manager/activity-log")

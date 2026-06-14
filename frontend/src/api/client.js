@@ -132,3 +132,4 @@ export const getPortfolioManagerActivityLog = ({ page = 1, pageSize = 100, day =
   api.get('/sandbox/manager/activity-log', { params: { page, page_size: pageSize, ...(day ? { day } : {}) } }).then(r => r.data)
 export const togglePortfolioManager = () => api.post('/sandbox/manager/toggle').then(r => r.data)
 export const resetCrashShutdown = () => api.post('/sandbox/manager/reset-crash').then(r => r.data)
+export const getAiBotModels = () => api.get('/sandbox/manager/ai-bot/models').then(r => r.data)

@@ -16,6 +16,7 @@ from app.services import market_service, symbol_registry
 from app.services.data_maintenance import run_data_manager_maintenance
 from app.services.sandbox_engine import run_engine
 from app.services.portfolio_manager import run_portfolio_manager
+from app.services.ai_bot import run_ai_bot
 class Suppress200OKFilter(logging.Filter):
     def filter(self, record):
         msg = getattr(record, 'msg', '')
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(run_data_manager_maintenance())
     asyncio.create_task(run_engine())
     asyncio.create_task(run_portfolio_manager())
+    asyncio.create_task(run_ai_bot())
     yield
     logger.info("Application shutdown.")
 
