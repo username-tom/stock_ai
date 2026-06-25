@@ -190,6 +190,8 @@ async def _migrate(conn):
         # AI trade bot (locally-run Ollama model) configuration
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_enabled BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_prompt TEXT NOT NULL DEFAULT 'Help me make money using the positions in watchlist.'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_provider VARCHAR(20) NOT NULL DEFAULT 'ollama'",
+        "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_base_url VARCHAR(255) NOT NULL DEFAULT ''",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_model VARCHAR(120) NOT NULL DEFAULT ''",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_interval_s INTEGER NOT NULL DEFAULT 300",
         "ALTER TABLE portfolio_manager_settings ADD COLUMN ai_bot_use_local_1m BOOLEAN NOT NULL DEFAULT 1",

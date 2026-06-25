@@ -211,6 +211,8 @@ _settings: dict[str, Any] = {
     # ── AI trade bot (locally-run Ollama model) ──────────────────────────── #
     "ai_bot_enabled": False,              # when True, AI bot drives decisions instead of sentiment matrix
     "ai_bot_prompt": "Help me make money using the positions in watchlist.",
+    "ai_bot_provider": "ollama",        # ollama | lm_studio
+    "ai_bot_base_url": "",              # empty => provider default from config
     "ai_bot_model": "",                  # Ollama model tag; "" => auto-pick first installed model
     "ai_bot_interval_s": 300,             # how often the bot consults the model
     "ai_bot_use_local_1m": True,          # feed locally cached 1m bars into the prompt context
@@ -478,6 +480,9 @@ async def _load_settings_from_db() -> None:
             _settings["ai_bot_prompt"] = str(
                 getattr(row, "ai_bot_prompt", None) or "Help me make money using the positions in watchlist."
             )
+            _ai_provider = str(getattr(row, "ai_bot_provider", "ollama") or "ollama").strip().lower()
+            _settings["ai_bot_provider"] = _ai_provider if _ai_provider in {"ollama", "lm_studio"} else "ollama"
+            _settings["ai_bot_base_url"] = str(getattr(row, "ai_bot_base_url", "") or "").strip()
             _settings["ai_bot_model"] = str(getattr(row, "ai_bot_model", "") or "")
             _settings["ai_bot_interval_s"] = max(30, int(getattr(row, "ai_bot_interval_s", 300) or 300))
             _settings["ai_bot_use_local_1m"] = bool(getattr(row, "ai_bot_use_local_1m", True))
@@ -644,6 +649,8 @@ async def _save_settings_to_db() -> None:
         row.ai_bot_prompt = str(
             _settings.get("ai_bot_prompt") or "Help me make money using the positions in watchlist."
         )
+        row.ai_bot_provider = "lm_studio" if str(_settings.get("ai_bot_provider", "ollama")).strip().lower() == "lm_studio" else "ollama"
+        row.ai_bot_base_url = str(_settings.get("ai_bot_base_url", "") or "").strip()
         row.ai_bot_model = str(_settings.get("ai_bot_model", "") or "")
         row.ai_bot_interval_s = max(30, int(_settings.get("ai_bot_interval_s", 300) or 300))
         row.ai_bot_use_local_1m = bool(_settings.get("ai_bot_use_local_1m", True))
@@ -739,7 +746,7 @@ def update_manager_settings(new: dict) -> dict:
               "sentiment_matrix_strategies", "sentiment_matrix_actions",
               "pm_hold_duration_days", "pm_hold_duration_bars", "pm_hold_extended_multiplier", "pm_hold_trailing_pct",
               "bar_predictor_enabled", "bar_predictor_buy_min_bias", "bar_predictor_sell_min_bias",
-              "ai_bot_enabled", "ai_bot_prompt", "ai_bot_model", "ai_bot_interval_s",
+              "ai_bot_enabled", "ai_bot_prompt", "ai_bot_provider", "ai_bot_base_url", "ai_bot_model", "ai_bot_interval_s",
               "ai_bot_use_local_1m", "ai_bot_use_news", "ai_bot_max_context_bars"}
     for k, v in new.items():
         if k in allowed:
@@ -815,6 +822,12 @@ def update_manager_settings(new: dict) -> dict:
         _settings["ai_bot_max_context_bars"] = max(10, min(500, int(_settings.get("ai_bot_max_context_bars", 60) or 60)))
     if "ai_bot_prompt" in new:
         _settings["ai_bot_prompt"] = str(_settings.get("ai_bot_prompt") or "").strip() or "Help me make money using the positions in watchlist."
+    if "ai_bot_provider" in new:
+        _settings["ai_bot_provider"] = (
+            "lm_studio" if str(_settings.get("ai_bot_provider", "ollama") or "ollama").strip().lower() == "lm_studio" else "ollama"
+        )
+    if "ai_bot_base_url" in new:
+        _settings["ai_bot_base_url"] = str(_settings.get("ai_bot_base_url", "") or "").strip()
     if "ai_bot_model" in new:
         _settings["ai_bot_model"] = str(_settings.get("ai_bot_model", "") or "").strip()
     if "auto_trade_buy_price_offset_mode" in new:

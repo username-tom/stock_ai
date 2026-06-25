@@ -24,8 +24,9 @@ class Settings(BaseSettings):
     DATA_MANAGER_AUTO_WARM_SOURCE: str = "auto"
     DATA_MANAGER_AUTO_WARM_PREFER_IB: bool = True
     DATA_MANAGER_AUTO_WARM_CHUNK_DAYS: int = 20
-    # Locally-run Ollama server used by the AI trade bot and script chat.
+    # Local LLM endpoints used by the AI trade bot and script chat.
     OLLAMA_HOST: str = "http://localhost:11434"
+    LM_STUDIO_BASE_URL: str = "http://localhost:1234/v1"
 
     @property
     def cors_origins_list(self) -> List[str]:

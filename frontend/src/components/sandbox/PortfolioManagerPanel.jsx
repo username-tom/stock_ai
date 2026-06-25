@@ -4,7 +4,7 @@ import {
   CpuChipIcon, ArrowsRightLeftIcon, ClockIcon, BanknotesIcon,
   ChartBarIcon, CheckCircleIcon, XCircleIcon, ChevronDownIcon, ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
-import { getPortfolioManagerState, updatePortfolioManagerSettings, getPortfolioManagerActivityLog, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus, togglePortfolioManager, resetCrashShutdown, getAiBotModels } from '../../api/client'
+import { getPortfolioManagerState, updatePortfolioManagerSettings, getPortfolioManagerActivityLog, getStrategies, getScripts, getBuiltinTemplates, updateSandboxPosition, getIBStatus, togglePortfolioManager, resetCrashShutdown, getAiBotStatus } from '../../api/client'
 import { useAppSettings } from '../../hooks/useAppSettings'
 import { CUSTOM_SCRIPT_KEY, TEMPLATE_SCRIPT_KEY } from './sandboxConstants'
 import { fmtMoney } from './sandboxHelpers'
@@ -365,9 +365,11 @@ function buildDraftFromSettings(settings) {
     bar_predictor_enabled: settings.bar_predictor_enabled ?? false,
     bar_predictor_buy_min_bias: settings.bar_predictor_buy_min_bias ?? 0.3,
     bar_predictor_sell_min_bias: settings.bar_predictor_sell_min_bias ?? 0.3,
-    // AI trade bot (locally-run Ollama model)
+    // AI trade bot
     ai_bot_enabled: settings.ai_bot_enabled ?? false,
     ai_bot_prompt: settings.ai_bot_prompt ?? 'Help me make money using the positions in watchlist.',
+    ai_bot_provider: settings.ai_bot_provider ?? 'ollama',
+    ai_bot_base_url: settings.ai_bot_base_url ?? '',
     ai_bot_model: settings.ai_bot_model ?? '',
     ai_bot_interval_s: settings.ai_bot_interval_s ?? 300,
     ai_bot_use_local_1m: settings.ai_bot_use_local_1m ?? true,
@@ -874,13 +876,14 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const templates = (templatesData?.templates ?? []).filter(t => !t.filename.startsWith('_'))
 
   const { data: aiBotData } = useQuery({
-    queryKey: ['ai-bot-models'],
-    queryFn: getAiBotModels,
+    queryKey: ['ai-bot-status'],
+    queryFn: getAiBotStatus,
     staleTime: 60_000,
     refetchInterval: 30_000,
   })
-  const aiBotModels = aiBotData?.models ?? []
-  const aiBotState = managerData?.ai_bot ?? aiBotData?.state ?? {}
+  const aiBotModels = aiBotData?.available_models ?? aiBotData?.models ?? []
+  const aiBotStatus = aiBotData ?? {}
+  const aiBotState = aiBotData?.state ?? managerData?.ai_bot ?? {}
 
   const updateMut = useMutation({
     mutationFn: updatePortfolioManagerSettings,
@@ -1196,6 +1199,8 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       bar_predictor_sell_min_bias: Number(draft.bar_predictor_sell_min_bias ?? 0.3),
       ai_bot_enabled: !!draft.ai_bot_enabled,
       ai_bot_prompt: (draft.ai_bot_prompt ?? '').trim() || 'Help me make money using the positions in watchlist.',
+      ai_bot_provider: draft.ai_bot_provider === 'lm_studio' ? 'lm_studio' : 'ollama',
+      ai_bot_base_url: (draft.ai_bot_base_url ?? '').trim(),
       ai_bot_model: (draft.ai_bot_model ?? '').trim(),
       ai_bot_interval_s: Math.max(30, Math.floor(Number(draft.ai_bot_interval_s ?? 300) || 300)),
       ai_bot_use_local_1m: !!draft.ai_bot_use_local_1m,
@@ -2000,9 +2005,9 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                 <span className="text-xs text-slate-300">{(draft.pm_enabled ?? false) ? 'Enabled' : 'Disabled'}</span>
               </label>
             </SettingRow>
-            {/* ── AI Trade Bot (Ollama) ── */}
+            {/* ── AI Trade Bot ── */}
             <CollapsibleSection
-              title="AI Trade Bot (Ollama)"
+              title="AI Trade Bot"
               badge={draft.ai_bot_enabled ? 'AI Bot active' : 'Sentiment matrix'}
               isOpen={openSections.aiBot}
               onToggle={() => toggleSection('aiBot')}
@@ -2034,16 +2039,20 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
               </SettingRow>
 
               {/* Live status */}
-              <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
                 <div className="bg-dark-700/50 rounded px-2 py-1.5">
                   <span className="text-slate-500">Status:</span>
-                  <span className={`ml-2 font-mono ${aiBotState?.running ? 'text-emerald-400' : 'text-slate-400'}`}>
-                    {aiBotState?.running ? 'running' : 'idle'}
+                  <span className={`ml-2 font-mono ${aiBotStatus?.status === 'healthy' ? 'text-emerald-400' : aiBotStatus?.status === 'unreachable' ? 'text-rose-400' : 'text-amber-300'}`}>
+                    {aiBotStatus?.status || (aiBotState?.running ? 'running' : 'idle')}
                   </span>
                 </div>
                 <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                  <span className="text-slate-500">Provider:</span>
+                  <span className="ml-2 font-mono text-slate-300">{aiBotStatus?.provider_label || (draft.ai_bot_provider === 'lm_studio' ? 'LM Studio' : 'Ollama')}</span>
+                </div>
+                <div className="bg-dark-700/50 rounded px-2 py-1.5">
                   <span className="text-slate-500">Model:</span>
-                  <span className="ml-2 font-mono text-slate-300">{aiBotState?.last_model || draft.ai_bot_model || 'auto'}</span>
+                  <span className="ml-2 font-mono text-slate-300">{aiBotStatus?.resolved_model || aiBotState?.last_model || draft.ai_bot_model || 'auto'}</span>
                 </div>
                 <div className="bg-dark-700/50 rounded px-2 py-1.5">
                   <span className="text-slate-500">Session:</span>
@@ -2055,7 +2064,23 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                     {aiBotState?.last_run_at ? new Date(aiBotState.last_run_at).toLocaleTimeString() : '—'}
                   </span>
                 </div>
+                <div className="bg-dark-700/50 rounded px-2 py-1.5">
+                  <span className="text-slate-500">Models:</span>
+                  <span className="ml-2 font-mono text-slate-300">{aiBotState?.model_count ?? aiBotModels.length}</span>
+                </div>
               </div>
+              <div className="bg-dark-700/40 border border-dark-600 rounded px-2 py-1.5 text-[11px] text-slate-300">
+                <span className="text-slate-500">Endpoint:</span>
+                <span className="ml-2 font-mono break-all">{aiBotStatus?.endpoint || draft.ai_bot_base_url || (draft.ai_bot_provider === 'lm_studio' ? 'http://localhost:1234/v1' : 'http://localhost:11434')}</span>
+              </div>
+              {aiBotStatus?.message && (
+                <div className={`flex items-start gap-2 text-[11px] rounded px-2 py-1.5 border ${aiBotStatus?.status === 'healthy'
+                  ? 'text-emerald-200 bg-emerald-900/20 border-emerald-700/30'
+                  : 'text-amber-300 bg-amber-900/20 border-amber-700/30'}`}>
+                  <CpuChipIcon className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+                  <span>{aiBotStatus.message}</span>
+                </div>
+              )}
               {aiBotState?.last_error && (
                 <div className="flex items-start gap-2 text-[11px] text-amber-300 bg-amber-900/20 border border-amber-700/30 rounded px-2 py-1.5">
                   <ExclamationTriangleIcon className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
@@ -2077,7 +2102,18 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
               </SettingRow>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <SettingRow label="Local Model" hint="Locally-installed Ollama model. Leave on Auto to use the first installed model.">
+                <SettingRow label="Provider" hint="Choose which local model server the AI Bot will query. LM Studio uses its OpenAI-compatible local API and gives you richer model visibility in its own desktop app.">
+                  <select
+                    className="input text-xs w-full"
+                    disabled={!editSettings}
+                    value={draft.ai_bot_provider ?? 'ollama'}
+                    onChange={e => updateDraft(d => ({ ...d, ai_bot_provider: e.target.value === 'lm_studio' ? 'lm_studio' : 'ollama' }))}
+                  >
+                    <option value="ollama">Ollama</option>
+                    <option value="lm_studio">LM Studio</option>
+                  </select>
+                </SettingRow>
+                <SettingRow label="Model" hint="Leave on Auto to use the first model reported by the selected provider.">
                   <select
                     className="input text-xs w-full"
                     disabled={!editSettings}
@@ -2089,9 +2125,22 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                       <option key={m} value={m}>{m}</option>
                     ))}
                     {draft.ai_bot_model && !aiBotModels.includes(draft.ai_bot_model) && (
-                      <option value={draft.ai_bot_model}>{draft.ai_bot_model} (not installed)</option>
+                      <option value={draft.ai_bot_model}>{draft.ai_bot_model} (not reported)</option>
                     )}
                   </select>
+                </SettingRow>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <SettingRow label="Base URL" hint={draft.ai_bot_provider === 'lm_studio' ? 'Optional override. Default LM Studio endpoint is http://localhost:1234/v1.' : 'Optional override. Default Ollama endpoint is http://localhost:11434.'}>
+                  <input
+                    type="text"
+                    className="input text-xs w-full font-mono"
+                    disabled={!editSettings}
+                    value={draft.ai_bot_base_url ?? ''}
+                    placeholder={draft.ai_bot_provider === 'lm_studio' ? 'http://localhost:1234/v1' : 'http://localhost:11434'}
+                    onChange={e => updateDraft(d => ({ ...d, ai_bot_base_url: e.target.value }))}
+                  />
                 </SettingRow>
                 <SettingRow label="Think Interval (s)" hint="How often the bot consults the model (min 30s).">
                   <input

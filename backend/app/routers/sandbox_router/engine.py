@@ -165,6 +165,8 @@ class PortfolioManagerSettingsRequest(BaseModel):
     # AI trade bot (locally-run Ollama model)
     ai_bot_enabled: Optional[bool] = None
     ai_bot_prompt: Optional[str] = Field(default=None, max_length=8000)
+    ai_bot_provider: Optional[str] = Field(default=None, pattern="^(ollama|lm_studio)$")
+    ai_bot_base_url: Optional[str] = Field(default=None, max_length=255)
     ai_bot_model: Optional[str] = Field(default=None, max_length=120)
     ai_bot_interval_s: Optional[int] = Field(default=None, ge=30, le=86400)
     ai_bot_use_local_1m: Optional[bool] = None
@@ -180,9 +182,15 @@ async def get_manager_state():
 
 @router.get("/manager/ai-bot/models")
 async def get_ai_bot_models():
-    """List locally-installed Ollama models available to the AI trade bot."""
-    from app.services.ai_bot import list_installed_models, get_state
-    return {"models": await list_installed_models(), "state": get_state()}
+    """Backward-compatible AI bot status payload with available models."""
+    from app.services.ai_bot import get_status
+    return await get_status()
+
+
+@router.get("/manager/ai-bot/status")
+async def get_ai_bot_status():
+    from app.services.ai_bot import get_status
+    return await get_status()
 
 
 @router.get("/manager/activity-log")

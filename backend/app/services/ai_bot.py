@@ -42,6 +42,10 @@ _OLLAMA_TIMEOUT = 120.0
 _FALLBACK_MODEL = "llama3.2"
 _MAX_TODAY_ACTIONS = 20          # bounded history fed back into the prompt
 _MAX_NEWS_ITEMS = 8
+_PROVIDER_OLLAMA = "ollama"
+_PROVIDER_LM_STUDIO = "lm_studio"
+_DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+_DEFAULT_LM_STUDIO_BASE_URL = "http://localhost:1234/v1"
 
 # Generation options — keep the context window small so the model stays fast
 # and the prompt cannot grow unbounded across the trading day.
@@ -81,6 +85,9 @@ _state: dict[str, object] = {
     "last_model": None,
     "today_actions": [],        # bounded list of executed actions this session
     "last_decisions": [],       # raw decisions from the most recent model call
+    "session_cycle_count": 0,
+    "last_daily_summary": None,
+    "last_daily_summary_day": None,
 }
 
 
@@ -92,61 +99,99 @@ def get_state() -> dict:
         "last_run_at": _state.get("last_run_at"),
         "last_error": _state.get("last_error"),
         "last_model": _state.get("last_model"),
+        "session_cycle_count": int(_state.get("session_cycle_count") or 0),
+        "last_daily_summary": _state.get("last_daily_summary"),
+        "last_daily_summary_day": _state.get("last_daily_summary_day"),
         "today_actions": list(_state.get("today_actions") or [])[:_MAX_TODAY_ACTIONS],
         "last_decisions": list(_state.get("last_decisions") or []),
     }
 
 
-# ── Ollama helpers ───────────────────────────────────────────────────────────── #
+# ── model provider helpers ──────────────────────────────────────────────────── #
 
-def _ollama_base() -> str:
-    return str(getattr(app_settings, "OLLAMA_HOST", "http://localhost:11434") or "http://localhost:11434").rstrip("/")
+def _provider_label(provider: str) -> str:
+    return "LM Studio" if provider == _PROVIDER_LM_STUDIO else "Ollama"
 
 
-async def list_installed_models() -> list[str]:
-    """Return the list of model tags installed in the local Ollama server."""
+def _normalize_provider(value: object) -> str:
+    provider = str(value or _PROVIDER_OLLAMA).strip().lower()
+    return provider if provider in {_PROVIDER_OLLAMA, _PROVIDER_LM_STUDIO} else _PROVIDER_OLLAMA
+
+
+def _provider_settings(settings: dict | None = None) -> dict:
+    active = settings or _get_settings()
+    provider = _normalize_provider(active.get("ai_bot_provider"))
+    base_url = str(active.get("ai_bot_base_url", "") or "").strip()
+    if not base_url:
+        if provider == _PROVIDER_LM_STUDIO:
+            base_url = str(getattr(app_settings, "LM_STUDIO_BASE_URL", _DEFAULT_LM_STUDIO_BASE_URL) or _DEFAULT_LM_STUDIO_BASE_URL)
+        else:
+            base_url = str(getattr(app_settings, "OLLAMA_HOST", _DEFAULT_OLLAMA_HOST) or _DEFAULT_OLLAMA_HOST)
+    return {
+        "provider": provider,
+        "base_url": base_url.rstrip("/"),
+    }
+
+
+def _provider_models_url(settings: dict | None = None) -> str:
+    provider_cfg = _provider_settings(settings)
+    if provider_cfg["provider"] == _PROVIDER_LM_STUDIO:
+        return f"{provider_cfg['base_url']}/models"
+    return f"{provider_cfg['base_url']}/api/tags"
+
+
+def _provider_generation_url(settings: dict | None = None) -> str:
+    provider_cfg = _provider_settings(settings)
+    if provider_cfg["provider"] == _PROVIDER_LM_STUDIO:
+        return f"{provider_cfg['base_url']}/chat/completions"
+    return f"{provider_cfg['base_url']}/api/generate"
+
+
+def _provider_connection_error_message(settings: dict | None = None) -> str:
+    provider_cfg = _provider_settings(settings)
+    label = _provider_label(provider_cfg["provider"])
+    return f"Cannot reach {label} at {provider_cfg['base_url']}. Check that the local server is running and the URL is correct."
+
+
+async def list_installed_models(settings: dict | None = None) -> list[str]:
+    """Return the list of models visible to the configured local model provider."""
+    provider_cfg = _provider_settings(settings)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{_ollama_base()}/api/tags")
+            resp = await client.get(_provider_models_url(settings))
             resp.raise_for_status()
             data = resp.json()
         models = []
-        for item in data.get("models", []) or []:
-            name = str(item.get("name") or item.get("model") or "").strip()
-            if name:
-                models.append(name)
+        if provider_cfg["provider"] == _PROVIDER_LM_STUDIO:
+            for item in data.get("data", []) or []:
+                name = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+                if name:
+                    models.append(name)
+        else:
+            for item in data.get("models", []) or []:
+                name = str(item.get("name") or item.get("model") or "").strip()
+                if name:
+                    models.append(name)
         return sorted(set(models))
     except Exception as exc:
-        logger.debug("AI bot: could not list Ollama models: %s", exc)
+        logger.debug("AI bot: could not list %s models: %s", _provider_label(provider_cfg["provider"]), exc)
         return []
 
 
-async def _resolve_model(configured: str) -> str:
-    """Pick the model to use: the configured one if installed, else first local."""
-    configured = (configured or "").strip()
-    installed = await list_installed_models()
+async def _resolve_model(settings: dict | None = None) -> str:
+    """Pick the model to use: the configured one if available, else first local."""
+    active = settings or _get_settings()
+    configured = str(active.get("ai_bot_model", "") or "").strip()
+    installed = await list_installed_models(active)
     if configured and (configured in installed or not installed):
         return configured
     if installed:
         return installed[0]
-    return _FALLBACK_MODEL
+    return configured or _FALLBACK_MODEL
 
 
-async def _query_model(model: str, system_prompt: str, user_prompt: str) -> list[dict]:
-    """Call Ollama and parse a strict-JSON list of decisions."""
-    payload = {
-        "model": model,
-        "prompt": user_prompt,
-        "system": system_prompt,
-        "stream": False,
-        "format": "json",
-        "options": _OLLAMA_OPTIONS,
-    }
-    async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
-        resp = await client.post(f"{_ollama_base()}/api/generate", json=payload)
-        resp.raise_for_status()
-        body = resp.json()
-    raw = str(body.get("response") or "").strip()
+def _parse_decisions(raw: str) -> list[dict]:
+    raw = str(raw or "").strip()
     if not raw:
         return []
     try:
@@ -171,6 +216,109 @@ async def _query_model(model: str, system_prompt: str, user_prompt: str) -> list
             "reason": str(d.get("reason") or "")[:140],
         })
     return cleaned
+
+
+async def get_status(settings: dict | None = None) -> dict:
+    active = settings or _get_settings()
+    provider_cfg = _provider_settings(active)
+    configured_model = str(active.get("ai_bot_model", "") or "").strip()
+    started_at = datetime.now(timezone.utc)
+    models = await list_installed_models(active)
+    reachable = bool(models)
+    message = None
+    status = "healthy"
+    if reachable:
+        message = f"{len(models)} model(s) available from {_provider_label(provider_cfg['provider'])}."
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(_provider_models_url(active))
+                resp.raise_for_status()
+            reachable = True
+            status = "no_models"
+            message = f"{_provider_label(provider_cfg['provider'])} is reachable, but no models are currently available."
+        except httpx.ConnectError:
+            status = "unreachable"
+            message = _provider_connection_error_message(active)
+        except httpx.HTTPStatusError as exc:
+            status = "error"
+            message = f"{_provider_label(provider_cfg['provider'])} returned HTTP {exc.response.status_code} while listing models."
+        except Exception as exc:
+            status = "error"
+            message = f"{_provider_label(provider_cfg['provider'])} status check failed: {exc}"
+
+    resolved_model = configured_model
+    if models:
+        resolved_model = configured_model if configured_model in models else models[0]
+    elif not resolved_model:
+        resolved_model = _FALLBACK_MODEL
+
+    runtime_state = get_state()
+    runtime_state.update({
+        "provider": provider_cfg["provider"],
+        "provider_label": _provider_label(provider_cfg["provider"]),
+        "endpoint": provider_cfg["base_url"],
+        "configured_model": configured_model,
+        "resolved_model": resolved_model,
+        "configured_model_available": (not configured_model) or (configured_model in models) or (not models),
+        "reachable": reachable,
+        "status": status,
+        "message": message,
+        "checked_at": started_at.isoformat(),
+        "model_count": len(models),
+    })
+    return {
+        "provider": provider_cfg["provider"],
+        "provider_label": _provider_label(provider_cfg["provider"]),
+        "endpoint": provider_cfg["base_url"],
+        "available_models": models,
+        "models": models,
+        "configured_model": configured_model,
+        "resolved_model": resolved_model,
+        "configured_model_available": runtime_state["configured_model_available"],
+        "reachable": reachable,
+        "status": status,
+        "message": message,
+        "checked_at": runtime_state["checked_at"],
+        "state": runtime_state,
+    }
+
+
+async def _query_model(model: str, system_prompt: str, user_prompt: str, settings: dict | None = None) -> list[dict]:
+    """Call the configured local provider and parse a strict-JSON list of decisions."""
+    provider_cfg = _provider_settings(settings)
+    async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
+        if provider_cfg["provider"] == _PROVIDER_LM_STUDIO:
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": _OLLAMA_OPTIONS["temperature"],
+                "max_tokens": _OLLAMA_OPTIONS["num_predict"],
+                "stream": False,
+            }
+            resp = await client.post(_provider_generation_url(settings), json=payload)
+            resp.raise_for_status()
+            body = resp.json()
+            choices = body.get("choices") or []
+            message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+            raw = str((message or {}).get("content") or "").strip()
+            return _parse_decisions(raw)
+
+        payload = {
+            "model": model,
+            "prompt": user_prompt,
+            "system": system_prompt,
+            "stream": False,
+            "format": "json",
+            "options": _OLLAMA_OPTIONS,
+        }
+        resp = await client.post(_provider_generation_url(settings), json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+    return _parse_decisions(body.get("response") or "")
 
 
 # ── context gathering ────────────────────────────────────────────────────────── #
@@ -361,6 +509,89 @@ def _log_decision_batch(decisions: list[dict], symbols: list[str], model: str) -
     _pm_log(
         f"model={model} decisions ({len(decisions)}): " + "; ".join(formatted)
     )
+
+
+def _is_after_market_close_et() -> bool:
+    import zoneinfo
+
+    et = zoneinfo.ZoneInfo("America/New_York")
+    now_et = datetime.now(tz=et)
+    if now_et.weekday() >= 5:
+        return False
+    return (now_et.hour, now_et.minute) >= (16, 0)
+
+
+async def _build_daily_summary() -> str | None:
+    session_day = str(_state.get("session_day") or "").strip()
+    if not session_day:
+        return None
+
+    settings = _get_settings()
+    provider_cfg = _provider_settings(settings)
+    today_actions = list(_state.get("today_actions") or [])
+    last_decisions = list(_state.get("last_decisions") or [])
+    cycle_count = int(_state.get("session_cycle_count") or 0)
+
+    buy_count = sum(1 for entry in today_actions if str(entry).split(" ", 1)[-1].startswith("BUY "))
+    sell_count = sum(1 for entry in today_actions if str(entry).split(" ", 1)[-1].startswith("SELL "))
+
+    decision_counts = {"buy": 0, "sell": 0, "hold": 0}
+    for decision in last_decisions:
+        action = str((decision or {}).get("action") or "hold").lower()
+        if action in decision_counts:
+            decision_counts[action] += 1
+
+    positions = await _gather_watchlist_positions()
+    held_positions = [p for p in positions if float(p.get("shares") or 0.0) > 0.0]
+    held_symbols = [str(p.get("symbol") or "").upper() for p in held_positions if str(p.get("symbol") or "").strip()]
+
+    realised_pnl = 0.0
+    pnl_label = "SIM"
+    try:
+        ib_mode = str(getattr(app_settings, "TRADING_MODE", "paper") or "paper").lower()
+        from app.services.ib_service import ib_service
+        if bool(getattr(ib_service, "is_connected", False)) and ib_mode in {"paper", "live"}:
+            from app.services.portfolio_manager import _get_today_ib_realized_gain
+            realised_pnl = float(await _get_today_ib_realized_gain(ib_mode) or 0.0)
+            pnl_label = ib_mode.upper()
+        else:
+            raise RuntimeError("simulated")
+    except Exception:
+        try:
+            from app.services.portfolio_manager import _get_today_simulated_realized_gain
+            realised_pnl = float(await _get_today_simulated_realized_gain() or 0.0)
+        except Exception:
+            realised_pnl = 0.0
+
+    summary = (
+        f"daily summary {session_day}: cycles={cycle_count}, actions={len(today_actions)} "
+        f"(buy={buy_count}, sell={sell_count}), last_decisions={len(last_decisions)} "
+        f"(buy={decision_counts['buy']}, sell={decision_counts['sell']}, hold={decision_counts['hold']}), "
+        f"realised_pnl[{pnl_label}]=${realised_pnl:.2f}, open_positions={len(held_positions)}, "
+        f"provider={_provider_label(provider_cfg['provider'])}, model={_state.get('last_model') or 'auto'}"
+    )
+    if held_symbols:
+        summary += f", held={','.join(held_symbols[:10])}"
+    return summary
+
+
+async def _emit_daily_summary_if_due() -> None:
+    session_day = str(_state.get("session_day") or "").strip()
+    if not session_day:
+        return
+    if str(_state.get("last_daily_summary_day") or "") == session_day:
+        return
+    if int(_state.get("session_cycle_count") or 0) <= 0:
+        return
+    if not _is_after_market_close_et():
+        return
+
+    summary = await _build_daily_summary()
+    if not summary:
+        return
+    _state["last_daily_summary"] = summary
+    _state["last_daily_summary_day"] = session_day
+    _pm_log(summary)
 
 
 async def _sell_position(*, pos: dict, price: float, reason: str, ib_mode: bool, ib_connected: bool) -> None:
@@ -665,14 +896,14 @@ async def _run_once() -> None:
                 bars[sym] = summary
     news = await _gather_news(symbols) if settings.get("ai_bot_use_news", True) else []
 
-    model = await _resolve_model(str(settings.get("ai_bot_model", "")))
+    model = await _resolve_model(settings)
     _state["last_model"] = model
     user_prompt = _build_user_prompt(
         instruction=str(settings.get("ai_bot_prompt") or "Help me make money using the positions in watchlist."),
         account=account, positions=positions, quotes=quotes, bars=bars, news=news,
         today_actions=list(_state.get("today_actions") or []),
     )
-    decisions = await _query_model(model, _SYSTEM_PROMPT, user_prompt)
+    decisions = await _query_model(model, _SYSTEM_PROMPT, user_prompt, settings)
     _state["last_decisions"] = decisions
     _log_decision_batch(decisions, symbols, model)
 
@@ -765,6 +996,7 @@ def _maybe_reset_session() -> None:
         _state["session_day"] = today
         _state["today_actions"] = []
         _state["last_decisions"] = []
+        _state["session_cycle_count"] = 0
         if _state.get("running"):
             _pm_log(f"session reset for {today}")
 
@@ -785,6 +1017,10 @@ async def run_ai_bot() -> None:
             continue
         if not settings.get("ai_bot_enabled"):
             continue
+        try:
+            await _emit_daily_summary_if_due()
+        except Exception as exc:
+            logger.warning("AI bot daily summary failed: %s", exc)
         interval = max(30, int(settings.get("ai_bot_interval_s", 300) or 300))
         now = asyncio.get_event_loop().time()
         if now - last_run < interval:
@@ -792,11 +1028,24 @@ async def run_ai_bot() -> None:
         last_run = now
         try:
             await _run_once()
+            _state["session_cycle_count"] = int(_state.get("session_cycle_count") or 0) + 1
             _state["last_run_at"] = datetime.now(timezone.utc).isoformat()
             _state["last_error"] = None
         except httpx.ConnectError:
-            _state["last_error"] = "Cannot reach Ollama. Is it running on the configured host?"
-            logger.warning("AI bot: Ollama connection error")
+            _state["last_error"] = _provider_connection_error_message(settings)
+            logger.warning("AI bot: model provider connection error")
+            _pm_log(_state["last_error"])
+        except httpx.HTTPStatusError as exc:
+            provider_cfg = _provider_settings(settings)
+            _state["last_error"] = (
+                f"{_provider_label(provider_cfg['provider'])} request failed with HTTP {exc.response.status_code}."
+            )
+            logger.warning("AI bot: provider HTTP error: %s", exc)
+            _pm_log(_state["last_error"])
+        except httpx.TimeoutException:
+            provider_cfg = _provider_settings(settings)
+            _state["last_error"] = f"{_provider_label(provider_cfg['provider'])} timed out while generating a response."
+            logger.warning("AI bot: provider timeout")
             _pm_log(_state["last_error"])
         except Exception as exc:
             _state["last_error"] = str(exc)
