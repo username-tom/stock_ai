@@ -301,6 +301,27 @@ def _build_user_prompt(*, instruction: str, account: dict, positions: list[dict]
     return "\n".join(lines)
 
 
+def _summary_num(summary: dict, key: str) -> float:
+    """Extract numeric account-summary values from IB payloads.
+
+    IB account summary rows are returned as nested objects:
+      {"NetLiquidation": {"value": "12345.67", "currency": "USD"}, ...}
+    but callers sometimes also pass flattened numeric strings.
+    """
+    raw = summary.get(key)
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if raw is None:
+        return 0.0
+    text = str(raw).strip().replace(",", "")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ── guardrail + execution helpers ──────────────────────────────────────────────── #
 
 def _record_action(text: str) -> None:
@@ -317,6 +338,31 @@ def _pm_log(msg: str) -> None:
         logger.info("AI bot: %s", msg)
 
 
+def _log_decision_batch(decisions: list[dict], symbols: list[str], model: str) -> None:
+    """Write the model output summary to the existing PM activity log."""
+    safe_symbols = [str(s or "").upper() for s in symbols if str(s or "").strip()]
+    if not decisions:
+        _pm_log(
+            f"model={model} produced no actionable decisions for {len(safe_symbols)} watchlist symbols"
+        )
+        return
+
+    # Keep log lines compact and readable in the existing PM activity table.
+    formatted = []
+    for d in decisions[:20]:
+        symbol = str(d.get("symbol") or "").upper()
+        action = str(d.get("action") or "hold").lower()
+        reason = str(d.get("reason") or "").strip()
+        if reason:
+            formatted.append(f"{symbol}:{action} ({reason})")
+        else:
+            formatted.append(f"{symbol}:{action}")
+
+    _pm_log(
+        f"model={model} decisions ({len(decisions)}): " + "; ".join(formatted)
+    )
+
+
 async def _sell_position(*, pos: dict, price: float, reason: str, ib_mode: bool, ib_connected: bool) -> None:
     """Flatten a single long position via IB (if connected) or the sim engine."""
     symbol = pos["symbol"]
@@ -329,6 +375,15 @@ async def _sell_position(*, pos: dict, price: float, reason: str, ib_mode: bool,
         if result.get("error"):
             _pm_log(f"IB SELL failed for {symbol}: {result['error']}")
             return
+        await _record_ib_trade_submission(
+            symbol=symbol,
+            side="SELL",
+            quantity=qty,
+            reference_price=float(price or 0.0),
+            result=result,
+            ib_mode=ib_mode,
+            strategy_name="ai_bot:sell",
+        )
         _pm_log(f"IB SELL {symbol} x{qty:.4f} ({reason})")
     else:
         await _sim_trade(pos_id=pos["id"], side="SELL", price=price, reason=reason)
@@ -345,9 +400,17 @@ async def _buy_position(*, pos: dict, price: float, reason: str, ib_mode: bool, 
         from app.services.ib_service import ib_service
         from app.services.portfolio_manager import _position_max_allocation
 
-        # Recreate a lightweight ORM-like object only for sizing via the shared
-        # allocation helper, using the account net-liquidation as the base.
-        base = float(account.get("equity") or account.get("total_funds") or 0.0)
+        # Recreate a lightweight object only for sizing via the shared
+        # allocation helper. For percent caps, use the same denominator style as
+        # PM's IB path: prefer a positive equity-like base, then cash-like bases.
+        base = float(
+            account.get("cap_base")
+            or account.get("equity")
+            or account.get("total_funds")
+            or account.get("available_funds")
+            or account.get("buying_power")
+            or 0.0
+        )
 
         class _P:  # noqa: D401 - tiny shim with the attributes the helper reads
             pass
@@ -360,24 +423,74 @@ async def _buy_position(*, pos: dict, price: float, reason: str, ib_mode: bool, 
             cap = _position_max_allocation(shim, base)
         except Exception:
             cap = 0.0
-        avail = float(account.get("available_funds") or 0.0)
-        budget = min(cap, avail) if cap and cap != float("inf") else avail
-        if budget <= 0:
-            budget = avail
+        available_funds = float(account.get("available_funds") or 0.0)
+        buying_power = float(account.get("buying_power") or 0.0)
+        # In IB paper accounts, AvailableFunds can intermittently report 0 while
+        # BuyingPower remains valid. Use the best positive budget source.
+        available_budget = max(available_funds, buying_power)
+
+        # Cap-aware budget: always honour per-symbol allocation limits when set.
+        if cap and cap != float("inf"):
+            budget = min(cap, available_budget)
+        else:
+            budget = available_budget
         import math
         qty = math.floor(budget / price)
         if qty <= 0:
-            _pm_log(f"IB BUY skipped {symbol}: insufficient budget (${budget:.2f} @ ${price:.2f})")
+            _pm_log(
+                f"IB BUY skipped {symbol}: insufficient budget (${budget:.2f} @ ${price:.2f}) "
+                f"[cap={('inf' if cap == float('inf') else f'${cap:.2f}')}, "
+                f"available=${available_funds:.2f}, buying_power=${buying_power:.2f}]"
+            )
             return
         result = await ib_service.place_order(symbol=symbol, side="BUY", quantity=float(qty), order_type="MKT")
         if result.get("error"):
             _pm_log(f"IB BUY failed for {symbol}: {result['error']}")
             return
+        await _record_ib_trade_submission(
+            symbol=symbol,
+            side="BUY",
+            quantity=float(qty),
+            reference_price=float(price or 0.0),
+            result=result,
+            ib_mode=ib_mode,
+            strategy_name="ai_bot:buy",
+        )
         _pm_log(f"IB BUY {symbol} x{qty} ({reason})")
     else:
         await _sim_trade(pos_id=pos["id"], side="BUY", price=price, reason=reason)
         _pm_log(f"SIM BUY {symbol} ({reason})")
     _record_action(f"BUY {symbol} :: {reason}")
+
+
+async def _record_ib_trade_submission(*, symbol: str, side: str, quantity: float, reference_price: float,
+                                      result: dict, ib_mode: str, strategy_name: str = "ai_bot") -> None:
+    """Persist AI-bot IB order submissions to Trade rows for UI + PnL reconciliation."""
+    if quantity <= 0:
+        return
+    try:
+        from app.models.trade import Trade, TradingMode, OrderSide, OrderStatus
+
+        status_raw = str(result.get("status") or "").upper()
+        is_filled = status_raw == "FILLED"
+        mode = TradingMode.LIVE if str(ib_mode or "").strip().lower() == "live" else TradingMode.PAPER
+        side_enum = OrderSide.BUY if str(side).upper() == "BUY" else OrderSide.SELL
+
+        async with AsyncSessionLocal() as db:
+            db.add(Trade(
+                symbol=str(symbol or "").upper(),
+                side=side_enum,
+                quantity=float(quantity),
+                price=float(reference_price or 0.0),
+                status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
+                mode=mode,
+                ib_order_id=result.get("ib_order_id"),
+                strategy_name=strategy_name,
+                filled_at=datetime.now(timezone.utc) if is_filled else None,
+            ))
+            await db.commit()
+    except Exception as exc:
+        _pm_log(f"failed to persist IB {side} trade row for {symbol}: {exc}")
 
 
 async def _sim_trade(*, pos_id: int, side: str, price: float, reason: str) -> None:
@@ -406,11 +519,16 @@ async def _run_once() -> None:
     # Determine execution mode.
     ib_connected = False
     ib_mode = str(getattr(app_settings, "TRADING_MODE", "paper") or "paper").lower()
+    use_ib_execution = False
     try:
         from app.services.ib_service import ib_service
         ib_connected = ib_service.is_connected
+        use_ib_execution = bool(ib_connected and ib_mode in {"paper", "live"})
     except Exception:
         ib_connected = False
+        use_ib_execution = False
+
+    _pm_log(f"execution mode={'IB' if use_ib_execution else 'SIM'} (trading_mode={ib_mode}, ib_connected={ib_connected})")
 
     from app.services.sandbox_engine import (
         _regular_session_is_open,
@@ -426,8 +544,14 @@ async def _run_once() -> None:
     quotes = await _gather_quotes(symbols)
 
     # Snapshot IB holdings so guardrails act on broker truth in IB mode.
-    account = {"total_funds": 0.0, "available_funds": 0.0, "equity": 0.0}
-    if ib_connected:
+    account = {
+        "total_funds": 0.0,
+        "available_funds": 0.0,
+        "buying_power": 0.0,
+        "equity": 0.0,
+        "cap_base": 0.0,
+    }
+    if use_ib_execution:
         try:
             from app.services.ib_service import ib_service
             ib_positions = await ib_service.get_positions()
@@ -445,9 +569,16 @@ async def _run_once() -> None:
                 p["shares"] = qty
             summary = await ib_service.get_account_summary()
             if isinstance(summary, dict) and not summary.get("error"):
-                account["equity"] = float(summary.get("NetLiquidation") or 0.0)
-                account["available_funds"] = float(summary.get("AvailableFunds") or 0.0)
+                account["equity"] = _summary_num(summary, "NetLiquidation")
+                account["available_funds"] = _summary_num(summary, "AvailableFunds")
+                account["buying_power"] = _summary_num(summary, "BuyingPower")
                 account["total_funds"] = account["equity"]
+                # Use the first positive equity/cash metric as the allocation-cap base.
+                for key in ("NetLiquidation", "TotalCashValue", "AvailableFunds"):
+                    value = _summary_num(summary, key)
+                    if value > 0.0:
+                        account["cap_base"] = value
+                        break
         except Exception as exc:
             logger.warning("AI bot IB snapshot failed: %s", exc)
     else:
@@ -468,7 +599,7 @@ async def _run_once() -> None:
     # ── Guardrail 1: crash protection (hard) ─────────────────────────────────── #
     crash_active = await _enforce_crash_protection(
         settings=settings, account=account, held=held, quotes=quotes,
-        ib_connected=ib_connected, ib_mode=ib_mode, pm_state=pm_state,
+        ib_connected=use_ib_execution, ib_mode=ib_mode, pm_state=pm_state,
         trading_day=_current_trading_day_key_et(),
     )
     if crash_active:
@@ -489,7 +620,7 @@ async def _run_once() -> None:
         for p in held:
             price = quotes.get(p["symbol"], 0.0)
             await _sell_position(pos=p, price=price, reason="eod_liquidation",
-                                 ib_mode=ib_mode, ib_connected=ib_connected)
+                                 ib_mode=ib_mode, ib_connected=use_ib_execution)
         return  # sell-only mode; do not consult the model
 
     # ── Guardrail 3: stop-loss / take-profit (hard) ──────────────────────────── #
@@ -517,11 +648,11 @@ async def _run_once() -> None:
         tp_trigger = min(tp_targets) if tp_targets else None
         if sl_trigger is not None and price <= sl_trigger:
             await _sell_position(pos=p, price=price, reason=f"stop_loss @ ${price:.2f}",
-                                 ib_mode=ib_mode, ib_connected=ib_connected)
+                                 ib_mode=ib_mode, ib_connected=use_ib_execution)
             risk_handled.add(p["symbol"])
         elif tp_trigger is not None and price >= tp_trigger:
             await _sell_position(pos=p, price=price, reason=f"take_profit @ ${price:.2f}",
-                                 ib_mode=ib_mode, ib_connected=ib_connected)
+                                 ib_mode=ib_mode, ib_connected=use_ib_execution)
             risk_handled.add(p["symbol"])
 
     # ── Model-driven discretionary decisions (within rails) ──────────────────── #
@@ -543,6 +674,7 @@ async def _run_once() -> None:
     )
     decisions = await _query_model(model, _SYSTEM_PROMPT, user_prompt)
     _state["last_decisions"] = decisions
+    _log_decision_batch(decisions, symbols, model)
 
     pos_by_symbol = {p["symbol"]: p for p in positions}
     for d in decisions:
@@ -559,12 +691,12 @@ async def _run_once() -> None:
             if float(pos.get("shares") or 0.0) > 0:
                 continue  # already long; bot adds via fresh symbols only
             await _buy_position(pos=pos, price=price, reason=reason,
-                                ib_mode=ib_mode, ib_connected=ib_connected, account=account)
+                                ib_mode=ib_mode, ib_connected=use_ib_execution, account=account)
         elif action == "sell":
             if float(pos.get("shares") or 0.0) <= 0:
                 continue
             await _sell_position(pos=pos, price=price, reason=reason,
-                                 ib_mode=ib_mode, ib_connected=ib_connected)
+                                 ib_mode=ib_mode, ib_connected=use_ib_execution)
 
 
 async def _enforce_crash_protection(*, settings: dict, account: dict, held: list[dict],
@@ -665,6 +797,8 @@ async def run_ai_bot() -> None:
         except httpx.ConnectError:
             _state["last_error"] = "Cannot reach Ollama. Is it running on the configured host?"
             logger.warning("AI bot: Ollama connection error")
+            _pm_log(_state["last_error"])
         except Exception as exc:
             _state["last_error"] = str(exc)
             logger.exception("AI bot run error")
+            _pm_log(f"run error: {_state['last_error']}")

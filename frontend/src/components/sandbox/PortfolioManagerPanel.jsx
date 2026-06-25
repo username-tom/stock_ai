@@ -1032,6 +1032,23 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
   const scores = managerData.scores ?? {}
   const aiTags = managerData.ai_tags ?? {}
   const activity = managerData.last_activity ?? []
+  const pmRows = pmActivityData?.items ?? []
+  const aiLogLines = pmRows
+    .filter(row => String(row?.msg || '').startsWith('AI bot:'))
+    .map(row => {
+      const t = row?.at ? new Date(row.at).toLocaleTimeString() : '--:--:--'
+      return `[${t}] ${String(row?.msg || '').replace(/^AI bot:\s*/, '')}`
+    })
+  const aiDecisionText = Array.isArray(aiBotState?.last_decisions) && aiBotState.last_decisions.length
+    ? aiBotState.last_decisions
+      .map(d => {
+        const symbol = String(d?.symbol || '').toUpperCase()
+        const action = String(d?.action || 'hold').toLowerCase()
+        const reason = String(d?.reason || '').trim()
+        return reason ? `${symbol}: ${action} (${reason})` : `${symbol}: ${action}`
+      })
+      .join('\n')
+    : 'No model decisions in current cycle.'
 
   function openEdit() {
     setPresetNotice(null)
@@ -3397,6 +3414,28 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
 
       {pmTab === 'logs' && (
         <div className="bg-dark-800/70 border border-dark-600 rounded-xl p-4 space-y-3">
+          <div className="space-y-2">
+            <div className="text-sm font-semibold text-slate-200 uppercase tracking-wider">AI Bot Output</div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div className="border border-dark-600 rounded-lg overflow-hidden">
+                <div className="px-2 py-1 text-[11px] text-slate-400 bg-dark-800 border-b border-dark-600">
+                  Latest model decisions (current cycle)
+                </div>
+                <pre className="m-0 p-2 text-[11px] leading-5 text-cyan-200 font-mono whitespace-pre-wrap break-words bg-dark-900/50 max-h-44 overflow-auto">
+{aiDecisionText}
+                </pre>
+              </div>
+              <div className="border border-dark-600 rounded-lg overflow-hidden">
+                <div className="px-2 py-1 text-[11px] text-slate-400 bg-dark-800 border-b border-dark-600">
+                  AI bot messages from PM activity log
+                </div>
+                <pre className="m-0 p-2 text-[11px] leading-5 text-emerald-200 font-mono whitespace-pre-wrap break-words bg-dark-900/50 max-h-44 overflow-auto">
+{aiLogLines.length ? aiLogLines.join('\n') : 'No AI bot activity rows yet.'}
+                </pre>
+              </div>
+            </div>
+          </div>
+
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-semibold text-slate-200 uppercase tracking-wider">PM Activity Log</div>
             <div className="flex items-center gap-2">
@@ -3427,7 +3466,7 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                   </tr>
                 </thead>
                 <tbody>
-                  {(pmActivityData?.items ?? []).map((row, idx) => (
+                  {pmRows.map((row, idx) => (
                     <tr key={`${row.at ?? 'na'}-${idx}`} className="border-t border-dark-700/70 align-top">
                       <td className="px-2 py-1.5 text-slate-500 font-mono whitespace-nowrap">
                         {row.at ? new Date(row.at).toLocaleString() : ''}

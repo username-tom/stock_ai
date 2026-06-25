@@ -12,6 +12,7 @@ services:
       - IB_MARKET_DATA_TYPE=${IB_MARKET_DATA_TYPE:-3}
       - TRADING_MODE=${TRADING_MODE:-paper}
       - DATABASE_URL=sqlite+aiosqlite:////app/data/stock_ai.db
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
       - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost:80
       - REPORTS_DIR=/app/reports_output
       - LOCAL_STORAGE_DIR=/app/local_storage
