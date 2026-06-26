@@ -72,6 +72,11 @@ function strategyDisplayLabel(pos, managerSettings, aiTag) {
   return stratLabel(pos?.strategy_name)
 }
 
+function normalizeAiBotDecision(decision) {
+  const action = String(decision?.action ?? 'hold').trim().toLowerCase()
+  return action === 'buy' || action === 'sell' ? action : 'hold'
+}
+
 function fmtUpperLimit(pos) {
   const mode = pos?.max_allocation_mode ?? 'dollar'
   const value = Number(pos?.max_allocation_value)
@@ -126,6 +131,7 @@ export default function PortfolioOverview({
   managerActivities = [],
   pmScores = {},
   managerSettings = null,
+  aiBotState = null,
   onOpenManager = null,
   onSelectSymbol,
 }) {
@@ -291,6 +297,16 @@ export default function PortfolioOverview({
   const ibBuyingPower = numOrNull(accountData?.buying_power)
   const ibCashValue = numOrNull(accountData?.cash_value)
   const ibUnrealizedPnl = numOrNull(accountData?.unrealized_pnl)
+  const aiBotDecisionMap = useMemo(() => {
+    const map = new Map()
+    for (const decision of Array.isArray(aiBotState?.last_decisions) ? aiBotState.last_decisions : []) {
+      const symbol = String(decision?.symbol ?? '').trim().toUpperCase()
+      if (!symbol) continue
+      map.set(symbol, normalizeAiBotDecision(decision))
+    }
+    return map
+  }, [aiBotState])
+  const showAiBotOutput = Boolean(managerSettings?.enabled && managerSettings?.ai_bot_enabled)
   // NOTE: IB account-summary RealizedPnL and reqPnL dailyPnL are intentionally
   // NOT used for the realized cards. IB's RealizedPnL is only session/daily (not
   // cumulative) and dailyPnL folds in unrealized marks; the app trade ledger is
@@ -1148,6 +1164,12 @@ export default function PortfolioOverview({
                     const priceColor = priceColors[pos.symbol]
                     const aiTag = (pos.learner_tag || '—').toUpperCase()
                     const aiStyle = AI_TAG_CELL_STYLES[aiTag] ?? 'text-slate-500'
+                    const aiBotAction = aiBotDecisionMap.get(pos.symbol) ?? 'hold'
+                    const aiBotStyle = aiBotAction === 'buy'
+                      ? 'text-emerald-400'
+                      : aiBotAction === 'sell'
+                      ? 'text-red-400'
+                      : 'text-slate-500'
                     const upperLimit = fmtUpperLimit(pos)
                     const lowerLimit = fmtLowerLimit(managerSettings, accountData?.total_funds)
                     return (
@@ -1166,24 +1188,33 @@ export default function PortfolioOverview({
                         </td>
                         <td className="py-2 pl-2">
                           <div className="leading-tight" title={pmScores[pos.symbol] ? `Score: ${pmScores[pos.symbol].score} — Updated: ${pmScores[pos.symbol].updated_at ? new Date(pmScores[pos.symbol].updated_at).toLocaleTimeString() : '?'}` : undefined}>
-                            <div>
-                              <span className="text-[11px] text-slate-500">PM: </span>
-                              {pmScores[pos.symbol] ? (
-                                <span className="text-xs font-semibold" style={{ color: classColor(pmScores[pos.symbol].classification) }}>
-                                  {classLabel(pmScores[pos.symbol].classification)}
-                                </span>
-                              ) : managerSettings?.enabled ? (
-                                <span className="inline-flex items-center gap-1 animate-pulse">
-                                  <span className="inline-block w-10 h-2 rounded bg-slate-700" />
-                                </span>
-                              ) : (
-                                <span className="text-xs text-slate-600">—</span>
-                              )}
-                            </div>
-                            <div className="mt-0.5">
-                              <span className="text-[11px] text-slate-500">AI: </span>
-                              <span className={`text-xs font-semibold ${aiStyle}`}>{aiTag}</span>
-                            </div>
+                            {showAiBotOutput ? (
+                              <div>
+                                <span className="text-[11px] text-slate-500">AI Bot: </span>
+                                <span className={`text-xs font-semibold uppercase ${aiBotStyle}`}>{aiBotAction}</span>
+                              </div>
+                            ) : (
+                              <>
+                                <div>
+                                  <span className="text-[11px] text-slate-500">PM: </span>
+                                  {pmScores[pos.symbol] ? (
+                                    <span className="text-xs font-semibold" style={{ color: classColor(pmScores[pos.symbol].classification) }}>
+                                      {classLabel(pmScores[pos.symbol].classification)}
+                                    </span>
+                                  ) : managerSettings?.enabled ? (
+                                    <span className="inline-flex items-center gap-1 animate-pulse">
+                                      <span className="inline-block w-10 h-2 rounded bg-slate-700" />
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-slate-600">—</span>
+                                  )}
+                                </div>
+                                <div className="mt-0.5">
+                                  <span className="text-[11px] text-slate-500">AI: </span>
+                                  <span className={`text-xs font-semibold ${aiStyle}`}>{aiTag}</span>
+                                </div>
+                              </>
+                            )}
                           </div>
                         </td>
                         <td className="py-2 pl-2">

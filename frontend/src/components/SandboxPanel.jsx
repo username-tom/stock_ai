@@ -19,7 +19,7 @@ import {
   getIBPositions, getIBOrders,
   getSandboxEngineState, toggleSandboxEngine, toggleAllSandboxEngines,
   getSandboxAnalytics, getSandboxRealizedMetrics,
-  getPortfolioManagerState, togglePortfolioManager,
+  getPortfolioManagerState, togglePortfolioManager, getAiBotStatus,
   updatePortfolioManagerSettings,
   bulkUpdateSandboxStrategy,
   bulkUpdateSandboxAllocationCap,
@@ -595,6 +595,8 @@ export default function SandboxPanel() {
     refetchInterval: appSettings.sandbox_trades_ms,
   })
   const { data: managerState } = useQuery({ queryKey: ['portfolio-manager-state'], queryFn: getPortfolioManagerState, refetchInterval: appSettings.sandbox_engine_ms })
+  const { data: aiBotData } = useQuery({ queryKey: ['ai-bot-status'], queryFn: getAiBotStatus, refetchInterval: appSettings.sandbox_engine_ms })
+  const aiBotState = aiBotData?.state ?? null
   const togglePredictorMut = useMutation({
     mutationFn: (enabled) => updatePortfolioManagerSettings({ bar_predictor_enabled: Boolean(enabled) }),
     onSuccess: () => {
@@ -1547,6 +1549,7 @@ export default function SandboxPanel() {
               managerActivities={managerState?.last_activity ?? []}
               pmScores={managerState?.scores ?? {}}
               managerSettings={managerState?.settings ?? null}
+              aiBotState={aiBotState}
               onOpenManager={activeMainTab === 'summary' ? () => setActiveMainTab('manager') : null}
               onSelectSymbol={handleSelectSymbol}
             />

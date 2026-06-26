@@ -29,7 +29,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import math
+import re
+from datetime import datetime, timezone, timedelta
 
 import httpx
 
@@ -42,6 +44,9 @@ _OLLAMA_TIMEOUT = 120.0
 _FALLBACK_MODEL = "llama3.2"
 _MAX_TODAY_ACTIONS = 20          # bounded history fed back into the prompt
 _MAX_NEWS_ITEMS = 8
+_MODEL_MAX_RETRIES = 3
+_MODEL_RETRY_BACKOFF_S = 1.5
+_MAX_THINKING_CHARS = 1200
 _PROVIDER_OLLAMA = "ollama"
 _PROVIDER_LM_STUDIO = "lm_studio"
 _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
@@ -56,9 +61,10 @@ _OLLAMA_OPTIONS = {
 }
 
 _SYSTEM_PROMPT = """\
-You are an automated intraday trading assistant for a watchlist of US equities.
-You are given the current account, each watchlist position, recent 1-minute
-price bars, and related financial news. Decide what to do with each symbol.
+You are an automated intraday trading assistant for a set of US equity positions.
+You are given the current account, each current position, recent 1-minute
+price bars, pre-computed technical indicators, and related financial news.
+Decide what to do with each symbol.
 
 Hard rules enforced by the platform (you cannot override them):
 - Stop-loss / take-profit, end-of-day liquidation, and crash protection are
@@ -66,13 +72,24 @@ Hard rules enforced by the platform (you cannot override them):
 - Only long positions are supported (BUY to open/add, SELL to close). No shorts.
 
 Respond with STRICT JSON only, no prose, in exactly this shape:
-{"decisions":[{"symbol":"TICKER","action":"buy|sell|hold","reason":"short reason"}]}
+{"decisions":[{"symbol":"TICKER","action":"buy|sell|hold","order_type":"market|limit","limit_price":123.45,"size_pct":65,"risk_level":"low|medium|high","indicators_used":["RSI","VWAP"],"reason":"short reason","thinking":"short thought process"}]}
 
 Guidance:
 - "buy"  = open or add to a long position when the edge looks favourable.
 - "sell" = close an existing long position.
 - "hold" = take no action this cycle.
-- Only include symbols from the provided watchlist. Keep reasons under 140 chars.
+- Use "market" when you want an immediate fill.
+- Use "limit" when you want a resting or price-controlled order.
+- Include "limit_price" for limit orders; omit it for market orders.
+- Use "size_pct" (1-100) for partial sizing based on risk assessment.
+- "buy": size_pct applies to available allocation room/budget.
+- "sell": size_pct applies to currently owned shares.
+- Include "risk_level" to justify size choice: low, medium, or high.
+- Include "indicators_used" listing only provided signals/indicators you relied on.
+- Include "thinking" with the reasoning behind each decision (keep it concise).
+- Respect runtime settings shown in the prompt (decision cadence interval, EOD windows,
+  risk settings, and buy restrictions) when selecting action/order_type/size.
+- Only include symbols from the provided positions. Keep reasons under 140 chars.
 """
 
 # ── runtime state ──────────────────────────────────────────────────────────── #
@@ -88,6 +105,9 @@ _state: dict[str, object] = {
     "session_cycle_count": 0,
     "last_daily_summary": None,
     "last_daily_summary_day": None,
+    "last_query_attempts": 0,
+    "last_query_duration_ms": None,
+    "last_retry_events": [],
 }
 
 
@@ -102,6 +122,9 @@ def get_state() -> dict:
         "session_cycle_count": int(_state.get("session_cycle_count") or 0),
         "last_daily_summary": _state.get("last_daily_summary"),
         "last_daily_summary_day": _state.get("last_daily_summary_day"),
+        "last_query_attempts": int(_state.get("last_query_attempts") or 0),
+        "last_query_duration_ms": _state.get("last_query_duration_ms"),
+        "last_retry_events": list(_state.get("last_retry_events") or []),
         "today_actions": list(_state.get("today_actions") or [])[:_MAX_TODAY_ACTIONS],
         "last_decisions": list(_state.get("last_decisions") or []),
     }
@@ -194,28 +217,185 @@ def _parse_decisions(raw: str) -> list[dict]:
     raw = str(raw or "").strip()
     if not raw:
         return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
+
+    def _strip_code_fences(text: str) -> str:
+        t = text.strip()
+        if t.startswith("```"):
+            lines = t.splitlines()
+            if lines:
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            return "\n".join(lines).strip()
+        return t
+
+    def _find_balanced_json_block(text: str) -> str:
+        start = -1
+        opening = ""
+        for i, ch in enumerate(text):
+            if ch == "{" or ch == "[":
+                start = i
+                opening = ch
+                break
+        if start < 0:
+            return ""
+        closing = "}" if opening == "{" else "]"
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == opening:
+                depth += 1
+            elif ch == closing:
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return ""
+
+    # Try the raw response first, then progressively more tolerant extraction.
+    parse_candidates = [raw]
+    stripped = _strip_code_fences(raw)
+    if stripped and stripped not in parse_candidates:
+        parse_candidates.append(stripped)
+    fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw, flags=re.IGNORECASE)
+    if fenced_match:
+        candidate = str(fenced_match.group(1) or "").strip()
+        if candidate and candidate not in parse_candidates:
+            parse_candidates.append(candidate)
+    balanced = _find_balanced_json_block(raw)
+    if balanced and balanced not in parse_candidates:
+        parse_candidates.append(balanced)
+
+    parsed = None
+    for candidate in parse_candidates:
+        try:
+            parsed = json.loads(candidate)
+            break
+        except json.JSONDecodeError:
+            continue
+    if parsed is None:
         logger.warning("AI bot: model returned non-JSON output; ignoring this cycle")
         return []
-    decisions = parsed.get("decisions") if isinstance(parsed, dict) else parsed
+
+    if isinstance(parsed, dict) and "decisions" not in parsed and "symbol" in parsed:
+        decisions = [parsed]
+    else:
+        decisions = parsed.get("decisions") if isinstance(parsed, dict) else parsed
     if not isinstance(decisions, list):
         return []
     cleaned: list[dict] = []
+    aliases = {
+        "wait": "hold",
+        "none": "hold",
+        "skip": "hold",
+        "no_action": "hold",
+        "no-action": "hold",
+    }
     for d in decisions:
         if not isinstance(d, dict):
             continue
         symbol = str(d.get("symbol") or "").strip().upper()
         action = str(d.get("action") or "hold").strip().lower()
+        action = aliases.get(action, action)
         if not symbol or action not in {"buy", "sell", "hold"}:
             continue
+        order_type = str(d.get("order_type") or "market").strip().lower()
+        if order_type in {"lmt", "limit"}:
+            order_type = "limit"
+        else:
+            order_type = "market"
+        limit_price = d.get("limit_price")
+        try:
+            limit_price_num = float(limit_price)
+        except (TypeError, ValueError):
+            limit_price_num = None
+        if limit_price_num is not None and limit_price_num <= 0:
+            limit_price_num = None
+        size_pct = d.get("size_pct")
+        try:
+            size_pct_num = float(size_pct)
+        except (TypeError, ValueError):
+            size_pct_num = None
+        if size_pct_num is not None:
+            if size_pct_num <= 0:
+                size_pct_num = None
+            else:
+                size_pct_num = min(100.0, size_pct_num)
+
+        risk_level = str(d.get("risk_level") or d.get("risk") or "").strip().lower()
+        if risk_level not in {"low", "medium", "high"}:
+            risk_level = ""
+
+        indicators_raw = d.get("indicators_used") or d.get("indicators") or []
+        indicators: list[str] = []
+        if isinstance(indicators_raw, str):
+            parts = [part.strip() for part in indicators_raw.split(",") if part.strip()]
+            indicators = parts[:8]
+        elif isinstance(indicators_raw, list):
+            for item in indicators_raw:
+                text = str(item or "").strip()
+                if text:
+                    indicators.append(text)
+                if len(indicators) >= 8:
+                    break
+        thinking = str(d.get("thinking") or d.get("analysis") or "").strip()
         cleaned.append({
             "symbol": symbol,
             "action": action,
+            "order_type": order_type,
+            "limit_price": limit_price_num,
+            "size_pct": size_pct_num,
+            "risk_level": risk_level,
+            "indicators_used": indicators,
             "reason": str(d.get("reason") or "")[:140],
+            "thinking": thinking[:_MAX_THINKING_CHARS],
         })
     return cleaned
+
+
+def _normalize_symbol_decisions(decisions: list[dict], symbols: list[str]) -> list[dict]:
+    """De-duplicate and backfill decisions so every requested symbol has an action."""
+    symbol_set = {str(s or "").strip().upper() for s in symbols if str(s or "").strip()}
+    if not symbol_set:
+        return []
+
+    # Keep the latest model decision for each symbol.
+    by_symbol: dict[str, dict] = {}
+    for d in decisions:
+        symbol = str((d or {}).get("symbol") or "").strip().upper()
+        if symbol and symbol in symbol_set:
+            by_symbol[symbol] = d
+
+    missing = sorted(symbol_set.difference(by_symbol.keys()))
+    if missing:
+        _pm_log(
+            f"model returned {len(by_symbol)}/{len(symbol_set)} symbols; defaulting HOLD for: {', '.join(missing)}"
+        )
+        for symbol in missing:
+            by_symbol[symbol] = {
+                "symbol": symbol,
+                "action": "hold",
+                "order_type": "market",
+                "limit_price": None,
+                "size_pct": None,
+                "risk_level": "",
+                "indicators_used": [],
+                "reason": "no model decision; default hold",
+                "thinking": "",
+            }
+
+    return [by_symbol[symbol] for symbol in sorted(symbol_set)]
 
 
 async def get_status(settings: dict | None = None) -> dict:
@@ -254,6 +434,37 @@ async def get_status(settings: dict | None = None) -> dict:
         resolved_model = _FALLBACK_MODEL
 
     runtime_state = get_state()
+    ai_active = _is_ai_bot_active(active)
+    interval_s = max(30, int(active.get("ai_bot_interval_s", 300) or 300))
+    last_error = str(runtime_state.get("last_error") or "").strip()
+    last_run_raw = str(runtime_state.get("last_run_at") or "").strip()
+    last_run_at: datetime | None = None
+    if last_run_raw:
+        try:
+            last_run_at = datetime.fromisoformat(last_run_raw.replace("Z", "+00:00"))
+            if last_run_at.tzinfo is None:
+                last_run_at = last_run_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            last_run_at = None
+
+    if not ai_active:
+        status = "disabled"
+        message = "AI bot is disabled because PM is off or AI mode is not selected."
+    elif status == "healthy" and last_error:
+        status = "degraded"
+        message = f"Last run failed: {last_error}"
+    elif status == "healthy" and last_run_at is None:
+        status = "starting"
+        message = "AI bot is enabled and waiting for the first successful run."
+    elif status == "healthy" and last_run_at is not None:
+        stale_after = timedelta(seconds=(interval_s * 2) + 30)
+        if datetime.now(timezone.utc) - last_run_at > stale_after:
+            status = "stalled"
+            message = (
+                f"AI bot appears stalled: last run was {last_run_at.astimezone(timezone.utc).isoformat()} "
+                f"(interval={interval_s}s)."
+            )
+
     runtime_state.update({
         "provider": provider_cfg["provider"],
         "provider_label": _provider_label(provider_cfg["provider"]),
@@ -262,6 +473,7 @@ async def get_status(settings: dict | None = None) -> dict:
         "resolved_model": resolved_model,
         "configured_model_available": (not configured_model) or (configured_model in models) or (not models),
         "reachable": reachable,
+        "active": ai_active,
         "status": status,
         "message": message,
         "checked_at": started_at.isoformat(),
@@ -287,64 +499,150 @@ async def get_status(settings: dict | None = None) -> dict:
 async def _query_model(model: str, system_prompt: str, user_prompt: str, settings: dict | None = None) -> list[dict]:
     """Call the configured local provider and parse a strict-JSON list of decisions."""
     provider_cfg = _provider_settings(settings)
-    async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
-        if provider_cfg["provider"] == _PROVIDER_LM_STUDIO:
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": _OLLAMA_OPTIONS["temperature"],
-                "max_tokens": _OLLAMA_OPTIONS["num_predict"],
-                "stream": False,
-            }
-            resp = await client.post(_provider_generation_url(settings), json=payload)
-            resp.raise_for_status()
-            body = resp.json()
-            choices = body.get("choices") or []
-            message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
-            raw = str((message or {}).get("content") or "").strip()
-            return _parse_decisions(raw)
+    last_exc: Exception | None = None
+    retry_events: list[str] = []
+    started = datetime.now(timezone.utc)
+    for attempt in range(1, _MODEL_MAX_RETRIES + 1):
+        _state["last_query_attempts"] = attempt
+        try:
+            async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
+                if provider_cfg["provider"] == _PROVIDER_LM_STUDIO:
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": _OLLAMA_OPTIONS["temperature"],
+                        "max_tokens": _OLLAMA_OPTIONS["num_predict"],
+                        "stream": False,
+                    }
+                    resp = await client.post(_provider_generation_url(settings), json=payload)
+                    resp.raise_for_status()
+                    body = resp.json()
+                    choices = body.get("choices") or []
+                    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+                    raw = str((message or {}).get("content") or "").strip()
+                    decisions = _parse_decisions(raw)
+                else:
+                    payload = {
+                        "model": model,
+                        "prompt": user_prompt,
+                        "system": system_prompt,
+                        "stream": False,
+                        "format": "json",
+                        "options": _OLLAMA_OPTIONS,
+                    }
+                    resp = await client.post(_provider_generation_url(settings), json=payload)
+                    resp.raise_for_status()
+                    body = resp.json()
+                    raw = str(body.get("response") or "").strip()
+                    decisions = _parse_decisions(raw)
 
-        payload = {
-            "model": model,
-            "prompt": user_prompt,
-            "system": system_prompt,
-            "stream": False,
-            "format": "json",
-            "options": _OLLAMA_OPTIONS,
-        }
-        resp = await client.post(_provider_generation_url(settings), json=payload)
-        resp.raise_for_status()
-        body = resp.json()
-    return _parse_decisions(body.get("response") or "")
+            elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+            _state["last_query_duration_ms"] = elapsed_ms
+            _state["last_retry_events"] = retry_events[-10:]
+            if attempt > 1:
+                _pm_log(
+                    f"model recovered after retry {attempt}/{_MODEL_MAX_RETRIES} "
+                    f"({_provider_label(provider_cfg['provider'])}, {elapsed_ms}ms)"
+                )
+            return decisions
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            kind = (
+                "timeout" if isinstance(exc, httpx.TimeoutException)
+                else "connect" if isinstance(exc, httpx.ConnectError)
+                else "http"
+            )
+            detail = str(exc)
+            event = f"attempt {attempt}/{_MODEL_MAX_RETRIES} {kind}: {detail}"
+            retry_events.append(event)
+            _pm_log(f"model query {event}")
+            if attempt >= _MODEL_MAX_RETRIES:
+                break
+            await asyncio.sleep(_MODEL_RETRY_BACKOFF_S * attempt)
+        except Exception as exc:
+            last_exc = exc
+            event = f"attempt {attempt}/{_MODEL_MAX_RETRIES} error: {exc}"
+            retry_events.append(event)
+            _pm_log(f"model query {event}")
+            if attempt >= _MODEL_MAX_RETRIES:
+                break
+            await asyncio.sleep(_MODEL_RETRY_BACKOFF_S * attempt)
+
+    elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    _state["last_query_duration_ms"] = elapsed_ms
+    _state["last_retry_events"] = retry_events[-10:]
+    if last_exc is not None:
+        raise last_exc
+    return []
 
 
 # ── context gathering ────────────────────────────────────────────────────────── #
 
-async def _gather_watchlist_positions() -> list[dict]:
+async def _gather_watchlist_positions(*, use_ib_execution: bool) -> list[dict]:
     from sqlalchemy import select as sa_select
     from app.models.sandbox import SandboxPosition
 
     async with AsyncSessionLocal() as db:
-        res = await db.execute(
-            sa_select(SandboxPosition).where(SandboxPosition.is_on_watchlist == True)  # noqa: E712
-        )
+        res = await db.execute(sa_select(SandboxPosition).order_by(SandboxPosition.symbol))
         rows = res.scalars().all()
-    return [
-        {
+
+    positions_by_symbol: dict[str, dict] = {}
+    for p in rows:
+        symbol = str(p.symbol or "").upper().strip()
+        if not symbol:
+            continue
+        shares = float(p.shares or 0.0)
+        pending_shares = float(getattr(p, "pending_shares", 0.0) or 0.0)
+        if not bool(getattr(p, "is_on_watchlist", True)) and shares <= 0.0 and pending_shares <= 0.0:
+            continue
+        positions_by_symbol[symbol] = {
             "id": int(p.id),
-            "symbol": str(p.symbol or "").upper(),
-            "shares": float(p.shares or 0.0),
+            "symbol": symbol,
+            "shares": shares,
             "avg_cost": float(p.avg_cost or 0.0),
             "allocated_funds": float(p.allocated_funds or 0.0),
             "max_allocation_mode": str(p.max_allocation_mode or "dollar"),
             "max_allocation_value": float(p.max_allocation_value or 0.0),
+            "source": "sim",
         }
-        for p in rows
-        if str(p.symbol or "").strip()
-    ]
+
+    if use_ib_execution:
+        try:
+            from app.services.ib_service import ib_service
+
+            ib_positions = await ib_service.get_positions()
+            for row in ib_positions:
+                symbol = str(row.get("symbol") or "").upper().strip()
+                if not symbol:
+                    continue
+                qty = float(row.get("quantity") or 0.0)
+                avg_cost = float(row.get("avg_cost") or 0.0)
+                pos = positions_by_symbol.get(symbol)
+                if not pos:
+                    positions_by_symbol[symbol] = {
+                        "id": None,
+                        "symbol": symbol,
+                        "shares": qty,
+                        "avg_cost": avg_cost,
+                        "allocated_funds": 0.0,
+                        "max_allocation_mode": "dollar",
+                        "max_allocation_value": 0.0,
+                        "source": "ib",
+                    }
+                    continue
+                local_shares = float(pos.get("shares") or 0.0)
+                pos["ib_qty"] = qty
+                pos["shares"] = qty
+                pos["source"] = "ib" if local_shares <= 0.0 else "sim+ib"
+                if avg_cost > 0.0:
+                    pos["avg_cost"] = avg_cost
+        except Exception as exc:
+            logger.warning("AI bot IB snapshot failed: %s", exc)
+
+    return sorted(positions_by_symbol.values(), key=lambda item: str(item.get("symbol") or ""))
 
 
 async def _gather_quotes(symbols: list[str]) -> dict[str, float]:
@@ -378,11 +676,147 @@ def _summarise_1m_bars(symbol: str, max_bars: int) -> dict | None:
         if not data:
             return None
         recent = data[-max_bars:]
-        closes = [r["close"] for r in recent if r.get("close") is not None]
+        closes = [float(r["close"]) for r in recent if r.get("close") is not None]
         if not closes:
             return None
+
+        def _ema(values: list[float], period: int) -> float | None:
+            if len(values) < max(2, period):
+                return None
+            alpha = 2.0 / (period + 1.0)
+            cur = float(values[0])
+            for v in values[1:]:
+                cur = float(v) * alpha + cur * (1.0 - alpha)
+            return cur
+
+        def _rsi(values: list[float], period: int = 14) -> float | None:
+            if len(values) <= period:
+                return None
+            gains = 0.0
+            losses = 0.0
+            for i in range(len(values) - period, len(values)):
+                delta = float(values[i]) - float(values[i - 1])
+                if delta >= 0:
+                    gains += delta
+                else:
+                    losses -= delta
+            avg_gain = gains / period
+            avg_loss = losses / period
+            if avg_loss <= 1e-12:
+                return 100.0
+            rs = avg_gain / avg_loss
+            return 100.0 - (100.0 / (1.0 + rs))
+
+        def _atr(rows: list[dict], period: int = 14) -> float | None:
+            if len(rows) <= period:
+                return None
+            trs: list[float] = []
+            prev_close: float | None = None
+            for r in rows[-(period + 1):]:
+                hi_raw = r.get("high")
+                lo_raw = r.get("low")
+                cl_raw = r.get("close")
+                if hi_raw is None or lo_raw is None or cl_raw is None:
+                    continue
+                high = float(hi_raw)
+                low = float(lo_raw)
+                close = float(cl_raw)
+                if prev_close is None:
+                    tr = high - low
+                else:
+                    tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+                trs.append(float(tr))
+                prev_close = close
+            if len(trs) < period:
+                return None
+            return sum(trs[-period:]) / float(period)
+
+        def _macd_hist(values: list[float]) -> float | None:
+            if len(values) < 26:
+                return None
+            win = values[-90:]
+            macd_series: list[float] = []
+            for i in range(26, len(win) + 1):
+                fast = _ema(win[:i], 12)
+                slow = _ema(win[:i], 26)
+                if fast is not None and slow is not None:
+                    macd_series.append(fast - slow)
+            if not macd_series:
+                return None
+            signal = _ema(macd_series, 9)
+            if signal is None:
+                return None
+            return macd_series[-1] - signal
+
+        def _vwap(rows: list[dict]) -> float | None:
+            cum_pv = 0.0
+            cum_v = 0.0
+            for r in rows:
+                h = r.get("high")
+                l = r.get("low")
+                c = r.get("close")
+                v = r.get("volume")
+                if h is None or l is None or c is None or v is None:
+                    continue
+                vol = float(v)
+                if vol <= 0:
+                    continue
+                tp = (float(h) + float(l) + float(c)) / 3.0
+                cum_pv += tp * vol
+                cum_v += vol
+            return (cum_pv / cum_v) if cum_v > 0 else None
+
+        def _volume_ratio(rows: list[dict], short_n: int = 5, long_n: int = 20) -> float | None:
+            vols = [float(r.get("volume") or 0.0) for r in rows if r.get("volume") is not None]
+            if len(vols) < max(short_n, long_n):
+                return None
+            short_avg = sum(vols[-short_n:]) / float(short_n)
+            long_avg = sum(vols[-long_n:]) / float(long_n)
+            if long_avg <= 1e-12:
+                return None
+            return short_avg / long_avg
+
         first, last = closes[0], closes[-1]
         change_pct = ((last - first) / first * 100.0) if first else 0.0
+        ema9 = _ema(closes[-120:], 9)
+        ema21 = _ema(closes[-120:], 21)
+        rsi14 = _rsi(closes, 14)
+        atr14 = _atr(recent, 14)
+        macd_hist = _macd_hist(closes)
+        vwap_val = _vwap(recent)
+        roc7 = None
+        if len(closes) >= 8 and closes[-8] > 0:
+            roc7 = ((closes[-1] - closes[-8]) / closes[-8]) * 100.0
+        vol_ratio_5_20 = _volume_ratio(recent, 5, 20)
+        ema_spread_pct = None
+        if ema9 is not None and ema21 is not None and ema21 > 0:
+            ema_spread_pct = ((ema9 - ema21) / ema21) * 100.0
+        vwap_dist_pct = None
+        if vwap_val is not None and vwap_val > 0:
+            vwap_dist_pct = ((last - vwap_val) / vwap_val) * 100.0
+
+        bar_predictor_bias = None
+        try:
+            from app.services.bar_predictor import compute_bar_predictor_bias
+
+            bar_predictor_bias = float(compute_bar_predictor_bias(recent, lookback=min(30, len(recent))))
+        except Exception:
+            bar_predictor_bias = None
+
+        indicators = {
+            "vwap": round(vwap_val, 4) if vwap_val is not None else None,
+            "vwap_distance_pct": round(vwap_dist_pct, 3) if vwap_dist_pct is not None else None,
+            "rsi14": round(rsi14, 2) if rsi14 is not None else None,
+            "ema9": round(ema9, 4) if ema9 is not None else None,
+            "ema21": round(ema21, 4) if ema21 is not None else None,
+            "ema_spread_pct": round(ema_spread_pct, 3) if ema_spread_pct is not None else None,
+            "macd_hist": round(macd_hist, 6) if macd_hist is not None else None,
+            "roc7_pct": round(roc7, 3) if roc7 is not None else None,
+            "atr14_pct": round((atr14 / last) * 100.0, 3) if atr14 is not None and last > 0 else None,
+            "volume_ratio_5_20": round(vol_ratio_5_20, 3) if vol_ratio_5_20 is not None else None,
+            "bar_predictor_bias": round(bar_predictor_bias, 3) if bar_predictor_bias is not None else None,
+        }
+
         return {
             "bars": len(recent),
             "first_close": round(first, 4),
@@ -390,6 +824,7 @@ def _summarise_1m_bars(symbol: str, max_bars: int) -> dict | None:
             "high": round(max(r["high"] for r in recent if r.get("high") is not None), 4),
             "low": round(min(r["low"] for r in recent if r.get("low") is not None), 4),
             "change_pct": round(change_pct, 3),
+            "indicators": indicators,
         }
     except Exception as exc:
         logger.debug("AI bot 1m summary failed for %s: %s", symbol, exc)
@@ -416,21 +851,71 @@ async def _gather_news(symbols: list[str]) -> list[dict]:
         return []
 
 
+def _interval_cadence_profile(interval_s: int) -> dict[str, str]:
+    s = max(30, int(interval_s or 300))
+    if s <= 75:
+        return {
+            "profile": "micro_scalp",
+            "guidance": "minute-level cadence; favor quicker reactions with tighter risk and smaller incremental adds/exits",
+        }
+    if s <= 360:
+        return {
+            "profile": "intraday_swing",
+            "guidance": "multi-minute cadence; prioritize confirmation and moderate position changes over rapid churn",
+        }
+    return {
+        "profile": "slow_swing",
+        "guidance": "slow cadence; only act on stronger conviction setups and avoid frequent order edits",
+    }
+
+
+def _build_runtime_constraints(*, settings: dict, interval_s: int, in_shutoff: bool,
+                               in_sell_window: bool, use_ib_execution: bool,
+                               ib_mode: str) -> dict:
+    cadence = _interval_cadence_profile(interval_s)
+    return {
+        "execution_mode": "IB" if use_ib_execution else "SIM",
+        "trading_mode": ib_mode,
+        "cadence_seconds": interval_s,
+        "cadence_profile": cadence["profile"],
+        "cadence_guidance": cadence["guidance"],
+        "hold_positions_overnight": bool(settings.get("hold_positions_overnight", False)),
+        "eod_sell_window_minutes": int(settings.get("eod_sell_window_minutes", 5) or 5),
+        "eod_engine_shutoff_minutes_before_sell": int(settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120),
+        "pre_sell_buy_block_active": bool(in_shutoff),
+        "sell_only_window_active": bool(in_sell_window),
+        "stop_loss_pct": float(settings.get("stop_loss_pct", 0.0) or 0.0),
+        "take_profit_pct": float(settings.get("take_profit_pct", 0.0) or 0.0),
+        "stop_loss_value": float(settings.get("stop_loss_value", 0.0) or 0.0),
+        "take_profit_value": float(settings.get("take_profit_value", 0.0) or 0.0),
+        "crash_protection_enabled": bool(settings.get("crash_protection_enabled", False)),
+        "crash_protection_mode": str(settings.get("crash_protection_mode", "percent") or "percent"),
+        "crash_protection_value": float(settings.get("crash_protection_value", 0.0) or 0.0),
+    }
+
+
 def _build_user_prompt(*, instruction: str, account: dict, positions: list[dict],
                        quotes: dict[str, float], bars: dict[str, dict],
-                       news: list[dict], today_actions: list[dict]) -> str:
+                       news: list[dict], today_actions: list[dict],
+                       runtime_constraints: dict) -> str:
     lines: list[str] = []
     lines.append(f"User instruction: {instruction}")
     lines.append("")
     lines.append(f"Account: {json.dumps(account, default=str)}")
     lines.append("")
-    lines.append("Watchlist positions:")
+    lines.append(f"Runtime settings: {json.dumps(runtime_constraints, default=str)}")
+    lines.append(
+        "Cadence policy: adapt aggressiveness, order type, and size to cadence_profile. "
+        "Faster cadence can use smaller/frequent edits; slower cadence should require stronger confirmation and lower churn."
+    )
+    lines.append("")
+    lines.append("Current positions:")
     for p in positions:
         sym = p["symbol"]
         price = quotes.get(sym)
         bar = bars.get(sym)
         lines.append(
-            f"- {sym}: shares={p['shares']:.4f} avg_cost={p['avg_cost']:.4f} "
+            f"- {sym} [{p.get('source', 'sim')}]: shares={p['shares']:.4f} avg_cost={p['avg_cost']:.4f} "
             f"price={price if price is not None else 'n/a'} "
             f"alloc=${p['allocated_funds']:.2f} 1m={json.dumps(bar) if bar else 'n/a'}"
         )
@@ -445,7 +930,7 @@ def _build_user_prompt(*, instruction: str, account: dict, positions: list[dict]
         for a in today_actions[-_MAX_TODAY_ACTIONS:]:
             lines.append(f"- {a}")
     lines.append("")
-    lines.append("Return JSON decisions for the watchlist symbols now.")
+    lines.append("Return JSON decisions for the provided symbols now.")
     return "\n".join(lines)
 
 
@@ -500,11 +985,25 @@ def _log_decision_batch(decisions: list[dict], symbols: list[str], model: str) -
     for d in decisions[:20]:
         symbol = str(d.get("symbol") or "").upper()
         action = str(d.get("action") or "hold").lower()
+        order_type = str(d.get("order_type") or "market").upper()
+        limit_price = d.get("limit_price")
+        size_pct = d.get("size_pct")
+        risk_level = str(d.get("risk_level") or "").strip().lower()
+        indicators = d.get("indicators_used") or []
+        limit_note = f" @${float(limit_price):.2f}" if limit_price is not None else ""
+        size_note = f" size={float(size_pct):.0f}%" if size_pct is not None else ""
+        risk_note = f" risk={risk_level}" if risk_level else ""
+        indicators_note = ""
+        if isinstance(indicators, list) and indicators:
+            indicators_note = f" ind=[{', '.join(str(x) for x in indicators[:5])}]"
         reason = str(d.get("reason") or "").strip()
+        thinking = str(d.get("thinking") or "").strip()
         if reason:
-            formatted.append(f"{symbol}:{action} ({reason})")
+            formatted.append(f"{symbol}:{action}/{order_type}{limit_note}{size_note}{risk_note}{indicators_note} ({reason})")
         else:
-            formatted.append(f"{symbol}:{action}")
+            formatted.append(f"{symbol}:{action}/{order_type}{limit_note}{size_note}{risk_note}{indicators_note}")
+        if thinking:
+            _pm_log(f"model thinking {symbol}: {thinking[:400]}")
 
     _pm_log(
         f"model={model} decisions ({len(decisions)}): " + "; ".join(formatted)
@@ -541,7 +1040,15 @@ async def _build_daily_summary() -> str | None:
         if action in decision_counts:
             decision_counts[action] += 1
 
-    positions = await _gather_watchlist_positions()
+    use_ib_execution = False
+    try:
+        ib_mode = str(getattr(app_settings, "TRADING_MODE", "paper") or "paper").lower()
+        from app.services.ib_service import ib_service
+        use_ib_execution = bool(getattr(ib_service, "is_connected", False) and ib_mode in {"paper", "live"})
+    except Exception:
+        use_ib_execution = False
+
+    positions = await _gather_watchlist_positions(use_ib_execution=use_ib_execution)
     held_positions = [p for p in positions if float(p.get("shares") or 0.0) > 0.0]
     held_symbols = [str(p.get("symbol") or "").upper() for p in held_positions if str(p.get("symbol") or "").strip()]
 
@@ -594,15 +1101,34 @@ async def _emit_daily_summary_if_due() -> None:
     _pm_log(summary)
 
 
-async def _sell_position(*, pos: dict, price: float, reason: str, ib_mode: bool, ib_connected: bool) -> None:
+async def _sell_position(*, pos: dict, price: float, reason: str, ib_mode: bool, ib_connected: bool,
+                         order_type: str = "market", limit_price: float | None = None,
+                         size_pct: float | None = None) -> None:
     """Flatten a single long position via IB (if connected) or the sim engine."""
     symbol = pos["symbol"]
+    kind = "LMT" if str(order_type or "market").strip().lower() == "limit" else "MKT"
     if ib_connected:
         from app.services.ib_service import ib_service
-        qty = float(pos.get("ib_qty") or pos.get("shares") or 0.0)
+        from app.services.top_of_book import market_fill_price, simulate_top_of_book_from_quote
+        held_qty = float(pos.get("ib_qty") or pos.get("shares") or 0.0)
+        if held_qty <= 0:
+            return
+        target_pct = min(100.0, max(1.0, float(size_pct or 100.0)))
+        qty = held_qty if target_pct >= 99.999 else max(1.0, math.floor(held_qty * (target_pct / 100.0)))
+        qty = min(held_qty, qty)
         if qty <= 0:
             return
-        result = await ib_service.place_order(symbol=symbol, side="SELL", quantity=qty, order_type="MKT")
+        submit_limit = float(limit_price) if limit_price is not None else None
+        if kind == "LMT" and submit_limit is None:
+            book = simulate_top_of_book_from_quote(symbol, {"last_price": price})
+            submit_limit = float(market_fill_price(book, "SELL", price) or price)
+        result = await ib_service.place_order(
+            symbol=symbol,
+            side="SELL",
+            quantity=qty,
+            order_type=kind,
+            limit_price=submit_limit,
+        )
         if result.get("error"):
             _pm_log(f"IB SELL failed for {symbol}: {result['error']}")
             return
@@ -615,21 +1141,52 @@ async def _sell_position(*, pos: dict, price: float, reason: str, ib_mode: bool,
             ib_mode=ib_mode,
             strategy_name="ai_bot:sell",
         )
-        _pm_log(f"IB SELL {symbol} x{qty:.4f} ({reason})")
+        _pm_log(
+            f"IB SELL {symbol} x{qty:.4f} type={kind} "
+            f"limit={('$' + format(submit_limit, '.2f')) if submit_limit is not None else '-'} ({reason})"
+        )
     else:
-        await _sim_trade(pos_id=pos["id"], side="SELL", price=price, reason=reason)
-        _pm_log(f"SIM SELL {symbol} ({reason})")
-    _record_action(f"SELL {symbol} :: {reason}")
+        from app.services.top_of_book import market_fill_price, simulate_top_of_book_from_quote
+        held_qty = float(pos.get("shares") or 0.0)
+        if held_qty <= 0:
+            return
+        target_pct = min(100.0, max(1.0, float(size_pct or 100.0)))
+        qty = held_qty if target_pct >= 99.999 else max(1.0, math.floor(held_qty * (target_pct / 100.0)))
+        qty = min(held_qty, qty)
+        if qty <= 0:
+            return
+        fill_price = price
+        submit_limit = float(limit_price) if limit_price is not None else None
+        if kind == "LMT":
+            book = simulate_top_of_book_from_quote(symbol, {"last_price": price})
+            touch_price = market_fill_price(book, "SELL", price)
+            submit_limit = submit_limit if submit_limit is not None else touch_price
+            if touch_price <= 0 or submit_limit is None or touch_price < submit_limit:
+                _pm_log(f"SIM SELL {symbol} LMT not filled at ${submit_limit:.2f} (touch ${touch_price:.2f})")
+                return
+            fill_price = touch_price
+        await _sim_trade(pos_id=pos["id"], side="SELL", price=fill_price, reason=reason, quantity=qty)
+        _pm_log(
+            f"SIM SELL {symbol} x{qty:.4f} type={kind} "
+            f"limit={('$' + format(submit_limit, '.2f')) if submit_limit is not None else '-'} ({reason})"
+        )
+    _record_action(
+        f"SELL {symbol} x{qty:.4f} type={kind} "
+        f"limit={('$' + format(submit_limit, '.2f')) if submit_limit is not None else '-'} :: {reason}"
+    )
 
 
 async def _buy_position(*, pos: dict, price: float, reason: str, ib_mode: bool, ib_connected: bool,
-                        account: dict) -> None:
+                        account: dict, order_type: str = "market", limit_price: float | None = None,
+                        size_pct: float | None = None, risk_level: str = "") -> None:
     symbol = pos["symbol"]
     if price <= 0:
         return
+    kind = "LMT" if str(order_type or "market").strip().lower() == "limit" else "MKT"
     if ib_connected:
         from app.services.ib_service import ib_service
         from app.services.portfolio_manager import _position_max_allocation
+        from app.services.top_of_book import market_fill_price, simulate_top_of_book_from_quote
 
         # Recreate a lightweight object only for sizing via the shared
         # allocation helper. For percent caps, use the same denominator style as
@@ -662,10 +1219,22 @@ async def _buy_position(*, pos: dict, price: float, reason: str, ib_mode: bool, 
 
         # Cap-aware budget: always honour per-symbol allocation limits when set.
         if cap and cap != float("inf"):
-            budget = min(cap, available_budget)
+            current_shares = float(pos.get("ib_qty") or pos.get("shares") or 0.0)
+            ref_price = float(price or pos.get("avg_cost") or 0.0)
+            used_value = max(0.0, current_shares * max(0.0, ref_price))
+            remaining_room = max(0.0, cap - used_value)
+            budget = min(remaining_room, available_budget)
         else:
             budget = available_budget
-        import math
+
+        target_pct = size_pct
+        if target_pct is None:
+            # Risk-driven default sizing when model omits explicit size.
+            risk_defaults = {"low": 100.0, "medium": 60.0, "high": 35.0}
+            target_pct = risk_defaults.get(str(risk_level or "").lower(), 100.0)
+        target_pct = min(100.0, max(1.0, float(target_pct)))
+        budget = budget * (target_pct / 100.0)
+
         qty = math.floor(budget / price)
         if qty <= 0:
             _pm_log(
@@ -674,7 +1243,17 @@ async def _buy_position(*, pos: dict, price: float, reason: str, ib_mode: bool, 
                 f"available=${available_funds:.2f}, buying_power=${buying_power:.2f}]"
             )
             return
-        result = await ib_service.place_order(symbol=symbol, side="BUY", quantity=float(qty), order_type="MKT")
+        submit_limit = float(limit_price) if limit_price is not None else None
+        if kind == "LMT" and submit_limit is None:
+            book = simulate_top_of_book_from_quote(symbol, {"last_price": price})
+            submit_limit = float(market_fill_price(book, "BUY", price) or price)
+        result = await ib_service.place_order(
+            symbol=symbol,
+            side="BUY",
+            quantity=float(qty),
+            order_type=kind,
+            limit_price=submit_limit,
+        )
         if result.get("error"):
             _pm_log(f"IB BUY failed for {symbol}: {result['error']}")
             return
@@ -687,11 +1266,63 @@ async def _buy_position(*, pos: dict, price: float, reason: str, ib_mode: bool, 
             ib_mode=ib_mode,
             strategy_name="ai_bot:buy",
         )
-        _pm_log(f"IB BUY {symbol} x{qty} ({reason})")
+        _pm_log(
+            f"IB BUY {symbol} x{qty} type={kind} "
+            f"limit={('$' + format(submit_limit, '.2f')) if submit_limit is not None else '-'} ({reason})"
+        )
     else:
-        await _sim_trade(pos_id=pos["id"], side="BUY", price=price, reason=reason)
-        _pm_log(f"SIM BUY {symbol} ({reason})")
-    _record_action(f"BUY {symbol} :: {reason}")
+        from app.services.top_of_book import market_fill_price, simulate_top_of_book_from_quote
+        # Sim mode: use per-position allocation room so AI can scale in.
+        cap_mode = str(pos.get("max_allocation_mode") or "dollar").strip().lower()
+        cap_val = float(pos.get("max_allocation_value") or 0.0)
+        if cap_val <= 0.0:
+            cap = float("inf")
+        elif cap_mode == "percent":
+            base = float(account.get("total_funds") or account.get("equity") or 0.0)
+            cap = max(0.0, base * cap_val / 100.0)
+        else:
+            cap = max(0.0, cap_val)
+
+        current_shares = float(pos.get("shares") or 0.0)
+        ref_price = float(price or pos.get("avg_cost") or 0.0)
+        used_value = max(0.0, current_shares * max(0.0, ref_price))
+        remaining_room = max(0.0, cap - used_value) if cap != float("inf") else float(account.get("available_funds") or 0.0)
+        available_budget = max(0.0, float(account.get("available_funds") or 0.0))
+        budget = min(remaining_room, available_budget) if cap != float("inf") else available_budget
+
+        target_pct = size_pct
+        if target_pct is None:
+            risk_defaults = {"low": 100.0, "medium": 60.0, "high": 35.0}
+            target_pct = risk_defaults.get(str(risk_level or "").lower(), 100.0)
+        target_pct = min(100.0, max(1.0, float(target_pct)))
+        budget = budget * (target_pct / 100.0)
+
+        qty = math.floor(budget / price)
+        if qty <= 0:
+            _pm_log(
+                f"SIM BUY skipped {symbol}: insufficient allocation room (${budget:.2f} @ ${price:.2f})"
+            )
+            return
+
+        fill_price = price
+        submit_limit = float(limit_price) if limit_price is not None else None
+        if kind == "LMT":
+            book = simulate_top_of_book_from_quote(symbol, {"last_price": price})
+            touch_price = market_fill_price(book, "BUY", price)
+            submit_limit = submit_limit if submit_limit is not None else touch_price
+            if touch_price <= 0 or submit_limit is None or touch_price > submit_limit:
+                _pm_log(f"SIM BUY {symbol} LMT not filled at ${submit_limit:.2f} (touch ${touch_price:.2f})")
+                return
+            fill_price = touch_price
+        await _sim_trade(pos_id=pos["id"], side="BUY", price=fill_price, reason=reason, quantity=float(qty))
+        _pm_log(
+            f"SIM BUY {symbol} x{qty} type={kind} "
+            f"limit={('$' + format(submit_limit, '.2f')) if submit_limit is not None else '-'} ({reason})"
+        )
+    _record_action(
+        f"BUY {symbol} type={kind} size={target_pct:.0f}% "
+        f"limit={('$' + format(submit_limit, '.2f')) if submit_limit is not None else '-'} :: {reason}"
+    )
 
 
 async def _record_ib_trade_submission(*, symbol: str, side: str, quantity: float, reference_price: float,
@@ -724,7 +1355,7 @@ async def _record_ib_trade_submission(*, symbol: str, side: str, quantity: float
         _pm_log(f"failed to persist IB {side} trade row for {symbol}: {exc}")
 
 
-async def _sim_trade(*, pos_id: int, side: str, price: float, reason: str) -> None:
+async def _sim_trade(*, pos_id: int, side: str, price: float, reason: str, quantity: float | None = None) -> None:
     """Route a simulated trade through the sandbox engine's executor."""
     from sqlalchemy import select as sa_select
     from app.models.sandbox import SandboxPosition
@@ -736,15 +1367,17 @@ async def _sim_trade(*, pos_id: int, side: str, price: float, reason: str) -> No
         pos = res.scalar_one_or_none()
         if not pos:
             return
+    if quantity is not None and float(quantity) <= 0.0:
+        return
     book = simulate_top_of_book_from_quote(pos.symbol, {"last_price": price})
-    await _execute_trade(pos, side, price, f"ai_bot:{reason}", top_of_book=book)
+    await _execute_trade(pos, side, price, f"ai_bot:{reason}", top_of_book=book, quantity_override=quantity)
 
 
 # ── main loop ─────────────────────────────────────────────────────────────────── #
 
 async def _run_once() -> None:
     settings = _get_settings()
-    if not settings.get("ai_bot_enabled"):
+    if not _is_ai_bot_active(settings):
         return
 
     # Determine execution mode.
@@ -766,9 +1399,24 @@ async def _run_once() -> None:
         _is_in_eod_sell_window,
         _is_in_pre_sell_engine_shutoff_window,
     )
-    from app.services.portfolio_manager import _state as pm_state, _current_trading_day_key_et
+    from app.services.portfolio_manager import (
+        _state as pm_state,
+        _current_trading_day_key_et,
+        _cancel_bearish_pending_orders,
+        _cancel_ib_pending_orders_price_moved,
+        _attempt_ib_eod_liquidation,
+    )
 
-    positions = await _gather_watchlist_positions()
+    try:
+        await _cancel_bearish_pending_orders()
+    except Exception as exc:
+        logger.warning("AI bot pending-cancel check error: %s", exc)
+    try:
+        await _cancel_ib_pending_orders_price_moved()
+    except Exception as exc:
+        logger.warning("AI bot IB pending-cancel check error: %s", exc)
+
+    positions = await _gather_watchlist_positions(use_ib_execution=use_ib_execution)
     if not positions:
         return
     symbols = [p["symbol"] for p in positions]
@@ -843,15 +1491,21 @@ async def _run_once() -> None:
     hold_overnight = bool(settings.get("hold_positions_overnight", False))
     eod_window = int(settings.get("eod_sell_window_minutes", 5) or 5)
     shutoff = int(settings.get("eod_engine_shutoff_minutes_before_sell", 120) or 120)
+    interval_s = max(30, int(settings.get("ai_bot_interval_s", 300) or 300))
     in_sell_window = (not hold_overnight) and _is_in_eod_sell_window(eod_window)
     in_shutoff = (not hold_overnight) and _is_in_pre_sell_engine_shutoff_window(eod_window, shutoff)
 
     # ── Guardrail 2: end-of-day liquidation (hard) ───────────────────────────── #
     if in_sell_window:
-        for p in held:
-            price = quotes.get(p["symbol"], 0.0)
-            await _sell_position(pos=p, price=price, reason="eod_liquidation",
-                                 ib_mode=ib_mode, ib_connected=use_ib_execution)
+        if use_ib_execution:
+            # Reuse the PM IB EOD path so liquidation behavior stays aligned
+            # with hold_positions_overnight policy and open-order safeguards.
+            await _attempt_ib_eod_liquidation()
+        else:
+            for p in held:
+                price = quotes.get(p["symbol"], 0.0)
+                await _sell_position(pos=p, price=price, reason="eod_liquidation",
+                                     ib_mode=ib_mode, ib_connected=use_ib_execution)
         return  # sell-only mode; do not consult the model
 
     # ── Guardrail 3: stop-loss / take-profit (hard) ──────────────────────────── #
@@ -898,12 +1552,22 @@ async def _run_once() -> None:
 
     model = await _resolve_model(settings)
     _state["last_model"] = model
+    runtime_constraints = _build_runtime_constraints(
+        settings=settings,
+        interval_s=interval_s,
+        in_shutoff=in_shutoff,
+        in_sell_window=in_sell_window,
+        use_ib_execution=use_ib_execution,
+        ib_mode=ib_mode,
+    )
     user_prompt = _build_user_prompt(
         instruction=str(settings.get("ai_bot_prompt") or "Help me make money using the positions in watchlist."),
         account=account, positions=positions, quotes=quotes, bars=bars, news=news,
         today_actions=list(_state.get("today_actions") or []),
+        runtime_constraints=runtime_constraints,
     )
     decisions = await _query_model(model, _SYSTEM_PROMPT, user_prompt, settings)
+    decisions = _normalize_symbol_decisions(decisions, symbols)
     _state["last_decisions"] = decisions
     _log_decision_batch(decisions, symbols, model)
 
@@ -911,6 +1575,10 @@ async def _run_once() -> None:
     for d in decisions:
         symbol = d["symbol"]
         action = d["action"]
+        order_type = str(d.get("order_type") or "market").lower()
+        limit_price = d.get("limit_price")
+        size_pct = d.get("size_pct")
+        risk_level = str(d.get("risk_level") or "").strip().lower()
         reason = d["reason"] or action
         pos = pos_by_symbol.get(symbol)
         if not pos or action == "hold" or symbol in risk_handled:
@@ -919,15 +1587,17 @@ async def _run_once() -> None:
         if action == "buy":
             if in_shutoff or in_sell_window:
                 continue  # no new entries near the close
-            if float(pos.get("shares") or 0.0) > 0:
-                continue  # already long; bot adds via fresh symbols only
             await _buy_position(pos=pos, price=price, reason=reason,
-                                ib_mode=ib_mode, ib_connected=use_ib_execution, account=account)
+                                ib_mode=ib_mode, ib_connected=use_ib_execution,
+                                account=account, order_type=order_type, limit_price=limit_price,
+                                size_pct=size_pct, risk_level=risk_level)
         elif action == "sell":
             if float(pos.get("shares") or 0.0) <= 0:
                 continue
             await _sell_position(pos=pos, price=price, reason=reason,
-                                 ib_mode=ib_mode, ib_connected=use_ib_execution)
+                                 ib_mode=ib_mode, ib_connected=use_ib_execution,
+                                 order_type=order_type, limit_price=limit_price,
+                                 size_pct=size_pct)
 
 
 async def _enforce_crash_protection(*, settings: dict, account: dict, held: list[dict],
@@ -987,6 +1657,10 @@ def _get_settings() -> dict:
     return get_manager_settings()
 
 
+def _is_ai_bot_active(settings: dict) -> bool:
+    return bool(settings.get("enabled", False)) and bool(settings.get("ai_bot_enabled", False))
+
+
 def _maybe_reset_session() -> None:
     """Clear the working session at each trading-day rollover."""
     import zoneinfo
@@ -1015,7 +1689,7 @@ async def run_ai_bot() -> None:
             settings = _get_settings()
         except Exception:
             continue
-        if not settings.get("ai_bot_enabled"):
+        if not _is_ai_bot_active(settings):
             continue
         try:
             await _emit_daily_summary_if_due()

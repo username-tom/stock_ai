@@ -788,6 +788,7 @@ async def _execute_trade(
     reason: str,
     disable_engine_after_sell: bool = False,
     top_of_book: dict[str, Any] | None = None,
+    quantity_override: float | None = None,
 ) -> None:
     """Open a fresh DB session and execute the simulated trade."""
     from app.services.ib_service import ib_service
@@ -844,6 +845,11 @@ async def _execute_trade(
                     )
                     return
                 quantity = math.floor(available / execution_price)
+                if quantity_override is not None:
+                    requested = math.floor(float(quantity_override))
+                    if requested <= 0:
+                        return
+                    quantity = min(quantity, requested)
                 if quantity <= 0:
                     return
                 total = quantity * execution_price
@@ -898,6 +904,9 @@ async def _execute_trade(
 
         elif side == "SELL":
             quantity = position.shares
+            if quantity_override is not None:
+                requested = max(0.0, float(quantity_override))
+                quantity = min(float(position.shares or 0.0), requested)
             if quantity <= 0:
                 return
             _queue_pending_sell(

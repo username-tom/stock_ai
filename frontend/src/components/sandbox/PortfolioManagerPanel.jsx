@@ -1047,8 +1047,23 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       .map(d => {
         const symbol = String(d?.symbol || '').toUpperCase()
         const action = String(d?.action || 'hold').toLowerCase()
+        const orderType = String(d?.order_type || 'market').toUpperCase()
+        const limitRaw = Number(d?.limit_price)
+        const limitTxt = Number.isFinite(limitRaw) && limitRaw > 0 ? ` @ $${limitRaw.toFixed(2)}` : ''
+        const sizeRaw = Number(d?.size_pct)
+        const sizeTxt = Number.isFinite(sizeRaw) && sizeRaw > 0 ? ` size=${Math.min(100, sizeRaw).toFixed(0)}%` : ''
+        const riskLevel = String(d?.risk_level || '').trim().toLowerCase()
+        const riskTxt = riskLevel ? ` risk=${riskLevel}` : ''
+        const indicators = Array.isArray(d?.indicators_used)
+          ? d.indicators_used.map(x => String(x || '').trim()).filter(Boolean)
+          : []
         const reason = String(d?.reason || '').trim()
-        return reason ? `${symbol}: ${action} (${reason})` : `${symbol}: ${action}`
+        const thinking = String(d?.thinking || '').trim()
+        const line = reason
+          ? `${symbol}: ${action}/${orderType}${limitTxt}${sizeTxt}${riskTxt} (${reason})`
+          : `${symbol}: ${action}/${orderType}${limitTxt}${sizeTxt}${riskTxt}`
+        const indicatorLine = indicators.length ? `\n  indicators: ${indicators.join(', ')}` : ''
+        return thinking ? `${line}${indicatorLine}\n  thinking: ${thinking}` : `${line}${indicatorLine}`
       })
       .join('\n')
     : 'No model decisions in current cycle.'
