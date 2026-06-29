@@ -1837,7 +1837,9 @@ export default function PortfolioOverview({
                         <td className="py-1.5 text-right font-mono text-slate-200">
                           {entry.kind === 'trade' && !isFilledTrade
                             ? <span className="text-slate-600">—</span>
-                            : `$${entry.total.toFixed(2)}`}
+                            : Number.isFinite(Number(entry.total))
+                              ? `$${Number(entry.total).toFixed(2)}`
+                              : <span className="text-slate-600">—</span>}
                         </td>
                         <td className="py-1.5 text-right font-mono">
                           {entry.displayPnl != null

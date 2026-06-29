@@ -1439,44 +1439,7 @@ export default function PositionDetail({
 
             return { ...entry, displayPnl: null }
           })
-          // Only show fund events that are not allocations and are not tied to a symbol (global deposits/withdrawals)
-          const fundEntries = fundEvents
-            .filter(e => !e.from_symbol && !e.to_symbol)
-            .map(e => ({
-              id: `f-${e.id}`,
-              kind: e.event_type,
-              date: e.created_at,
-              label: `${e.event_type === 'deposit' ? 'Deposit' : 'Withdrawal'} $${Math.abs(e.amount).toFixed(2)}`,
-              sub: e.note || null,
-              pnl: null,
-              total: e.amount,
-            }))
-          // Only show allocation events where this symbol is involved
-          const allocEntries = fundEvents
-            .filter(e => (e.from_symbol === selectedSymbol || e.to_symbol === selectedSymbol))
-            .map(e => {
-              let label = ''
-              if (e.event_type === 'allocate' || e.event_type === 'deploy') {
-                label = `Allocated $${e.amount.toFixed(2)} → ${e.to_symbol}`
-              } else if (e.event_type === 'deallocate') {
-                label = `Deallocated $${e.amount.toFixed(2)} ← ${e.from_symbol}`
-              } else if (e.event_type === 'reallocate') {
-                label = `Reallocated $${e.amount.toFixed(2)}: ${e.from_symbol} → ${e.to_symbol}`
-              } else {
-                label = `${e.event_type} $${e.amount.toFixed(2)}`
-              }
-              return {
-                id: `a-${e.id}`,
-                kind: 'allocation',
-                event_type: e.event_type,
-                date: e.created_at,
-                label,
-                sub: e.note || null,
-                pnl: null,
-                total: e.amount,
-              }
-            })
-          const all = [...tradeEntries, ...fundEntries, ...allocEntries].sort((a, b) =>
+          const all = [...tradeEntries].sort((a, b) =>
             new Date(b.date) - new Date(a.date)
           )
           if (all.length === 0) return (
