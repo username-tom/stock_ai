@@ -2304,6 +2304,38 @@ async def _attempt_ib_eod_liquidation() -> None:
                 f"IB PM EOD liquidation failed for {symbol}: {result['error']}"
             )
         else:
+            # Persist an inline Trade row so any share-changing EOD liquidation
+            # attempt is visible in trade history immediately.
+            try:
+                from app.models.trade import Trade, TradingMode, OrderSide, OrderStatus
+                import os
+
+                mode = TradingMode.LIVE if str(os.getenv("TRADING_MODE", "paper") or "paper").lower() == "live" else TradingMode.PAPER
+                status_raw = str(result.get("status") or "").upper()
+                is_filled = status_raw == "FILLED"
+                ref_price = float(row.get("market_price") or row.get("last_price") or row.get("avg_cost") or 0.0)
+                async with AsyncSessionLocal() as db:
+                    db.add(Trade(
+                        symbol=symbol,
+                        side=OrderSide.SELL,
+                        quantity=float(qty),
+                        price=ref_price,
+                        status=OrderStatus.FILLED if is_filled else OrderStatus.PENDING,
+                        mode=mode,
+                        ib_order_id=result.get("ib_order_id"),
+                        strategy_name="pm_eod_liquidation",
+                        filled_at=datetime.now(timezone.utc) if is_filled else None,
+                    ))
+                    await db.commit()
+            except Exception as exc:
+                _log_activity(
+                    f"IB PM EOD liquidation warning for {symbol}: failed to persist inline trade row ({exc})"
+                )
+
+            _log_activity(
+                f"IB PM EOD liquidation submitted for {symbol} x{qty:.4f} "
+                f"(order_id={result.get('ib_order_id')}, status={str(result.get('status') or 'UNKNOWN')})"
+            )
             liquidated.append(f"{symbol} x{qty:.4f}")
 
     if liquidated:

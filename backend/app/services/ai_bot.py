@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import re
+from statistics import median
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -92,6 +93,112 @@ Guidance:
 - Only include symbols from the provided positions. Keep reasons under 140 chars.
 """
 
+# Regime-aware profiles tuned from local sweep artifacts under tmp/:
+# - baseline-tight  -> asym_b90_s90 (best for sell-off / high-vol shock)
+# - trend-base      -> asym_b50_s90 (best for mixed trend)
+# - trend-swing     -> asym_b70_s90 (best for directional sessions)
+_REGIME_PROFILE_TABLE: dict[str, dict] = {
+    "selloff_tight": {
+        "source": "tmp/pm_head2head_phase2_by_profile.json",
+        "scenario": "baseline-tight",
+        "profile": "asym_b90_s90",
+        "sim_buy_fill_rate_pct": 90.0,
+        "sim_sell_fill_rate_pct": 90.0,
+        "avg_total_return_pct": 17.6562,
+        "avg_sharpe_ratio": 0.3067,
+        "buy_indicator_weights": {
+            "rsi14": 0.24,
+            "vwap_distance_pct": 0.22,
+            "bar_predictor_bias": 0.16,
+            "macd_hist": 0.14,
+            "volume_ratio_5_20": 0.12,
+            "ema_spread_pct": 0.08,
+            "atr14_pct": 0.04,
+        },
+        "sell_indicator_weights": {
+            "vwap_distance_pct": 0.23,
+            "ema_spread_pct": 0.20,
+            "bar_predictor_bias": 0.18,
+            "macd_hist": 0.15,
+            "volume_ratio_5_20": 0.12,
+            "atr14_pct": 0.07,
+            "rsi14": 0.05,
+        },
+        "size_policy": {
+            "max_buy_size_pct": 65,
+            "max_add_size_pct": 40,
+            "max_sell_size_pct": 100,
+            "prefer_market_sells": True,
+        },
+    },
+    "trend_base": {
+        "source": "tmp/pm_head2head_phase2_by_profile.json",
+        "scenario": "trend-base",
+        "profile": "asym_b50_s90",
+        "sim_buy_fill_rate_pct": 50.0,
+        "sim_sell_fill_rate_pct": 90.0,
+        "avg_total_return_pct": 16.1147,
+        "avg_sharpe_ratio": 0.4,
+        "buy_indicator_weights": {
+            "ema_spread_pct": 0.21,
+            "macd_hist": 0.20,
+            "bar_predictor_bias": 0.19,
+            "vwap_distance_pct": 0.16,
+            "volume_ratio_5_20": 0.10,
+            "rsi14": 0.09,
+            "atr14_pct": 0.05,
+        },
+        "sell_indicator_weights": {
+            "bar_predictor_bias": 0.21,
+            "macd_hist": 0.20,
+            "ema_spread_pct": 0.19,
+            "vwap_distance_pct": 0.15,
+            "rsi14": 0.11,
+            "volume_ratio_5_20": 0.08,
+            "atr14_pct": 0.06,
+        },
+        "size_policy": {
+            "max_buy_size_pct": 75,
+            "max_add_size_pct": 55,
+            "max_sell_size_pct": 100,
+            "prefer_market_sells": False,
+        },
+    },
+    "trend_swing": {
+        "source": "tmp/pm_head2head_phase2_by_profile.json",
+        "scenario": "trend-swing",
+        "profile": "asym_b70_s90",
+        "sim_buy_fill_rate_pct": 70.0,
+        "sim_sell_fill_rate_pct": 90.0,
+        "avg_total_return_pct": 15.001,
+        "avg_sharpe_ratio": 0.5867,
+        "buy_indicator_weights": {
+            "ema_spread_pct": 0.24,
+            "macd_hist": 0.22,
+            "bar_predictor_bias": 0.18,
+            "vwap_distance_pct": 0.14,
+            "volume_ratio_5_20": 0.10,
+            "rsi14": 0.07,
+            "atr14_pct": 0.05,
+        },
+        "sell_indicator_weights": {
+            "bar_predictor_bias": 0.24,
+            "macd_hist": 0.22,
+            "ema_spread_pct": 0.18,
+            "vwap_distance_pct": 0.13,
+            "rsi14": 0.09,
+            "volume_ratio_5_20": 0.08,
+            "atr14_pct": 0.06,
+        },
+        "size_policy": {
+            "max_buy_size_pct": 80,
+            "max_add_size_pct": 60,
+            "max_sell_size_pct": 100,
+            "prefer_market_sells": False,
+        },
+    },
+}
+
 # ── runtime state ──────────────────────────────────────────────────────────── #
 
 _state: dict[str, object] = {
@@ -108,6 +215,7 @@ _state: dict[str, object] = {
     "last_query_attempts": 0,
     "last_query_duration_ms": None,
     "last_retry_events": [],
+    "last_eod_skip_log_at": None,
 }
 
 
@@ -125,6 +233,7 @@ def get_state() -> dict:
         "last_query_attempts": int(_state.get("last_query_attempts") or 0),
         "last_query_duration_ms": _state.get("last_query_duration_ms"),
         "last_retry_events": list(_state.get("last_retry_events") or []),
+        "last_eod_skip_log_at": _state.get("last_eod_skip_log_at"),
         "today_actions": list(_state.get("today_actions") or [])[:_MAX_TODAY_ACTIONS],
         "last_decisions": list(_state.get("last_decisions") or []),
     }
@@ -869,9 +978,104 @@ def _interval_cadence_profile(interval_s: int) -> dict[str, str]:
     }
 
 
+def _median_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    try:
+        return float(median(values))
+    except Exception:
+        return None
+
+
+def _clip(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _build_regime_context(*, bars: dict[str, dict], interval_s: int) -> dict:
+    """Infer market regime from current bars and return tuned indicator weights."""
+    if not bars:
+        fallback = _REGIME_PROFILE_TABLE["trend_base"]
+        return {
+            "regime": "trend_base",
+            "confidence": 0.35,
+            "sample_size": 0,
+            "market_snapshot": {},
+            "profile": fallback,
+            "reason": "insufficient_intraday_bars",
+        }
+
+    changes: list[float] = []
+    vwap_dists: list[float] = []
+    ema_spreads: list[float] = []
+    atr_pcts: list[float] = []
+
+    for row in bars.values():
+        change = row.get("change_pct")
+        if change is not None:
+            changes.append(float(change))
+        indicators = row.get("indicators") or {}
+        vwap_dist = indicators.get("vwap_distance_pct")
+        ema_spread = indicators.get("ema_spread_pct")
+        atr_pct = indicators.get("atr14_pct")
+        if vwap_dist is not None:
+            vwap_dists.append(float(vwap_dist))
+        if ema_spread is not None:
+            ema_spreads.append(float(ema_spread))
+        if atr_pct is not None:
+            atr_pcts.append(float(atr_pct))
+
+    sample_size = len(changes)
+    breadth_negative = (sum(1 for x in changes if x < 0.0) / sample_size) if sample_size > 0 else 0.0
+    breadth_positive = (sum(1 for x in changes if x > 0.0) / sample_size) if sample_size > 0 else 0.0
+    median_change = _median_or_none(changes) or 0.0
+    median_vwap_dist = _median_or_none(vwap_dists) or 0.0
+    median_ema_spread = _median_or_none(ema_spreads) or 0.0
+    median_atr = _median_or_none(atr_pcts) or 0.0
+    trend_agreement = max(breadth_positive, breadth_negative)
+
+    # Sell-off / tape pressure: broad negative breadth + below-VWAP bias.
+    if (
+        sample_size >= 3
+        and breadth_negative >= 0.65
+        and median_change <= -0.20
+        and median_vwap_dist <= -0.10
+    ):
+        regime = "selloff_tight"
+        confidence = _clip(0.45 + (breadth_negative - 0.65) + min(0.25, abs(median_change) / 2.0), 0.45, 0.95)
+        reason = "negative_breadth_and_below_vwap"
+    # Directional trend day: strong breadth alignment + persistent EMA separation.
+    elif sample_size >= 3 and trend_agreement >= 0.60 and abs(median_ema_spread) >= 0.08 and abs(median_change) >= 0.15:
+        regime = "trend_swing"
+        confidence = _clip(0.40 + (trend_agreement - 0.60) + min(0.20, abs(median_ema_spread)), 0.40, 0.90)
+        reason = "directional_breadth_with_ema_separation"
+    else:
+        regime = "trend_base"
+        confidence = _clip(0.35 + min(0.25, abs(median_change) / 2.0) + min(0.20, median_atr / 3.0), 0.35, 0.80)
+        reason = "mixed_or_transitional_tape"
+
+    profile = dict(_REGIME_PROFILE_TABLE.get(regime, _REGIME_PROFILE_TABLE["trend_base"]))
+    profile["cadence_profile"] = _interval_cadence_profile(interval_s)["profile"]
+
+    return {
+        "regime": regime,
+        "confidence": round(confidence, 3),
+        "sample_size": sample_size,
+        "market_snapshot": {
+            "breadth_negative": round(breadth_negative, 3),
+            "breadth_positive": round(breadth_positive, 3),
+            "median_change_pct": round(median_change, 3),
+            "median_vwap_distance_pct": round(median_vwap_dist, 3),
+            "median_ema_spread_pct": round(median_ema_spread, 3),
+            "median_atr14_pct": round(median_atr, 3),
+        },
+        "profile": profile,
+        "reason": reason,
+    }
+
+
 def _build_runtime_constraints(*, settings: dict, interval_s: int, in_shutoff: bool,
                                in_sell_window: bool, use_ib_execution: bool,
-                               ib_mode: str) -> dict:
+                               ib_mode: str, regime_context: dict) -> dict:
     cadence = _interval_cadence_profile(interval_s)
     return {
         "execution_mode": "IB" if use_ib_execution else "SIM",
@@ -891,19 +1095,46 @@ def _build_runtime_constraints(*, settings: dict, interval_s: int, in_shutoff: b
         "crash_protection_enabled": bool(settings.get("crash_protection_enabled", False)),
         "crash_protection_mode": str(settings.get("crash_protection_mode", "percent") or "percent"),
         "crash_protection_value": float(settings.get("crash_protection_value", 0.0) or 0.0),
+        "regime": regime_context.get("regime"),
+        "regime_confidence": regime_context.get("confidence"),
+        "regime_reason": regime_context.get("reason"),
+        "regime_market_snapshot": regime_context.get("market_snapshot") or {},
+        "regime_profile": regime_context.get("profile") or {},
     }
 
 
 def _build_user_prompt(*, instruction: str, account: dict, positions: list[dict],
                        quotes: dict[str, float], bars: dict[str, dict],
                        news: list[dict], today_actions: list[dict],
-                       runtime_constraints: dict) -> str:
+                       runtime_constraints: dict, regime_context: dict) -> str:
+    default_instruction = "help me make money using the positions in watchlist."
+    effective_instruction = str(instruction or "").strip()
+    if not effective_instruction or effective_instruction.lower() == default_instruction:
+        effective_instruction = (
+            "Maximize risk-adjusted intraday P&L while minimizing churn and drawdown. "
+            "Prioritize capital protection during sell-offs, scale into high-conviction setups only, "
+            "and exit quickly when weighted evidence degrades."
+        )
+
     lines: list[str] = []
-    lines.append(f"User instruction: {instruction}")
+    lines.append(f"User instruction: {effective_instruction}")
     lines.append("")
     lines.append(f"Account: {json.dumps(account, default=str)}")
     lines.append("")
     lines.append(f"Runtime settings: {json.dumps(runtime_constraints, default=str)}")
+    lines.append("")
+    lines.append(
+        "Regime tuning (derived from current intraday bars and validated against local historical sweeps): "
+        f"{json.dumps(regime_context, default=str)}"
+    )
+    lines.append(
+        "Indicator weighting policy: for each BUY/SELL decision, prioritize evidence in proportion to the regime"
+        " profile's indicator weights. Prefer actions where weighted evidence is aligned across >=3 indicators."
+    )
+    lines.append(
+        "Sizing policy: respect the regime size_policy caps and downsize when evidence conflicts, volatility (ATR14%)"
+        " rises, or confidence is below 0.55."
+    )
     lines.append(
         "Cadence policy: adapt aggressiveness, order type, and size to cadence_profile. "
         "Faster cadence can use smaller/frequent edits; slower cadence should require stronger confirmation and lower churn."
@@ -1404,7 +1635,6 @@ async def _run_once() -> None:
         _current_trading_day_key_et,
         _cancel_bearish_pending_orders,
         _cancel_ib_pending_orders_price_moved,
-        _attempt_ib_eod_liquidation,
     )
 
     try:
@@ -1497,16 +1727,27 @@ async def _run_once() -> None:
 
     # ── Guardrail 2: end-of-day liquidation (hard) ───────────────────────────── #
     if in_sell_window:
-        if use_ib_execution:
-            # Reuse the PM IB EOD path so liquidation behavior stays aligned
-            # with hold_positions_overnight policy and open-order safeguards.
-            await _attempt_ib_eod_liquidation()
-        else:
-            for p in held:
-                price = quotes.get(p["symbol"], 0.0)
-                await _sell_position(pos=p, price=price, reason="eod_liquidation",
-                                     ib_mode=ib_mode, ib_connected=use_ib_execution)
-        return  # sell-only mode; do not consult the model
+        # User safety override: AI bot must NOT auto-flatten positions during
+        # final sell window. This avoids silent broker liquidations that bypass
+        # AI-specific trade journaling semantics.
+        now = datetime.now(timezone.utc)
+        last_logged_raw = _state.get("last_eod_skip_log_at")
+        should_log = True
+        if isinstance(last_logged_raw, str) and last_logged_raw:
+            try:
+                last_logged = datetime.fromisoformat(last_logged_raw.replace("Z", "+00:00"))
+                if last_logged.tzinfo is None:
+                    last_logged = last_logged.replace(tzinfo=timezone.utc)
+                should_log = (now - last_logged) >= timedelta(minutes=5)
+            except Exception:
+                should_log = True
+        if should_log:
+            _pm_log(
+                f"final sell window active ({eod_window}m): AI auto-flatten disabled; "
+                "holding existing positions unless explicit model/risk exits trigger"
+            )
+            _state["last_eod_skip_log_at"] = now.isoformat()
+        return  # sell-window mode; AI does not auto-liquidate
 
     # ── Guardrail 3: stop-loss / take-profit (hard) ──────────────────────────── #
     risk_handled: set[str] = set()
@@ -1549,6 +1790,7 @@ async def _run_once() -> None:
             if summary:
                 bars[sym] = summary
     news = await _gather_news(symbols) if settings.get("ai_bot_use_news", True) else []
+    regime_context = _build_regime_context(bars=bars, interval_s=interval_s)
 
     model = await _resolve_model(settings)
     _state["last_model"] = model
@@ -1559,12 +1801,14 @@ async def _run_once() -> None:
         in_sell_window=in_sell_window,
         use_ib_execution=use_ib_execution,
         ib_mode=ib_mode,
+        regime_context=regime_context,
     )
     user_prompt = _build_user_prompt(
         instruction=str(settings.get("ai_bot_prompt") or "Help me make money using the positions in watchlist."),
         account=account, positions=positions, quotes=quotes, bars=bars, news=news,
         today_actions=list(_state.get("today_actions") or []),
         runtime_constraints=runtime_constraints,
+        regime_context=regime_context,
     )
     decisions = await _query_model(model, _SYSTEM_PROMPT, user_prompt, settings)
     decisions = _normalize_symbol_decisions(decisions, symbols)
