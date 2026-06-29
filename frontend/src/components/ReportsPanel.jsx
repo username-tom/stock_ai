@@ -526,8 +526,8 @@ export default function ReportsPanel() {
                 <div className="flex items-start justify-between mb-4">
                   <div>
                     <h2 className="font-bold text-lg text-slate-100">
-                      {detail.strategy_type === 'sandbox_portfolio'
-                        ? `Sandbox Portfolio — ${(detail.result_data?.per_symbol?.length ?? 0)} symbols`
+                      {detail.strategy_type === 'sandbox_portfolio' || detail.strategy_type === 'sandbox_ai_bot'
+                        ? `${detail.strategy_type === 'sandbox_ai_bot' ? 'AI Bot Portfolio' : 'Sandbox Portfolio'} — ${(detail.result_data?.per_symbol?.length ?? 0)} symbols`
                         : `${detail.symbol} — ${detail.strategy_type}`}
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">Report ID #{detail.id}</p>
@@ -658,7 +658,7 @@ export default function ReportsPanel() {
 
               {/* Sandbox-portfolio: dedicated multi-symbol view (activity log, per-symbol
                   charts with buy/sell markers, realized equity curve) */}
-              {detail.strategy_type === 'sandbox_portfolio' && (
+              {(detail.strategy_type === 'sandbox_portfolio' || detail.strategy_type === 'sandbox_ai_bot') && (
                 <SandboxResultsView
                   result={detail.result_data ?? {}}
                   metrics={detail.metrics ?? {}}
@@ -666,7 +666,7 @@ export default function ReportsPanel() {
               )}
 
               {/* Equity curve */}
-              {detail.strategy_type !== 'sandbox_portfolio' && detail.result_data?.equity_curve?.length > 0 && (
+              {detail.strategy_type !== 'sandbox_portfolio' && detail.strategy_type !== 'sandbox_ai_bot' && detail.result_data?.equity_curve?.length > 0 && (
                 <div className="card">
                   <h3 className="font-medium text-slate-200 mb-4">Equity Curve</h3>
                   <EquityChart
@@ -677,7 +677,7 @@ export default function ReportsPanel() {
                 </div>
               )}
 
-              {detail.strategy_type !== 'sandbox_portfolio' && reportOhlcvWithSignals.length > 0 && (
+              {detail.strategy_type !== 'sandbox_portfolio' && detail.strategy_type !== 'sandbox_ai_bot' && reportOhlcvWithSignals.length > 0 && (
                 <div className="card">
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="font-medium text-slate-200">Price Chart</h3>
@@ -688,7 +688,7 @@ export default function ReportsPanel() {
               )}
 
               {/* Trades */}
-              {detail.strategy_type !== 'sandbox_portfolio' && groupedTrades.length > 0 && (
+              {detail.strategy_type !== 'sandbox_portfolio' && detail.strategy_type !== 'sandbox_ai_bot' && groupedTrades.length > 0 && (
                 <div className="card">
                   <h3 className="font-medium text-slate-200 mb-3">
                     Trade Log ({groupedTrades.length} grouped buy/sell trades)

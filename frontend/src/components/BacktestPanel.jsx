@@ -5,6 +5,7 @@ import {
   runBacktest,
   runSentimentBacktest,
   runSandboxBacktest,
+  runAiBotBacktest,
   getBacktestIbVerificationStatus,
   getScripts,
   getBuiltinTemplates,
@@ -192,7 +193,7 @@ export default function BacktestPanel() {
   }, [])
 
   // ── Advanced / Sentiment mode ──────────────────────────────────────────── //
-  const [mode, setMode] = useState('sandbox') // 'standard' | 'sentiment' | 'sandbox'
+  const [mode, setMode] = useState('sandbox') // 'standard' | 'sentiment' | 'sandbox' | 'ai_bot'
   const [sentForm, setSentForm] = useState({
     symbol: 'AAPL',
     start_date: defaultStartDate,
@@ -324,6 +325,21 @@ export default function BacktestPanel() {
 
   useEffect(() => () => clearInterval(sandboxProgressRef.current), [])
 
+  const aiBotMutation = useMutation({
+    mutationFn: (payload) => runAiBotBacktest(payload),
+    onSuccess: (data) => {
+      clearInterval(sandboxProgressRef.current)
+      setSandboxProgress(100)
+      setTimeout(() => setSandboxProgress(0), 600)
+      setSandboxResult(data)
+      qc.invalidateQueries({ queryKey: ['reports'] })
+    },
+    onError: () => {
+      clearInterval(sandboxProgressRef.current)
+      setSandboxProgress(0)
+    },
+  })
+
   const getEffectiveSandboxSymbols = () => {
     const overrideSymbols = sandboxForm.symbols_override
       .split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
@@ -369,6 +385,33 @@ export default function BacktestPanel() {
       use_shared_pool: sandboxForm.use_shared_pool,
       per_position_min_pct: sandboxForm.per_position_min_pct,
       per_position_max_pct: sandboxForm.per_position_max_pct,
+      ...(effectiveSymbols.length > 0 ? { symbols: effectiveSymbols } : {}),
+    })
+  }
+
+  const handleAiBotSubmit = (e) => {
+    e.preventDefault()
+    setSandboxProgress(0)
+    const tradingDays = estimateTradingDays(sandboxForm.start_date, sandboxForm.end_date)
+    const tickMs = Math.min(600, Math.max(80, tradingDays * 120 / 25))
+    let cur = 0
+    clearInterval(sandboxProgressRef.current)
+    sandboxProgressRef.current = setInterval(() => {
+      cur += 1
+      setSandboxProgress(Math.min(cur, 99))
+      if (cur >= 99) clearInterval(sandboxProgressRef.current)
+    }, tickMs)
+    const effectiveSymbols = getEffectiveSandboxSymbols()
+    aiBotMutation.mutate({
+      start_date: sandboxForm.start_date,
+      end_date: sandboxForm.end_date,
+      initial_capital: sandboxForm.initial_capital,
+      commission: sandboxForm.commission,
+      allocation_mode: sandboxForm.allocation_mode,
+      use_shared_pool: sandboxForm.use_shared_pool,
+      per_position_min_pct: sandboxForm.per_position_min_pct,
+      per_position_max_pct: sandboxForm.per_position_max_pct,
+      execution_mode: 'ai_bot',
       ...(effectiveSymbols.length > 0 ? { symbols: effectiveSymbols } : {}),
     })
   }
@@ -494,6 +537,13 @@ export default function BacktestPanel() {
               className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${mode === 'sandbox' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'}`}
             >
               Sandbox + PM
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('ai_bot')}
+              className={`px-3 py-1.5 text-xs rounded-md font-medium transition-colors ${mode === 'ai_bot' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-dark-700'}`}
+            >
+              AI Bot
             </button>
           </div>
         </div>
@@ -1470,7 +1520,9 @@ export default function BacktestPanel() {
           </div>
         )}
 
-        {mode === 'sandbox' && (() => {
+        {(mode === 'sandbox' || mode === 'ai_bot') && (() => {
+          const isAiBotMode = mode === 'ai_bot'
+          const activeMutation = isAiBotMode ? aiBotMutation : sandboxMutation
           const positions = sandboxPositionsData?.positions ?? []
           const watchlistPositions = positions.filter(p => p.is_on_watchlist !== false)
           const pmSettings = pmData?.settings ?? {}
@@ -1522,15 +1574,15 @@ export default function BacktestPanel() {
           return (
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
               {/* Sandbox Config */}
-              <form onSubmit={handleSandboxSubmit} className="card space-y-4 xl:col-span-1">
+              <form onSubmit={isAiBotMode ? handleAiBotSubmit : handleSandboxSubmit} className="card space-y-4 xl:col-span-1">
                 <h2 className="font-semibold text-slate-200 text-sm uppercase tracking-wider flex items-center gap-2">
-                  Sandbox + PM Backtest
-                  <span className="text-amber-400 text-xs font-normal normal-case">Watchlist Portfolio</span>
+                  {isAiBotMode ? 'AI Bot Backtest' : 'Sandbox + PM Backtest'}
+                  <span className={`${isAiBotMode ? 'text-rose-400' : 'text-amber-400'} text-xs font-normal normal-case`}>Watchlist Portfolio</span>
                 </h2>
                 <p className="text-xs text-slate-500 -mt-2">
-                  Runs a backtest for every symbol in the current sandbox watchlist using PM
-                  settings (stop-loss, take-profit, EOD, strategy routing). Capital is split
-                  per allocation mode and results are aggregated.
+                  {isAiBotMode
+                    ? 'Runs a backtest for every symbol in the current sandbox watchlist using AI bot mode with your PM position strategy assignments, then aggregates portfolio results.'
+                    : 'Runs a backtest for every symbol in the current sandbox watchlist using PM settings (stop-loss, take-profit, EOD, strategy routing). Capital is split per allocation mode and results are aggregated.'}
                 </p>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -1670,7 +1722,9 @@ export default function BacktestPanel() {
                 <div className="border border-dark-500 rounded-lg p-3 bg-dark-900/30">
                   <div className="text-sm font-medium text-slate-200">Execution Mode</div>
                   <div className="text-xs text-slate-500 mt-1">
-                    Uses PM sentiment strategy routing and always runs in day-trade mode.
+                    {isAiBotMode
+                      ? 'AI bot mode uses fixed per-position strategy assignments and always runs in day-trade mode.'
+                      : 'Uses PM sentiment strategy routing and always runs in day-trade mode.'}
                   </div>
                 </div>
 
@@ -1858,10 +1912,10 @@ export default function BacktestPanel() {
                 )}
 
                 {/* Progress bar */}
-                {sandboxMutation.isPending && (
+                {activeMutation.isPending && (
                   <div className="space-y-1.5">
                     <div className="flex justify-between text-xs text-slate-400">
-                      <span>Running per-symbol backtests…</span>
+                      <span>{isAiBotMode ? 'Running AI bot portfolio backtest…' : 'Running per-symbol backtests…'}</span>
                       <span>{sandboxProgress}%</span>
                     </div>
                     <div className="w-full h-2 bg-dark-700 rounded-full overflow-hidden">
@@ -1874,13 +1928,13 @@ export default function BacktestPanel() {
                 <button
                   type="submit"
                   className="btn-primary w-full justify-center"
-                  disabled={sandboxMutation.isPending || effectiveSymbols.length === 0}
-                  style={sandboxMutation.isPending ? {} : { background: 'linear-gradient(90deg,#d97706,#f59e0b)' }}
+                  disabled={activeMutation.isPending || effectiveSymbols.length === 0}
+                  style={activeMutation.isPending ? {} : { background: isAiBotMode ? 'linear-gradient(90deg,#be123c,#e11d48)' : 'linear-gradient(90deg,#d97706,#f59e0b)' }}
                 >
-                  {sandboxMutation.isPending ? (
+                  {activeMutation.isPending ? (
                     <><ArrowPathIcon className="h-4 w-4 animate-spin" />Running…</>
                   ) : (
-                    <><ArrowPathIcon className="h-4 w-4" />Run Sandbox Backtest</>
+                    <><ArrowPathIcon className="h-4 w-4" />{isAiBotMode ? 'Run AI Bot Backtest' : 'Run Sandbox Backtest'}</>
                   )}
                 </button>
 
@@ -1890,16 +1944,16 @@ export default function BacktestPanel() {
                   </div>
                 )}
 
-                {sandboxMutation.isError && (
+                {activeMutation.isError && (
                   <div className="flex items-start gap-2 p-3 bg-red-900/20 border border-red-700/30 rounded-lg text-sm text-red-400">
                     <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 shrink-0" />
-                    {sandboxMutation.error?.response?.data?.detail || sandboxMutation.error?.message || 'Unknown error'}
+                    {activeMutation.error?.response?.data?.detail || activeMutation.error?.message || 'Unknown error'}
                   </div>
                 )}
-                {sandboxMutation.isSuccess && (
-                  <div className="flex items-center gap-2 p-3 bg-amber-900/20 border border-amber-700/30 rounded-lg text-sm text-amber-300">
+                {activeMutation.isSuccess && (
+                  <div className={`flex items-center gap-2 p-3 border rounded-lg text-sm ${isAiBotMode ? 'bg-rose-900/20 border-rose-700/30 text-rose-300' : 'bg-amber-900/20 border-amber-700/30 text-amber-300'}`}>
                     <CheckCircleIcon className="h-4 w-4" />
-                    Sandbox backtest complete — report saved.
+                    {isAiBotMode ? 'AI bot backtest complete — report saved.' : 'Sandbox backtest complete — report saved.'}
                   </div>
                 )}
               </form>
@@ -1929,19 +1983,20 @@ export default function BacktestPanel() {
                     )}
                     <SandboxResultsView result={r} metrics={m} />
                   </>
-                ) : sandboxMutation.isPending ? (
+                ) : activeMutation.isPending ? (
                   <div className="card flex flex-col items-center justify-center h-64 gap-3 text-slate-400">
-                    <ArrowPathIcon className="h-8 w-8 animate-spin text-amber-400" />
-                    <p className="text-sm">Running sandbox backtest…</p>
+                    <ArrowPathIcon className={`h-8 w-8 animate-spin ${isAiBotMode ? 'text-rose-400' : 'text-amber-400'}`} />
+                    <p className="text-sm">{isAiBotMode ? 'Running AI bot backtest…' : 'Running sandbox backtest…'}</p>
                     <p className="text-xs text-slate-600">Backtesting {effectiveSymbols.length} symbol(s) in parallel</p>
                   </div>
                 ) : (
                   <div className="card flex flex-col items-center justify-center h-64 text-slate-500 gap-2">
                     <ArrowPathIcon className="h-10 w-10 text-slate-600 mb-1" />
-                    <p className="font-medium">Configure and run a sandbox backtest</p>
+                    <p className="font-medium">{isAiBotMode ? 'Configure and run an AI bot backtest' : 'Configure and run a sandbox backtest'}</p>
                     <p className="text-xs text-slate-600 text-center max-w-xs">
-                      Backtests every symbol in your sandbox watchlist using current PM
-                      settings. Capital is split across symbols and results are aggregated.
+                      {isAiBotMode
+                        ? 'Backtests every symbol in your sandbox watchlist in AI bot mode. Uses the same report format and full activity log output.'
+                        : 'Backtests every symbol in your sandbox watchlist using current PM settings. Capital is split across symbols and results are aggregated.'}
                     </p>
                   </div>
                 )}

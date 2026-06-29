@@ -5,6 +5,7 @@ import asyncio
 import copy
 import logging
 from datetime import datetime, timedelta
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -1000,6 +1001,13 @@ class SandboxBacktestRequest(BaseModel):
         le=100.0,
         description="Optional override for simulated SELL pending fill probability (%).",
     )
+    execution_mode: Literal["pm_sentiment", "ai_bot"] = Field(
+        default="pm_sentiment",
+        description=(
+            "Backtest execution mode. 'pm_sentiment' keeps the current sandbox behaviour. "
+            "'ai_bot' runs watchlist portfolio backtests in AI bot mode (fixed per-position strategies)."
+        ),
+    )
 
 
 def _build_sandbox_activity_log(per_symbol: list[dict]) -> list[dict]:
@@ -1094,11 +1102,19 @@ async def run_sandbox_backtest_endpoint(
         run_sandbox_portfolio_backtest,
     )
 
-    # Sandbox PM backtests are fixed to PM sentiment routing + day-trade mode.
+    # Sandbox PM backtests are fixed to day-trade mode.
+    is_ai_bot_mode = req.execution_mode == "ai_bot"
+    use_sentiment_routing = not is_ai_bot_mode
     # Keep request fields for backwards compatibility with older frontend payloads.
     requested_data_source = req.data_source
     effective_data_source: DataSource = "auto" if requested_data_source == "ib" else req.data_source
-    req = req.model_copy(update={"day_trade": True, "use_sentiment_routing": True, "data_source": effective_data_source})
+    req = req.model_copy(
+        update={
+            "day_trade": True,
+            "use_sentiment_routing": use_sentiment_routing,
+            "data_source": effective_data_source,
+        }
+    )
 
     if req.allocation_mode not in ("proportional", "equal"):
         raise HTTPException(status_code=400, detail="allocation_mode must be 'proportional' or 'equal'.")
@@ -1153,6 +1169,7 @@ async def run_sandbox_backtest_endpoint(
         sim_sell_fill_rate = float(req.sim_sell_fill_rate_pct)
 
     pm_settings_snapshot = _build_pm_settings_snapshot({
+        "execution_mode": req.execution_mode,
         "sentiment_strategy_source": sentiment_strategy_source,
         "effective_sentiment_strategies": sentiment_strategies,
         "stop_loss_pct": stop_loss_pct,
@@ -1170,6 +1187,7 @@ async def run_sandbox_backtest_endpoint(
         "default_strategy_name": default_strategy_name,
         "intraday_1m_template_params": intraday_1m_template_params,
         "position_overrides": position_overrides,
+        "ai_bot_prompt": str(pm.get("ai_bot_prompt") or "").strip(),
     })
 
     # Capital split.
@@ -1414,14 +1432,16 @@ async def run_sandbox_backtest_endpoint(
         report_symbol = _summarize_report_symbols(symbols)
         aggregated_trades = _flatten_per_symbol_trades(per_symbol_summary)
 
-        name = (
-            f"SANDBOX_pool_{'sentiment' if req.use_sentiment_routing else 'positions'}"
-            f"_{req.start_date}_to_{req.end_date}"
+        mode_label = "ai_bot" if is_ai_bot_mode else (
+            "pool_sentiment" if req.use_sentiment_routing else "pool_positions"
         )
+        name = f"SANDBOX_{mode_label}_{req.start_date}_to_{req.end_date}"
+        strategy_type_value = "sandbox_ai_bot" if is_ai_bot_mode else "sandbox_portfolio"
         parameters_payload = {
             "symbols": symbols,
             "data_source": effective_data_source,
             "requested_data_source": requested_data_source,
+            "execution_mode": req.execution_mode,
             "use_sentiment_routing": req.use_sentiment_routing,
             "allocation_mode": req.allocation_mode,
             "use_shared_pool": True,
@@ -1442,6 +1462,7 @@ async def run_sandbox_backtest_endpoint(
             "per_symbol_max_alloc": max_alloc_each,
             "use_sentiment_routing": req.use_sentiment_routing,
             "use_shared_pool": True,
+            "execution_mode": req.execution_mode,
             "pool_final": coord.get("pool_final"),
             "pm_settings": pm_settings_snapshot,
             "errors": coord.get("errors") or {},
@@ -1455,7 +1476,7 @@ async def run_sandbox_backtest_endpoint(
         report = BacktestReport(
             name=name,
             symbol=report_symbol,
-            strategy_type="sandbox_portfolio",
+            strategy_type=strategy_type_value,
             parameters=parameters_payload,
             start_date=req.start_date,
             end_date=req.end_date,
@@ -1477,7 +1498,7 @@ async def run_sandbox_backtest_endpoint(
             "id": report.id,
             "name": name,
             "symbol": report.symbol,
-            "strategy_type": "sandbox_portfolio",
+            "strategy_type": strategy_type_value,
             "start_date": req.start_date,
             "end_date": req.end_date,
             "initial_capital": req.initial_capital,
@@ -1491,6 +1512,7 @@ async def run_sandbox_backtest_endpoint(
             "id": report.id,
             "name": name,
             "metrics": metrics_out,
+            "execution_mode": req.execution_mode,
             "result": {
                 "equity_curve": equity_curve,
                 "per_symbol": per_symbol_summary,
@@ -1501,6 +1523,7 @@ async def run_sandbox_backtest_endpoint(
                 "pm_settings": pm_settings_snapshot,
                 "use_sentiment_routing": req.use_sentiment_routing,
                 "use_shared_pool": True,
+                "execution_mode": req.execution_mode,
                 "activity_log": result_data_payload["activity_log"],
                 "errors": result_data_payload["errors"],
                 "verification_warning": result_data_payload.get("verification_warning"),
@@ -1761,13 +1784,15 @@ async def run_sandbox_backtest_endpoint(
 
     # Persist a summary report.
     name = (
-        f"SANDBOX_{'sentiment' if req.use_sentiment_routing else 'positions'}"
+        f"SANDBOX_{'ai_bot' if is_ai_bot_mode else ('sentiment' if req.use_sentiment_routing else 'positions')}"
         f"_{req.start_date}_to_{req.end_date}"
     )
+    strategy_type_value = "sandbox_ai_bot" if is_ai_bot_mode else "sandbox_portfolio"
     parameters_payload = {
         "symbols": symbols,
         "data_source": effective_data_source,
         "requested_data_source": requested_data_source,
+        "execution_mode": req.execution_mode,
         "use_sentiment_routing": req.use_sentiment_routing,
         "allocation_mode": req.allocation_mode,
         "pm_settings": pm_settings_snapshot,
@@ -1782,6 +1807,7 @@ async def run_sandbox_backtest_endpoint(
         "initial_capital": req.initial_capital,
         "per_symbol_capital": per_symbol_capital,
         "use_sentiment_routing": req.use_sentiment_routing,
+        "execution_mode": req.execution_mode,
         "pm_settings": pm_settings_snapshot,
         "verification_warning": verification_info.get("verification_warning"),
         "verification_unverified_symbols": verification_info.get("verification_unverified_symbols") or [],
@@ -1793,7 +1819,7 @@ async def run_sandbox_backtest_endpoint(
     report = BacktestReport(
         name=name,
         symbol=report_symbol,
-        strategy_type="sandbox_portfolio",
+        strategy_type=strategy_type_value,
         parameters=parameters_payload,
         start_date=req.start_date,
         end_date=req.end_date,
@@ -1815,7 +1841,7 @@ async def run_sandbox_backtest_endpoint(
         "id": report.id,
         "name": name,
         "symbol": report.symbol,
-        "strategy_type": "sandbox_portfolio",
+        "strategy_type": strategy_type_value,
         "start_date": req.start_date,
         "end_date": req.end_date,
         "initial_capital": req.initial_capital,
@@ -1829,6 +1855,7 @@ async def run_sandbox_backtest_endpoint(
         "id": report.id,
         "name": name,
         "metrics": metrics,
+        "execution_mode": req.execution_mode,
         "result": {
             "equity_curve": equity_curve,
             "per_symbol": per_symbol_summary,
@@ -1836,6 +1863,7 @@ async def run_sandbox_backtest_endpoint(
             "per_symbol_capital": per_symbol_capital,
             "pm_settings": parameters_payload["pm_settings"],
             "use_sentiment_routing": req.use_sentiment_routing,
+            "execution_mode": req.execution_mode,
             "activity_log": result_data_payload["activity_log"],
             "verification_warning": result_data_payload.get("verification_warning"),
             "verification_unverified_symbols": result_data_payload.get("verification_unverified_symbols") or [],
@@ -1847,6 +1875,20 @@ async def run_sandbox_backtest_endpoint(
         "verification_queued_symbols": result_data_payload.get("verification_queued_symbols") or [],
         "data_warning": result_data_payload.get("data_warning"),
     }
+
+
+@router.post("/run-ai-bot")
+async def run_ai_bot_backtest_endpoint(
+    req: SandboxBacktestRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Run a watchlist portfolio backtest in AI bot mode.
+
+    Uses the same sandbox report schema and activity log so results appear in
+    existing report views without additional migration steps.
+    """
+    ai_req = req.model_copy(update={"execution_mode": "ai_bot", "use_sentiment_routing": False})
+    return await run_sandbox_backtest_endpoint(ai_req, db)
 
 
 @router.get("/reports")

@@ -153,7 +153,11 @@ export default function SandboxResultsView({ result, metrics }) {
               {' · '}
               <span className="text-red-400">{symbolStats.losers} losers</span>
             </div>
-            <div>{r.use_sentiment_routing ? 'sentiment routing' : 'position strategies'}</div>
+            <div>
+              {r.execution_mode === 'ai_bot'
+                ? 'ai bot mode'
+                : (r.use_sentiment_routing ? 'sentiment routing' : 'position strategies')}
+            </div>
           </div>
         </div>
       </div>

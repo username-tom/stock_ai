@@ -29,6 +29,7 @@ export const getStrategies = () => api.get('/backtest/strategies').then(r => r.d
 export const runBacktest = (payload) => api.post('/backtest/run', payload).then(r => r.data)
 export const runSentimentBacktest = (payload) => api.post('/backtest/run-sentiment', payload).then(r => r.data)
 export const runSandboxBacktest = (payload) => api.post('/backtest/run-sandbox', payload).then(r => r.data)
+export const runAiBotBacktest = (payload) => api.post('/backtest/run-ai-bot', payload).then(r => r.data)
 export const warmIntradayCache = (payload) => api.post('/backtest/cache/warm-intraday', payload).then(r => r.data)
 export const getIntradayCacheCoverage = (symbol, dataSource = 'auto') =>
   api.get('/backtest/cache/intraday-coverage', { params: { symbol, data_source: dataSource } }).then(r => r.data)
