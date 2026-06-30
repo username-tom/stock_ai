@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import re
+from typing import Any
 from statistics import median
 from datetime import datetime, timezone, timedelta
 
@@ -48,6 +49,13 @@ _MAX_NEWS_ITEMS = 8
 _MODEL_MAX_RETRIES = 3
 _MODEL_RETRY_BACKOFF_S = 1.5
 _MAX_THINKING_CHARS = 1200
+_PENDING_CANCEL_TIMEOUT_S = 15.0
+_NEWS_FETCH_TIMEOUT_S = 6.0
+_AI_NEWS_REFRESH_S = 900.0
+_IB_SNAPSHOT_TIMEOUT_S = 12.0
+_BAR_SUMMARY_TIMEOUT_S = 8.0
+_RUN_ONCE_TIMEOUT_MIN_S = 90.0
+_RUN_ONCE_TIMEOUT_MAX_S = 900.0
 _PROVIDER_OLLAMA = "ollama"
 _PROVIDER_LM_STUDIO = "lm_studio"
 _DEFAULT_OLLAMA_HOST = "http://localhost:11434"
@@ -64,7 +72,8 @@ _OLLAMA_OPTIONS = {
 _SYSTEM_PROMPT = """\
 You are an automated intraday trading assistant for a set of US equity positions.
 You are given the current account, each current position, recent 1-minute
-price bars, pre-computed technical indicators, and related financial news.
+price bars, pre-computed technical indicators, and related financial news,
+including broker bulletins from Interactive Brokers when available.
 Decide what to do with each symbol.
 
 Hard rules enforced by the platform (you cannot override them):
@@ -90,6 +99,12 @@ Guidance:
 - Include "thinking" with the reasoning behind each decision (keep it concise).
 - Respect runtime settings shown in the prompt (decision cadence interval, EOD windows,
   risk settings, and buy restrictions) when selecting action/order_type/size.
+- Prefer limit orders over market orders when predictor bias aligns with the trade direction;
+    use market orders mainly for urgent exits or when confidence is weak.
+- When the news regime is bullish, prefer momentum-confirmed buys and allow
+    slightly larger sizing only on strong alignment.
+- When the news regime is bearish, favor capital preservation, faster exits,
+    and smaller or no new buys unless the discount is unusually strong.
 - Only include symbols from the provided positions. Keep reasons under 140 chars.
 """
 
@@ -216,6 +231,11 @@ _state: dict[str, object] = {
     "last_query_duration_ms": None,
     "last_retry_events": [],
     "last_eod_skip_log_at": None,
+    "cycle_in_progress": False,
+    "cycle_started_at": None,
+    "news_cache_key": None,
+    "news_cache_at": None,
+    "news_cache_items": [],
 }
 
 
@@ -234,6 +254,8 @@ def get_state() -> dict:
         "last_query_duration_ms": _state.get("last_query_duration_ms"),
         "last_retry_events": list(_state.get("last_retry_events") or []),
         "last_eod_skip_log_at": _state.get("last_eod_skip_log_at"),
+        "cycle_in_progress": bool(_state.get("cycle_in_progress")),
+        "cycle_started_at": _state.get("cycle_started_at"),
         "today_actions": list(_state.get("today_actions") or [])[:_MAX_TODAY_ACTIONS],
         "last_decisions": list(_state.get("last_decisions") or []),
     }
@@ -507,6 +529,310 @@ def _normalize_symbol_decisions(decisions: list[dict], symbols: list[str]) -> li
     return [by_symbol[symbol] for symbol in sorted(symbol_set)]
 
 
+def _apply_prediction_order_policy(
+    decisions: list[dict],
+    *,
+    bars: dict[str, dict],
+    quotes: dict[str, float],
+) -> list[dict]:
+    """Prefer limit orders when bar predictor bias supports the action.
+
+    This is deterministic post-processing over model output, so AI bot behavior
+    remains predictable even when the model omits order-type nuance.
+    """
+    if not decisions:
+        return decisions
+
+    try:
+        from app.services.top_of_book import market_fill_price, simulate_top_of_book_from_quote
+    except Exception:
+        market_fill_price = None
+        simulate_top_of_book_from_quote = None
+
+    adjusted: list[dict] = []
+    for item in decisions:
+        d = dict(item or {})
+        symbol = str(d.get("symbol") or "").upper().strip()
+        action = str(d.get("action") or "hold").lower().strip()
+        order_type = str(d.get("order_type") or "market").lower().strip()
+        if not symbol or action not in {"buy", "sell"}:
+            adjusted.append(d)
+            continue
+
+        indicators = ((bars.get(symbol) or {}).get("indicators") or {})
+        raw_bias = indicators.get("bar_predictor_bias")
+        try:
+            bias = float(raw_bias)
+        except (TypeError, ValueError):
+            adjusted.append(d)
+            continue
+
+        # Align limit preference with directional momentum from predictor.
+        aligned = (action == "buy" and bias >= 0.08) or (action == "sell" and bias <= -0.08)
+        if order_type == "market" and aligned:
+            d["order_type"] = "limit"
+            if d.get("limit_price") is None:
+                ref_px = float(quotes.get(symbol) or 0.0)
+                if ref_px > 0.0:
+                    limit_px = None
+                    if market_fill_price is not None and simulate_top_of_book_from_quote is not None:
+                        try:
+                            book = simulate_top_of_book_from_quote(symbol, {"last_price": ref_px})
+                            touched = float(market_fill_price(book, action.upper(), ref_px) or 0.0)
+                            if touched > 0.0:
+                                limit_px = touched
+                        except Exception:
+                            limit_px = None
+                    if limit_px is None:
+                        # Fallback keeps the order marketable while preserving a limit cap/floor.
+                        step = 0.0005
+                        limit_px = ref_px * (1.0 + step) if action == "buy" else ref_px * (1.0 - step)
+                    d["limit_price"] = round(float(limit_px), 4)
+
+            reason = str(d.get("reason") or "").strip()
+            if reason:
+                d["reason"] = (reason + f" | predictor_bias={bias:.3f} limit-priority")[:140]
+
+            indicators_used = list(d.get("indicators_used") or [])
+            if "bar_predictor_bias" not in {str(x) for x in indicators_used}:
+                indicators_used.append("bar_predictor_bias")
+            d["indicators_used"] = indicators_used[:8]
+
+        adjusted.append(d)
+
+    return adjusted
+
+
+def _apply_pm_execution_guards(
+    decisions: list[dict],
+    *,
+    settings: dict,
+    bars: dict[str, dict],
+    positions: list[dict],
+    quotes: dict[str, float],
+    account: dict,
+) -> list[dict]:
+    """Apply PM-style execution guards for AI mode, excluding sentiment routing."""
+    if not decisions:
+        return decisions
+
+    bar_predictor_enabled = bool(settings.get("bar_predictor_enabled", False))
+    buy_min_bias = max(0.0, float(settings.get("bar_predictor_buy_min_bias", 0.3) or 0.0))
+    sell_min_bias = max(0.0, float(settings.get("bar_predictor_sell_min_bias", 0.3) or 0.0))
+    no_loss_sell = bool(settings.get("ai_tag_no_loss_sell", True))
+    pos_by_symbol = {
+        str(p.get("symbol") or "").upper(): p
+        for p in positions
+        if str(p.get("symbol") or "").strip()
+    }
+
+    out: list[dict] = []
+    for item in decisions:
+        d = dict(item or {})
+        symbol = str(d.get("symbol") or "").upper().strip()
+        action = str(d.get("action") or "hold").lower().strip()
+        if not symbol or action not in {"buy", "sell"}:
+            out.append(d)
+            continue
+
+        indicators = ((bars.get(symbol) or {}).get("indicators") or {})
+        raw_bias = indicators.get("bar_predictor_bias")
+        bias: float | None = None
+        try:
+            bias = float(raw_bias)
+        except (TypeError, ValueError):
+            bias = None
+
+        block_reason = ""
+        if bar_predictor_enabled and bias is not None:
+            if action == "buy" and bias < -buy_min_bias:
+                block_reason = f"bar_predictor:{bias:.3f} < -{buy_min_bias:.3f}"
+            elif action == "sell" and bias > -sell_min_bias:
+                block_reason = f"bar_predictor:{bias:.3f} > -{sell_min_bias:.3f}"
+
+        if not block_reason and action == "sell" and no_loss_sell:
+            pos = pos_by_symbol.get(symbol) or {}
+            cur_px = float(quotes.get(symbol) or 0.0)
+            should_block, block_label = _should_block_loss_exit(
+                settings=settings,
+                pos=pos,
+                cur_px=cur_px,
+                account=account,
+            )
+            if should_block:
+                block_reason = block_label
+
+        if block_reason:
+            d["action"] = "hold"
+            d["order_type"] = "market"
+            d["limit_price"] = None
+            d["reason"] = f"guard block ({block_reason})"[:140]
+
+        out.append(d)
+
+    return out
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _position_cap_value(pos: dict, account: dict) -> float:
+    mode = str(pos.get("max_allocation_mode") or "dollar").strip().lower()
+    raw_value = float(pos.get("max_allocation_value") or 0.0)
+    if raw_value <= 0.0:
+        return float("inf")
+    if mode == "percent":
+        base = float(
+            account.get("cap_base")
+            or account.get("equity")
+            or account.get("total_funds")
+            or account.get("available_funds")
+            or account.get("buying_power")
+            or 0.0
+        )
+        return max(0.0, base * raw_value / 100.0)
+    return max(0.0, raw_value)
+
+
+def _position_used_value(pos: dict, cur_px: float) -> float:
+    qty = float(pos.get("shares") or pos.get("ib_qty") or 0.0)
+    avg = float(pos.get("avg_cost") or 0.0)
+    ref_px = cur_px if cur_px > 0.0 else avg
+    return max(0.0, qty * max(0.0, ref_px))
+
+
+def _position_is_fully_allocated(pos: dict, cur_px: float, account: dict) -> bool:
+    cap = _position_cap_value(pos, account)
+    if not math.isfinite(cap):
+        return False
+    used = _position_used_value(pos, cur_px)
+    # Tolerance avoids float jitter around the cap boundary.
+    return used >= max(0.0, cap) * 0.995
+
+
+def _position_allocation_room(pos: dict, cur_px: float, account: dict) -> float:
+    cap = _position_cap_value(pos, account)
+    available_budget = max(
+        0.0,
+        float(account.get("available_funds") or 0.0),
+        float(account.get("buying_power") or 0.0),
+    )
+    if not math.isfinite(cap):
+        return available_budget
+    used = _position_used_value(pos, cur_px)
+    return max(0.0, min(available_budget, cap - used))
+
+
+def _position_bars_held(pos: dict, interval_s: int) -> int:
+    candidates = [
+        _parse_iso_datetime(pos.get("last_buy_at")),
+        _parse_iso_datetime(pos.get("pm_hold_started_at")),
+        _parse_iso_datetime(pos.get("updated_at")),
+        _parse_iso_datetime(pos.get("created_at")),
+    ]
+    anchor = next((c for c in candidates if c is not None), None)
+    if anchor is None:
+        return 0
+    elapsed = max(0.0, (datetime.now(timezone.utc) - anchor).total_seconds())
+    denom = max(1, int(interval_s or 300))
+    return max(0, int(elapsed // denom))
+
+
+def _is_ai_tag_long_symbol(symbol: str, pm_state: dict | None) -> bool:
+    tags = ((pm_state or {}).get("ai_tags") or {})
+    row = tags.get(symbol) if isinstance(tags, dict) else None
+    tag = str((row or {}).get("learner_tag") or "").upper().strip()
+    return tag in {"LONG", "STRONG LONG"}
+
+
+def _effective_risk_targets(*, settings: dict, pos: dict, cur_px: float, pm_state: dict | None, interval_s: int) -> dict[str, float | int | None]:
+    symbol = str(pos.get("symbol") or "").upper().strip()
+    avg_cost = float(pos.get("avg_cost") or 0.0)
+    sl_pct = float(settings.get("stop_loss_pct", 0.0) or 0.0)
+    tp_pct = float(settings.get("take_profit_pct", 0.0) or 0.0)
+    sl_val = float(settings.get("stop_loss_value", 0.0) or 0.0)
+    tp_val = float(settings.get("take_profit_value", 0.0) or 0.0)
+
+    # LONG/STRONG LONG symbols can add dedicated hold exits on top of global PM exits.
+    if _is_ai_tag_long_symbol(symbol, pm_state):
+        sl_pct = max(sl_pct, float(settings.get("ai_tag_long_sl_pct", 0.0) or 0.0))
+        tp_pct = max(tp_pct, float(settings.get("ai_tag_long_tp_pct", 0.0) or 0.0))
+        sl_val = max(sl_val, float(settings.get("ai_tag_long_sl_value", 0.0) or 0.0))
+        tp_val = max(tp_val, float(settings.get("ai_tag_long_tp_value", 0.0) or 0.0))
+
+    bars_held = _position_bars_held(pos, interval_s)
+    decay_enabled = bool(settings.get("ai_sl_tp_decay_enabled", False))
+    if decay_enabled:
+        decay_bars = max(1, int(settings.get("ai_sl_tp_decay_bars", 120) or 120))
+        progress = min(1.0, float(bars_held) / float(decay_bars))
+        sl_total_decay = max(0.0, min(100.0, float(settings.get("ai_sl_decay_total_pct", 50.0) or 0.0)))
+        tp_total_decay = max(0.0, min(100.0, float(settings.get("ai_tp_decay_total_pct", 80.0) or 0.0)))
+        sl_factor = max(0.0, 1.0 - (sl_total_decay / 100.0) * progress)
+        tp_factor = max(0.0, 1.0 - (tp_total_decay / 100.0) * progress)
+        sl_pct *= sl_factor
+        sl_val *= sl_factor
+        tp_pct *= tp_factor
+        tp_val *= tp_factor
+
+    sl_targets: list[float] = []
+    tp_targets: list[float] = []
+    if avg_cost > 0.0:
+        if sl_pct > 0.0:
+            sl_targets.append(avg_cost * (1.0 - sl_pct / 100.0))
+        if sl_val > 0.0:
+            sl_targets.append(avg_cost - sl_val)
+        if tp_pct > 0.0:
+            tp_targets.append(avg_cost * (1.0 + tp_pct / 100.0))
+        if tp_val > 0.0:
+            tp_targets.append(avg_cost + tp_val)
+
+    sl_trigger = max(sl_targets) if sl_targets else None
+    tp_trigger = min(tp_targets) if tp_targets else None
+    if sl_trigger is not None:
+        sl_trigger = max(0.0, float(sl_trigger))
+    if tp_trigger is not None:
+        tp_trigger = max(0.0, float(tp_trigger))
+
+    return {
+        "avg_cost": avg_cost,
+        "bars_held": bars_held,
+        "sl_trigger": sl_trigger,
+        "tp_trigger": tp_trigger,
+    }
+
+
+def _should_block_loss_exit(*, settings: dict, pos: dict, cur_px: float, account: dict) -> tuple[bool, str]:
+    shares = float(pos.get("shares") or pos.get("ib_qty") or 0.0)
+    avg_cost = float(pos.get("avg_cost") or 0.0)
+    if shares <= 0.0 or avg_cost <= 0.0 or cur_px <= 0.0 or cur_px >= avg_cost:
+        return False, ""
+
+    full_alloc_only = bool(settings.get("ai_no_loss_full_alloc_only", True))
+    is_full_alloc = _position_is_fully_allocated(pos, cur_px, account)
+    if full_alloc_only and not is_full_alloc:
+        return False, ""
+
+    emergency_cap_pct = max(0.0, min(100.0, float(settings.get("ai_no_loss_emergency_cap_pct", 10.0) or 0.0)))
+    if emergency_cap_pct > 0.0:
+        emergency_px = avg_cost * (1.0 - emergency_cap_pct / 100.0)
+        if cur_px <= emergency_px:
+            return False, ""
+
+    if is_full_alloc:
+        return True, f"no_loss_full_alloc:{cur_px:.2f} < avg {avg_cost:.2f}"
+    return True, f"no_loss_sell:{cur_px:.2f} < avg {avg_cost:.2f}"
+
+
 async def get_status(settings: dict | None = None) -> dict:
     active = settings or _get_settings()
     provider_cfg = _provider_settings(active)
@@ -547,7 +873,10 @@ async def get_status(settings: dict | None = None) -> dict:
     interval_s = max(30, int(active.get("ai_bot_interval_s", 300) or 300))
     last_error = str(runtime_state.get("last_error") or "").strip()
     last_run_raw = str(runtime_state.get("last_run_at") or "").strip()
+    cycle_in_progress = bool(runtime_state.get("cycle_in_progress"))
+    cycle_started_raw = str(runtime_state.get("cycle_started_at") or "").strip()
     last_run_at: datetime | None = None
+    cycle_started_at: datetime | None = None
     if last_run_raw:
         try:
             last_run_at = datetime.fromisoformat(last_run_raw.replace("Z", "+00:00"))
@@ -555,10 +884,25 @@ async def get_status(settings: dict | None = None) -> dict:
                 last_run_at = last_run_at.replace(tzinfo=timezone.utc)
         except Exception:
             last_run_at = None
+    if cycle_started_raw:
+        try:
+            cycle_started_at = datetime.fromisoformat(cycle_started_raw.replace("Z", "+00:00"))
+            if cycle_started_at.tzinfo is None:
+                cycle_started_at = cycle_started_at.replace(tzinfo=timezone.utc)
+        except Exception:
+            cycle_started_at = None
 
     if not ai_active:
         status = "disabled"
         message = "AI bot is disabled because PM is off or AI mode is not selected."
+    elif status == "healthy" and cycle_in_progress and cycle_started_at is not None:
+        stalled_after = timedelta(seconds=max(_RUN_ONCE_TIMEOUT_MIN_S, min(interval_s * 2, _RUN_ONCE_TIMEOUT_MAX_S)))
+        if datetime.now(timezone.utc) - cycle_started_at > stalled_after:
+            status = "stalled"
+            message = (
+                "AI bot appears stuck mid-cycle: current run started at "
+                f"{cycle_started_at.astimezone(timezone.utc).isoformat()} (interval={interval_s}s)."
+            )
     elif status == "healthy" and last_error:
         status = "degraded"
         message = f"Last run failed: {last_error}"
@@ -692,11 +1036,26 @@ async def _query_model(model: str, system_prompt: str, user_prompt: str, setting
 
 async def _gather_watchlist_positions(*, use_ib_execution: bool) -> list[dict]:
     from sqlalchemy import select as sa_select
-    from app.models.sandbox import SandboxPosition
+    from sqlalchemy import func as sa_func
+    from app.models.sandbox import SandboxPosition, SandboxTrade
 
     async with AsyncSessionLocal() as db:
         res = await db.execute(sa_select(SandboxPosition).order_by(SandboxPosition.symbol))
         rows = res.scalars().all()
+        buy_res = await db.execute(
+            sa_select(
+                SandboxTrade.symbol,
+                sa_func.max(SandboxTrade.created_at).label("last_buy_at"),
+            )
+            .where(SandboxTrade.side == "BUY")
+            .group_by(SandboxTrade.symbol)
+        )
+        latest_buy_map: dict[str, str] = {}
+        for sym, buy_ts in buy_res.all():
+            sym_key = str(sym or "").upper().strip()
+            if not sym_key or buy_ts is None:
+                continue
+            latest_buy_map[sym_key] = buy_ts.isoformat() if hasattr(buy_ts, "isoformat") else str(buy_ts)
 
     positions_by_symbol: dict[str, dict] = {}
     for p in rows:
@@ -715,6 +1074,10 @@ async def _gather_watchlist_positions(*, use_ib_execution: bool) -> list[dict]:
             "allocated_funds": float(p.allocated_funds or 0.0),
             "max_allocation_mode": str(p.max_allocation_mode or "dollar"),
             "max_allocation_value": float(p.max_allocation_value or 0.0),
+            "pm_hold_started_at": p.pm_hold_started_at.isoformat() if getattr(p, "pm_hold_started_at", None) else None,
+            "created_at": p.created_at.isoformat() if getattr(p, "created_at", None) else None,
+            "updated_at": p.updated_at.isoformat() if getattr(p, "updated_at", None) else None,
+            "last_buy_at": latest_buy_map.get(symbol),
             "source": "sim",
         }
 
@@ -722,7 +1085,10 @@ async def _gather_watchlist_positions(*, use_ib_execution: bool) -> list[dict]:
         try:
             from app.services.ib_service import ib_service
 
-            ib_positions = await ib_service.get_positions()
+            ib_positions = await asyncio.wait_for(
+                ib_service.get_positions(),
+                timeout=_IB_SNAPSHOT_TIMEOUT_S,
+            )
             for row in ib_positions:
                 symbol = str(row.get("symbol") or "").upper().strip()
                 if not symbol:
@@ -770,16 +1136,16 @@ async def _gather_quotes(symbols: list[str]) -> dict[str, float]:
         return {}
 
 
-def _summarise_1m_bars(symbol: str, max_bars: int) -> dict | None:
+def _summarise_1m_bars(symbol: str, max_bars: int, end_day: datetime.date | None = None) -> dict | None:
     """Load locally-cached 1m bars and summarise the most recent ``max_bars``."""
     from datetime import timedelta
     import zoneinfo
     try:
         from app.services.data_provider import load_intraday_history_records
         et = zoneinfo.ZoneInfo("America/New_York")
-        today = datetime.now(tz=et).date()
-        start = (today - timedelta(days=4)).isoformat()
-        end = today.isoformat()
+        anchor_day = end_day or datetime.now(tz=et).date()
+        start = (anchor_day - timedelta(days=4)).isoformat()
+        end = anchor_day.isoformat()
         result = load_intraday_history_records(symbol, start, end, source="auto", interval="1m")
         data = result.get("data") or []
         if not data:
@@ -940,24 +1306,691 @@ def _summarise_1m_bars(symbol: str, max_bars: int) -> dict | None:
         return None
 
 
+def _past_trading_days(start_date: str, end_date: str) -> list[datetime.date]:
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return []
+
+    days: list[datetime.date] = []
+    cursor = start_dt
+    while cursor <= end_dt:
+        if cursor.weekday() < 5:
+            days.append(cursor)
+        cursor += timedelta(days=1)
+    return days
+
+
+def _flatten_activity_log(per_symbol: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for entry in per_symbol:
+        sym = str(entry.get("symbol") or "").upper().strip()
+        strat = entry.get("strategy")
+        for ev in entry.get("signal_events") or []:
+            events.append({
+                "timestamp": ev.get("timestamp"),
+                "symbol": sym,
+                "side": ev.get("side"),
+                "price": ev.get("price"),
+                "quantity": ev.get("quantity"),
+                "value": ev.get("value"),
+                "strategy": ev.get("strategy") or strat,
+                "pnl": ev.get("pnl"),
+                "exit_reason": ev.get("exit_reason") or ev.get("signal_reason"),
+                "commission": ev.get("commission") or 0.0,
+                "event_type": ev.get("event_type") or "SIGNAL",
+                "signal_reason": ev.get("signal_reason"),
+                "status": ev.get("status") or "signal",
+                "notes": ev.get("notes") or ev.get("signal_reason") or ev.get("status") or "",
+            })
+        for trade in entry.get("trades") or []:
+            events.append({
+                "timestamp": trade.get("entry_date"),
+                "symbol": sym,
+                "side": "BUY",
+                "price": trade.get("entry_price"),
+                "quantity": trade.get("quantity"),
+                "value": (float(trade.get("entry_price") or 0.0) * float(trade.get("quantity") or 0.0)),
+                "strategy": trade.get("entry_strategy") or strat,
+                "pnl": None,
+                "exit_reason": None,
+                "commission": 0.0,
+                "event_type": "BUY_FILL",
+                "signal_reason": trade.get("entry_reason"),
+                "status": "filled",
+                "notes": "filled buy order",
+            })
+            events.append({
+                "timestamp": trade.get("exit_date"),
+                "symbol": sym,
+                "side": "SELL",
+                "price": trade.get("exit_price"),
+                "quantity": trade.get("quantity"),
+                "value": (float(trade.get("exit_price") or 0.0) * float(trade.get("quantity") or 0.0)),
+                "strategy": trade.get("exit_strategy") or strat,
+                "pnl": trade.get("pnl"),
+                "exit_reason": trade.get("exit_reason"),
+                "commission": 0.0,
+                "event_type": "SELL_FILL",
+                "signal_reason": trade.get("exit_reason"),
+                "status": "filled",
+                "notes": f"filled sell order: {trade.get('exit_reason') or ''}",
+            })
+    events.sort(key=lambda e: (str(e.get("timestamp") or ""), str(e.get("symbol") or "")))
+    return events
+
+
+async def run_ai_bot_backtest(
+    *,
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    initial_capital: float,
+    commission: float = 0.005,
+    data_source: str = "auto",
+) -> dict[str, Any]:
+    """Replay AI bot decisions against historical local bars using the local model.
+
+    The replay is intentionally simple: once per trading day, each symbol's most
+    recent cached 1m bars are summarized, the local provider is queried with the
+    same AI bot prompt path as live trading, and the resulting decisions are
+    applied to a simulated cash/position ledger.
+    """
+    from app.services.portfolio_manager import get_manager_settings
+
+    settings = _get_settings()
+    if not symbols:
+        return {
+            "initial_capital": initial_capital,
+            "final_value": initial_capital,
+            "metrics": {
+                "final_value": round(initial_capital, 2),
+                "total_return_pct": 0.0,
+                "annualized_return_pct": 0.0,
+                "sharpe_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+                "win_rate_pct": 0.0,
+                "total_trades": 0,
+                "symbols_run": 0,
+                "symbols_failed": 0,
+            },
+            "equity_curve": [],
+            "per_symbol": [],
+            "activity_log": [],
+            "errors": {},
+            "execution_mode": "ai_bot",
+            "use_sentiment_routing": False,
+        }
+
+    symbols = [str(sym or "").upper().strip() for sym in symbols if str(sym or "").strip()]
+    symbols = list(dict.fromkeys(symbols))
+    trading_days = _past_trading_days(start_date, end_date)
+    max_bars = int(settings.get("ai_bot_max_context_bars", 60) or 60)
+    use_local_1m = bool(settings.get("ai_bot_use_local_1m", True))
+    hold_positions_overnight = bool(settings.get("hold_positions_overnight", False))
+    stop_loss_pct = float(settings.get("stop_loss_pct", 0.0) or 0.0)
+    take_profit_pct = float(settings.get("take_profit_pct", 0.0) or 0.0)
+    stop_loss_value = float(settings.get("stop_loss_value", 0.0) or 0.0)
+    take_profit_value = float(settings.get("take_profit_value", 0.0) or 0.0)
+    interval_s = 24 * 60 * 60
+
+    model = await _resolve_model(settings)
+    _state["last_model"] = model
+
+    positions: dict[str, dict[str, Any]] = {}
+    equal_allocation = initial_capital / len(symbols) if symbols else 0.0
+    for sym in symbols:
+        positions[sym] = {
+            "symbol": sym,
+            "shares": 0.0,
+            "avg_cost": 0.0,
+            "allocated_funds": equal_allocation,
+            "source": "sim",
+            "open_entry_date": None,
+            "open_entry_reason": None,
+            "open_entry_strategy": None,
+            "signal_events": [],
+            "trades": [],
+            "pending_shares": 0.0,
+        }
+
+    cash = float(initial_capital)
+    equity_curve: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    today_actions: list[dict] = []
+
+    def _append_signal(sym: str, event: dict[str, Any]) -> None:
+        positions[sym]["signal_events"].append(event)
+
+    def _log_fill(sym: str, side: str, qty: float, price: float, reason: str, *, entry_price: float | None = None, entry_date: str | None = None) -> None:
+        _append_signal(sym, {
+            "timestamp": day.isoformat(),
+            "symbol": sym,
+            "side": side,
+            "price": round(price, 4),
+            "quantity": round(qty, 4),
+            "value": round(qty * price, 4),
+            "strategy": "ai_bot",
+            "pnl": None if side == "BUY" else round((qty * price - qty * commission) - (qty * (entry_price or 0.0)), 2),
+            "exit_reason": None if side == "BUY" else reason,
+            "commission": round(qty * commission, 4),
+            "event_type": f"{side}_FILL",
+            "signal_reason": reason,
+            "status": "filled",
+            "notes": f"filled {side.lower()} order: {reason}",
+        })
+
+    for day in trading_days:
+        bars: dict[str, dict] = {}
+        quotes: dict[str, float] = {}
+        if use_local_1m:
+            for sym in symbols:
+                try:
+                    summary = await asyncio.to_thread(_summarise_1m_bars, sym, max_bars, day)
+                except Exception as exc:  # noqa: BLE001
+                    errors[sym] = str(exc)
+                    continue
+                if summary:
+                    bars[sym] = summary
+                    last_close = summary.get("last_close")
+                    if last_close is not None:
+                        quotes[sym] = float(last_close)
+
+        if not bars:
+            continue
+
+        regime_context = _build_regime_context(bars=bars, interval_s=interval_s)
+        news_context = _build_news_context([])
+        runtime_constraints = _build_runtime_constraints(
+            settings=settings,
+            interval_s=interval_s,
+            in_shutoff=False,
+            in_sell_window=False,
+            use_ib_execution=False,
+            ib_mode="paper",
+            regime_context=regime_context,
+            news_context=news_context,
+        )
+
+        account_value = cash + sum(float(p["shares"]) * float(quotes.get(sym, 0.0)) for sym, p in positions.items())
+        account = {
+            "total_funds": round(account_value, 2),
+            "available_funds": round(cash, 2),
+            "buying_power": round(cash, 2),
+            "equity": round(account_value, 2),
+            "cap_base": round(account_value, 2),
+        }
+
+        # Hard risk exits first: keep the replay aligned with the live bot and
+        # prevent the model from holding large losers until the end of the run.
+        risk_exit_symbols: set[str] = set()
+        for sym, pos in positions.items():
+            price = float(quotes.get(sym) or 0.0)
+            avg_cost = float(pos.get("avg_cost") or 0.0)
+            shares = float(pos.get("shares") or 0.0)
+            if shares <= 0 or price <= 0 or avg_cost <= 0:
+                continue
+
+            sl_targets: list[float] = []
+            tp_targets: list[float] = []
+            if stop_loss_pct > 0:
+                sl_targets.append(avg_cost * (1.0 - stop_loss_pct / 100.0))
+            if stop_loss_value > 0:
+                sl_targets.append(avg_cost - stop_loss_value)
+            if take_profit_pct > 0:
+                tp_targets.append(avg_cost * (1.0 + take_profit_pct / 100.0))
+            if take_profit_value > 0:
+                tp_targets.append(avg_cost + take_profit_value)
+
+            exit_reason = None
+            if sl_targets and price <= max(sl_targets):
+                exit_reason = "stop_loss"
+            elif tp_targets and price >= min(tp_targets):
+                exit_reason = "take_profit"
+
+            if not exit_reason:
+                continue
+
+            proceeds = shares * price - shares * commission
+            pnl = proceeds - (shares * avg_cost + shares * commission)
+            cash += proceeds
+            pos["trades"].append({
+                "entry_date": pos["open_entry_date"] or day.isoformat(),
+                "exit_date": day.isoformat(),
+                "side": "BUY",
+                "entry_price": round(avg_cost, 4),
+                "exit_price": round(price, 4),
+                "quantity": float(shares),
+                "pnl": round(pnl, 2),
+                "entry_reason": pos["open_entry_reason"] or "signal",
+                "exit_reason": exit_reason,
+                "entry_strategy": pos["open_entry_strategy"] or "ai_bot",
+                "exit_strategy": "ai_bot",
+                "entry_bucket": None,
+                "exit_bucket": None,
+            })
+            pos["signal_events"].append({
+                "timestamp": day.isoformat(),
+                "symbol": sym,
+                "side": "SELL",
+                "price": round(price, 4),
+                "quantity": float(shares),
+                "value": round(shares * price, 4),
+                "strategy": "ai_bot",
+                "pnl": round(pnl, 2),
+                "exit_reason": exit_reason,
+                "commission": round(shares * commission, 4),
+                "event_type": "SELL_FILL",
+                "signal_reason": exit_reason,
+                "status": "filled",
+                "notes": f"filled sell order: {exit_reason}",
+            })
+            _log_fill(sym, "SELL", shares, price, exit_reason, entry_price=avg_cost, entry_date=pos.get("open_entry_date") or day.isoformat())
+            pos["shares"] = 0.0
+            pos["avg_cost"] = 0.0
+            pos["open_entry_date"] = None
+            pos["open_entry_reason"] = None
+            pos["open_entry_strategy"] = None
+            risk_exit_symbols.add(sym)
+
+        prompt_positions = [
+            {
+                "symbol": sym,
+                "shares": float(pos["shares"]),
+                "avg_cost": float(pos["avg_cost"]),
+                "allocated_funds": float(pos["allocated_funds"]),
+                "source": "sim",
+            }
+            for sym, pos in positions.items()
+        ]
+
+        user_prompt = _build_user_prompt(
+            instruction=str(settings.get("ai_bot_prompt") or "Help me make money using the positions in watchlist."),
+            account=account,
+            positions=prompt_positions,
+            quotes=quotes,
+            bars=bars,
+            news=[],
+            today_actions=today_actions[-_MAX_TODAY_ACTIONS:],
+            runtime_constraints=runtime_constraints,
+            regime_context=regime_context,
+            news_context=news_context,
+        )
+        decisions = await _query_model(model, _SYSTEM_PROMPT, user_prompt, settings)
+        decisions = _normalize_symbol_decisions(decisions, symbols)
+        _state["last_decisions"] = decisions
+
+        for decision in decisions:
+            sym = str(decision.get("symbol") or "").upper().strip()
+            if sym not in positions or sym in risk_exit_symbols:
+                continue
+            action = str(decision.get("action") or "hold").lower().strip()
+            if action == "hold":
+                continue
+            price = float(quotes.get(sym) or 0.0)
+            if price <= 0:
+                continue
+            pos = positions[sym]
+            size_pct = float(decision.get("size_pct") or 100.0)
+            size_pct = max(1.0, min(100.0, size_pct))
+            reason = str(decision.get("reason") or action)
+            limit_price = decision.get("limit_price")
+            order_type = str(decision.get("order_type") or "market").lower().strip()
+
+            if action == "buy":
+                if cash <= 0:
+                    continue
+                buy_budget = cash * (size_pct / 100.0)
+                qty = math.floor(buy_budget / (price + commission))
+                if qty <= 0:
+                    continue
+                if order_type == "limit" and limit_price is not None and price > float(limit_price):
+                    continue
+                cost = qty * price + qty * commission
+                cash -= cost
+                prev_qty = float(pos["shares"])
+                prev_avg = float(pos["avg_cost"])
+                new_qty = prev_qty + qty
+                new_avg = ((prev_qty * prev_avg) + (qty * price)) / new_qty if new_qty > 0 else price
+                pos["shares"] = new_qty
+                pos["avg_cost"] = new_avg
+                if pos["open_entry_date"] is None:
+                    pos["open_entry_date"] = day.isoformat()
+                    pos["open_entry_reason"] = reason
+                    pos["open_entry_strategy"] = "ai_bot"
+                _log_fill(sym, "BUY", qty, price, reason)
+                today_actions.append({"day": day.isoformat(), "symbol": sym, "action": "buy", "qty": qty, "price": price, "reason": reason})
+                pos["signal_events"].append({
+                    "timestamp": day.isoformat(),
+                    "symbol": sym,
+                    "side": "BUY",
+                    "price": round(price, 4),
+                    "quantity": float(qty),
+                    "value": round(qty * price, 4),
+                    "strategy": "ai_bot",
+                    "pnl": None,
+                    "exit_reason": None,
+                    "commission": round(qty * commission, 4),
+                    "event_type": "BUY_SIGNAL",
+                    "signal_reason": reason,
+                    "status": "filled",
+                    "notes": "filled buy order",
+                })
+
+            elif action == "sell":
+                held_qty = float(pos["shares"])
+                if held_qty <= 0:
+                    continue
+                sell_qty = held_qty if size_pct >= 99.999 else max(1.0, math.floor(held_qty * (size_pct / 100.0)))
+                sell_qty = min(held_qty, sell_qty)
+                if sell_qty <= 0:
+                    continue
+                if order_type == "limit" and limit_price is not None and price < float(limit_price):
+                    continue
+                entry_price = float(pos["avg_cost"])
+                proceeds = sell_qty * price - sell_qty * commission
+                pnl = proceeds - (sell_qty * entry_price)
+                cash += proceeds
+                pos["shares"] = held_qty - sell_qty
+                if pos["shares"] <= 0:
+                    pos["shares"] = 0.0
+                    pos["avg_cost"] = 0.0
+                    pos["open_entry_date"] = None
+                    pos["open_entry_reason"] = None
+                    pos["open_entry_strategy"] = None
+                trade = {
+                    "entry_date": pos["open_entry_date"] or day.isoformat(),
+                    "exit_date": day.isoformat(),
+                    "side": "BUY",
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(price, 4),
+                    "quantity": float(sell_qty),
+                    "pnl": round(pnl, 2),
+                    "entry_reason": pos["open_entry_reason"] or "signal",
+                    "exit_reason": reason,
+                    "entry_strategy": pos["open_entry_strategy"] or "ai_bot",
+                    "exit_strategy": "ai_bot",
+                    "entry_bucket": None,
+                    "exit_bucket": None,
+                }
+                pos["trades"].append(trade)
+                _log_fill(sym, "SELL", sell_qty, price, reason, entry_price=entry_price, entry_date=trade["entry_date"])
+                pos["signal_events"].append({
+                    "timestamp": day.isoformat(),
+                    "symbol": sym,
+                    "side": "SELL",
+                    "price": round(price, 4),
+                    "quantity": float(sell_qty),
+                    "value": round(sell_qty * price, 4),
+                    "strategy": "ai_bot",
+                    "pnl": round(pnl, 2),
+                    "exit_reason": reason,
+                    "commission": round(sell_qty * commission, 4),
+                    "event_type": "SELL_SIGNAL",
+                    "signal_reason": reason,
+                    "status": "filled",
+                    "notes": f"filled sell order: {reason}",
+                })
+                today_actions.append({"day": day.isoformat(), "symbol": sym, "action": "sell", "qty": sell_qty, "price": price, "reason": reason})
+
+        if not hold_positions_overnight:
+            for sym, pos in positions.items():
+                if float(pos["shares"]) <= 0:
+                    continue
+                price = float(quotes.get(sym) or 0.0)
+                if price <= 0:
+                    continue
+                qty = float(pos["shares"])
+                entry_price = float(pos["avg_cost"])
+                proceeds = qty * price - qty * commission
+                pnl = proceeds - (qty * entry_price)
+                cash += proceeds
+                trade = {
+                    "entry_date": pos["open_entry_date"] or day.isoformat(),
+                    "exit_date": day.isoformat(),
+                    "side": "BUY",
+                    "entry_price": round(entry_price, 4),
+                    "exit_price": round(price, 4),
+                    "quantity": float(qty),
+                    "pnl": round(pnl, 2),
+                    "entry_reason": pos["open_entry_reason"] or "signal",
+                    "exit_reason": "eod_close",
+                    "entry_strategy": pos["open_entry_strategy"] or "ai_bot",
+                    "exit_strategy": "ai_bot",
+                    "entry_bucket": None,
+                    "exit_bucket": None,
+                }
+                pos["trades"].append(trade)
+                pos["signal_events"].append({
+                    "timestamp": day.isoformat(),
+                    "symbol": sym,
+                    "side": "SELL",
+                    "price": round(price, 4),
+                    "quantity": qty,
+                    "value": round(qty * price, 4),
+                    "strategy": "ai_bot",
+                    "pnl": round(pnl, 2),
+                    "exit_reason": "eod_close",
+                    "commission": round(qty * commission, 4),
+                    "event_type": "SELL_FILL",
+                    "signal_reason": "eod_close",
+                    "status": "filled",
+                    "notes": "filled sell order: eod_close",
+                })
+                pos["shares"] = 0.0
+                pos["avg_cost"] = 0.0
+                pos["open_entry_date"] = None
+                pos["open_entry_reason"] = None
+                pos["open_entry_strategy"] = None
+
+        equity = cash + sum(float(pos["shares"]) * float(quotes.get(sym, 0.0)) for sym, pos in positions.items())
+        equity_curve.append({"date": day.isoformat(), "value": round(equity, 2)})
+
+    final_value = float(equity_curve[-1]["value"] if equity_curve else initial_capital)
+    trades = [trade for pos in positions.values() for trade in pos["trades"]]
+    total_trades = len(trades)
+    wins = sum(1 for trade in trades if float(trade.get("pnl") or 0.0) > 0)
+    win_rate_pct = (wins / total_trades * 100.0) if total_trades else 0.0
+    total_return_pct = ((final_value - initial_capital) / initial_capital * 100.0) if initial_capital > 0 else 0.0
+    annualized_return_pct = total_return_pct if len(equity_curve) <= 1 else (((final_value / initial_capital) ** (252.0 / max(1, len(equity_curve)))) - 1.0) * 100.0 if initial_capital > 0 else 0.0
+    sharpe_ratio = 0.0
+    if len(equity_curve) > 1:
+        values = [float(p["value"]) for p in equity_curve]
+        returns = [(values[i] - values[i - 1]) / values[i - 1] for i in range(1, len(values)) if values[i - 1] > 0]
+        if len(returns) > 1:
+            mean_r = sum(returns) / len(returns)
+            var_r = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
+            std_r = math.sqrt(var_r)
+            sharpe_ratio = (mean_r / std_r) * math.sqrt(252.0) if std_r > 0 else 0.0
+    max_drawdown_pct = 0.0
+    if equity_curve:
+        values = [float(p["value"]) for p in equity_curve]
+        peak = values[0]
+        worst = 0.0
+        for v in values:
+            if v > peak:
+                peak = v
+            if peak > 0:
+                dd = (v - peak) / peak
+                if dd < worst:
+                    worst = dd
+        max_drawdown_pct = worst * 100.0
+
+    per_symbol: list[dict[str, Any]] = []
+    for sym, pos in positions.items():
+        last_price = float(quotes.get(sym, 0.0))
+        market_value = float(pos["shares"]) * last_price
+        unrealized_pnl = (float(pos["shares"]) * (last_price - float(pos["avg_cost"]))) if float(pos["shares"]) > 0 else 0.0
+        symbol_trades = pos["trades"]
+        per_symbol.append({
+            "symbol": sym,
+            "initial_capital": round(equal_allocation, 2),
+            "equity_start": round(equal_allocation, 2),
+            "equity_end": round(equal_allocation + sum(float(t.get("pnl") or 0.0) for t in symbol_trades) + unrealized_pnl, 2),
+            "final_value": round(equal_allocation + sum(float(t.get("pnl") or 0.0) for t in symbol_trades) + unrealized_pnl, 2),
+            "market_value": round(market_value, 2),
+            "realized_pnl": round(sum(float(t.get("pnl") or 0.0) for t in symbol_trades), 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "total_return_pct": round((((equal_allocation + sum(float(t.get("pnl") or 0.0) for t in symbol_trades) + unrealized_pnl) - equal_allocation) / equal_allocation) * 100.0, 4) if equal_allocation > 0 else 0.0,
+            "sharpe_ratio": None,
+            "max_drawdown_pct": None,
+            "win_rate_pct": round((sum(1 for t in symbol_trades if float(t.get("pnl") or 0.0) > 0) / len(symbol_trades) * 100.0) if symbol_trades else 0.0, 2),
+            "total_trades": len(symbol_trades),
+            "strategy": "ai_bot",
+            "trades": symbol_trades,
+            "signal_events": pos["signal_events"],
+            "ohlcv": [],
+            "equity_curve": [],
+            "interval": "1d",
+        })
+
+    result = {
+        "equity_curve": equity_curve,
+        "per_symbol": per_symbol,
+        "initial_capital": initial_capital,
+        "activity_log": [],
+        "use_sentiment_routing": False,
+        "execution_mode": "ai_bot",
+        "errors": errors,
+    }
+    result["activity_log"] = _flatten_activity_log(per_symbol)
+
+    metrics = {
+        "final_value": round(final_value, 2),
+        "total_return_pct": round(total_return_pct, 4),
+        "annualized_return_pct": round(annualized_return_pct, 2),
+        "sharpe_ratio": round(sharpe_ratio, 2),
+        "max_drawdown_pct": round(max_drawdown_pct, 2),
+        "win_rate_pct": round(win_rate_pct, 2),
+        "total_trades": total_trades,
+        "symbols_run": len(symbols) - len(errors),
+        "symbols_failed": len(errors),
+    }
+    result["metrics"] = metrics
+    return result
+
+
 async def _gather_news(symbols: list[str]) -> list[dict]:
     if not symbols:
         return []
+    symbol_key = ",".join(sorted({str(s or "").upper().strip() for s in symbols if str(s or "").strip()}))
+    now = datetime.now(timezone.utc)
+    cached_key = str(_state.get("news_cache_key") or "")
+    cached_at_raw = str(_state.get("news_cache_at") or "")
+    cached_items = list(_state.get("news_cache_items") or [])
+    if symbol_key and cached_key == symbol_key and cached_items:
+        try:
+            cached_at = datetime.fromisoformat(cached_at_raw.replace("Z", "+00:00"))
+            if cached_at.tzinfo is None:
+                cached_at = cached_at.replace(tzinfo=timezone.utc)
+            if (now - cached_at).total_seconds() < _AI_NEWS_REFRESH_S:
+                return cached_items[:_MAX_NEWS_ITEMS]
+        except Exception:
+            pass
+
     try:
         from app.services.market_service import get_news
-        result = await get_news(symbols)
+        try:
+            result = await asyncio.wait_for(get_news(symbols), timeout=_NEWS_FETCH_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("AI bot news fetch timed out after %.1fs", _NEWS_FETCH_TIMEOUT_S)
+            if symbol_key and cached_key == symbol_key and cached_items:
+                return cached_items[:_MAX_NEWS_ITEMS]
+            result = {"items": []}
         items = result.get("items") if isinstance(result, dict) else result
         out = []
-        for item in (items or [])[:_MAX_NEWS_ITEMS]:
+        for item in list(items or [])[:_MAX_NEWS_ITEMS]:
             out.append({
                 "title": str(item.get("title") or "")[:160],
                 "source": str(item.get("source") or ""),
                 "related": item.get("related") or [],
             })
+        _state["news_cache_key"] = symbol_key
+        _state["news_cache_at"] = now.isoformat()
+        _state["news_cache_items"] = out[:_MAX_NEWS_ITEMS]
         return out
     except Exception as exc:
         logger.debug("AI bot news fetch failed: %s", exc)
+        if symbol_key and cached_key == symbol_key and cached_items:
+            return cached_items[:_MAX_NEWS_ITEMS]
         return []
+
+
+def _score_news_item(text: str) -> int:
+    text_l = text.lower()
+    bullish_terms = {
+        "upgrade", "beat", "beats", "growth", "bullish", "rally", "record",
+        "strong", "profit", "guidance raised", "raises guidance", "approval",
+        "expands", "breakout", "surge", "surges", "support", "buyback",
+    }
+    bearish_terms = {
+        "downgrade", "miss", "misses", "bearish", "selloff", "weak", "loss",
+        "cuts guidance", "lowers guidance", "investigation", "lawsuit", "delay",
+        "recall", "slump", "plunge", "concern", "warning", "risk-off",
+    }
+    score = 0
+    for term in bullish_terms:
+        if term in text_l:
+            score += 1
+    for term in bearish_terms:
+        if term in text_l:
+            score -= 1
+    return score
+
+
+def _build_news_context(news: list[dict]) -> dict:
+    if not news:
+        return {
+            "state": "neutral",
+            "confidence": 0.25,
+            "score": 0,
+            "bullish_items": 0,
+            "bearish_items": 0,
+            "strategy_branch": "neutral_selective",
+            "guidance": "No meaningful news edge; trade only on stronger technical confirmation.",
+        }
+
+    total_score = 0
+    bullish_items = 0
+    bearish_items = 0
+    snippets: list[str] = []
+    for item in news[:_MAX_NEWS_ITEMS]:
+        text = f"{item.get('title') or ''} {item.get('source') or ''}".strip()
+        if not text:
+            continue
+        score = _score_news_item(text)
+        total_score += score
+        if score > 0:
+            bullish_items += 1
+        elif score < 0:
+            bearish_items += 1
+        snippets.append(text[:120])
+
+    if total_score >= 2 and bullish_items >= bearish_items:
+        state = "bullish"
+        strategy_branch = "bullish_momentum"
+        guidance = "Treat news as supportive; prefer momentum-confirmed buys, hold winners longer, and avoid premature exits."
+    elif total_score <= -2 and bearish_items >= bullish_items:
+        state = "bearish"
+        strategy_branch = "bearish_defense"
+        guidance = "Treat news as hostile; reduce exposure, favor faster exits, and only buy deep pullbacks with strong confirmation."
+    else:
+        state = "neutral"
+        strategy_branch = "neutral_selective"
+        guidance = "News is mixed; require alignment between news and intraday trend before taking risk."
+
+    confidence = _clip(0.25 + min(0.55, abs(total_score) * 0.12 + abs(bullish_items - bearish_items) * 0.08), 0.25, 0.9)
+    return {
+        "state": state,
+        "confidence": round(confidence, 3),
+        "score": int(total_score),
+        "bullish_items": bullish_items,
+        "bearish_items": bearish_items,
+        "strategy_branch": strategy_branch,
+        "guidance": guidance,
+        "evidence": snippets[:6],
+    }
 
 
 def _interval_cadence_profile(interval_s: int) -> dict[str, str]:
@@ -1075,7 +2108,7 @@ def _build_regime_context(*, bars: dict[str, dict], interval_s: int) -> dict:
 
 def _build_runtime_constraints(*, settings: dict, interval_s: int, in_shutoff: bool,
                                in_sell_window: bool, use_ib_execution: bool,
-                               ib_mode: str, regime_context: dict) -> dict:
+                               ib_mode: str, regime_context: dict, news_context: dict) -> dict:
     cadence = _interval_cadence_profile(interval_s)
     return {
         "execution_mode": "IB" if use_ib_execution else "SIM",
@@ -1100,13 +2133,19 @@ def _build_runtime_constraints(*, settings: dict, interval_s: int, in_shutoff: b
         "regime_reason": regime_context.get("reason"),
         "regime_market_snapshot": regime_context.get("market_snapshot") or {},
         "regime_profile": regime_context.get("profile") or {},
+        "news_state": news_context.get("state"),
+        "news_confidence": news_context.get("confidence"),
+        "news_score": news_context.get("score"),
+        "news_strategy_branch": news_context.get("strategy_branch"),
+        "news_guidance": news_context.get("guidance"),
     }
 
 
 def _build_user_prompt(*, instruction: str, account: dict, positions: list[dict],
                        quotes: dict[str, float], bars: dict[str, dict],
                        news: list[dict], today_actions: list[dict],
-                       runtime_constraints: dict, regime_context: dict) -> str:
+                       runtime_constraints: dict, regime_context: dict,
+                       news_context: dict) -> str:
     default_instruction = "help me make money using the positions in watchlist."
     effective_instruction = str(instruction or "").strip()
     if not effective_instruction or effective_instruction.lower() == default_instruction:
@@ -1128,8 +2167,16 @@ def _build_user_prompt(*, instruction: str, account: dict, positions: list[dict]
         f"{json.dumps(regime_context, default=str)}"
     )
     lines.append(
+        "News regime (derived from cached market headlines feed): "
+        f"{json.dumps(news_context, default=str)}"
+    )
+    lines.append(
         "Indicator weighting policy: for each BUY/SELL decision, prioritize evidence in proportion to the regime"
         " profile's indicator weights. Prefer actions where weighted evidence is aligned across >=3 indicators."
+    )
+    lines.append(
+        "News strategy policy: bullish -> momentum-biased buys and holding strength; bearish -> defensive posture,"
+        " reduced sizing, and faster exits; neutral -> wait for technical confirmation."
     )
     lines.append(
         "Sizing policy: respect the regime size_policy caps and downsize when evidence conflicts, volatility (ATR14%)"
@@ -1626,6 +2673,7 @@ async def _run_once() -> None:
     _pm_log(f"execution mode={'IB' if use_ib_execution else 'SIM'} (trading_mode={ib_mode}, ib_connected={ib_connected})")
 
     from app.services.sandbox_engine import (
+        _market_is_active,
         _regular_session_is_open,
         _is_in_eod_sell_window,
         _is_in_pre_sell_engine_shutoff_window,
@@ -1638,11 +2686,20 @@ async def _run_once() -> None:
     )
 
     try:
-        await _cancel_bearish_pending_orders()
+        await asyncio.wait_for(
+            _cancel_bearish_pending_orders(include_sentiment_signals=False),
+            timeout=_PENDING_CANCEL_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("AI bot pending-cancel check timed out after %.1fs", _PENDING_CANCEL_TIMEOUT_S)
+        _pm_log("pending-cancel check timed out; continuing cycle")
     except Exception as exc:
         logger.warning("AI bot pending-cancel check error: %s", exc)
     try:
-        await _cancel_ib_pending_orders_price_moved()
+        await asyncio.wait_for(_cancel_ib_pending_orders_price_moved(), timeout=_PENDING_CANCEL_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("AI bot IB pending-cancel check timed out after %.1fs", _PENDING_CANCEL_TIMEOUT_S)
+        _pm_log("IB pending-cancel check timed out; continuing cycle")
     except Exception as exc:
         logger.warning("AI bot IB pending-cancel check error: %s", exc)
 
@@ -1663,7 +2720,10 @@ async def _run_once() -> None:
     if use_ib_execution:
         try:
             from app.services.ib_service import ib_service
-            ib_positions = await ib_service.get_positions()
+            ib_positions = await asyncio.wait_for(
+                ib_service.get_positions(),
+                timeout=_IB_SNAPSHOT_TIMEOUT_S,
+            )
             ib_by_symbol = {
                 str(r.get("symbol") or "").upper(): (
                     float(r.get("quantity") or 0.0), float(r.get("avg_cost") or 0.0)
@@ -1676,7 +2736,10 @@ async def _run_once() -> None:
                 if qty > 0 and avg > 0:
                     p["avg_cost"] = avg
                 p["shares"] = qty
-            summary = await ib_service.get_account_summary()
+            summary = await asyncio.wait_for(
+                ib_service.get_account_summary(),
+                timeout=_IB_SNAPSHOT_TIMEOUT_S,
+            )
             if isinstance(summary, dict) and not summary.get("error"):
                 account["equity"] = _summary_num(summary, "NetLiquidation")
                 account["available_funds"] = _summary_num(summary, "AvailableFunds")
@@ -1714,8 +2777,13 @@ async def _run_once() -> None:
     if crash_active:
         return
 
-    # Only trade during the regular session.
-    if not _regular_session_is_open():
+    # Session gate: regular hours for all modes; optionally allow IB pre-market
+    # warm-up (09:20-09:30 ET) when PM's pre-market order toggle is enabled.
+    allow_premarket_ib = bool(settings.get("premarket_order_placement_enabled", False))
+    session_open = bool(_regular_session_is_open())
+    premarket_window = bool(_market_is_active() and not session_open)
+    can_trade_now = session_open or (use_ib_execution and allow_premarket_ib and premarket_window)
+    if not can_trade_now:
         return
 
     hold_overnight = bool(settings.get("hold_positions_overnight", False))
@@ -1751,32 +2819,76 @@ async def _run_once() -> None:
 
     # ── Guardrail 3: stop-loss / take-profit (hard) ──────────────────────────── #
     risk_handled: set[str] = set()
-    sl_pct = float(settings.get("stop_loss_pct", 0.0) or 0.0)
-    tp_pct = float(settings.get("take_profit_pct", 0.0) or 0.0)
-    sl_val = float(settings.get("stop_loss_value", 0.0) or 0.0)
-    tp_val = float(settings.get("take_profit_value", 0.0) or 0.0)
+    fill_near_sl_enabled = bool(settings.get("ai_fill_near_sl_enabled", False))
+    fill_near_sl_distance_pct = max(0.0, float(settings.get("ai_fill_near_sl_distance_pct", 0.25) or 0.0))
+    fill_near_sl_size_pct = max(0.0, min(100.0, float(settings.get("ai_fill_near_sl_size_pct", 50.0) or 0.0)))
+    sl_sell_market_enabled = bool(settings.get("stop_loss_sell_market_enabled", True))
     for p in held:
         price = quotes.get(p["symbol"], 0.0)
-        avg = float(p.get("avg_cost") or 0.0)
-        if price <= 0 or avg <= 0:
+        if price <= 0:
             continue
-        sl_targets = []
-        tp_targets = []
-        if sl_pct > 0:
-            sl_targets.append(avg * (1 - sl_pct / 100.0))
-        if sl_val > 0:
-            sl_targets.append(avg - sl_val)
-        if tp_pct > 0:
-            tp_targets.append(avg * (1 + tp_pct / 100.0))
-        if tp_val > 0:
-            tp_targets.append(avg + tp_val)
-        sl_trigger = max(sl_targets) if sl_targets else None
-        tp_trigger = min(tp_targets) if tp_targets else None
-        if sl_trigger is not None and price <= sl_trigger:
+
+        risk = _effective_risk_targets(
+            settings=settings,
+            pos=p,
+            cur_px=price,
+            pm_state=pm_state,
+            interval_s=interval_s,
+        )
+        avg = float(risk.get("avg_cost") or 0.0)
+        sl_trigger = risk.get("sl_trigger")
+        tp_trigger = risk.get("tp_trigger")
+        if avg <= 0.0:
+            continue
+
+        if (
+            fill_near_sl_enabled
+            and fill_near_sl_size_pct > 0.0
+            and sl_trigger is not None
+            and float(sl_trigger) > 0.0
+            and price > float(sl_trigger)
+        ):
+            distance_pct = ((price - float(sl_trigger)) / float(sl_trigger)) * 100.0
+            room = _position_allocation_room(p, price, account)
+            if distance_pct <= fill_near_sl_distance_pct and room > 0.0:
+                await _buy_position(
+                    pos=p,
+                    price=price,
+                    reason=(
+                        f"fill_near_sl @ ${price:.2f} dist={distance_pct:.3f}% "
+                        f"bars_held={int(risk.get('bars_held') or 0)}"
+                    )[:140],
+                    ib_mode=ib_mode,
+                    ib_connected=use_ib_execution,
+                    account=account,
+                    order_type="market",
+                    size_pct=fill_near_sl_size_pct,
+                    risk_level="medium",
+                )
+                # Allow new average cost to settle before evaluating exits again.
+                risk_handled.add(p["symbol"])
+                continue
+
+        if sl_trigger is not None and price <= float(sl_trigger):
+            should_block_loss, _ = _should_block_loss_exit(
+                settings=settings,
+                pos=p,
+                cur_px=price,
+                account=account,
+            )
+            if should_block_loss:
+                _pm_log(
+                    f"hold no-loss {p['symbol']}: ${price:.2f} below avg ${avg:.2f} "
+                    f"(SL {float(sl_trigger):.2f}, bars={int(risk.get('bars_held') or 0)})"
+                )
+                continue
+            sl_order_type = "market" if sl_sell_market_enabled else "limit"
             await _sell_position(pos=p, price=price, reason=f"stop_loss @ ${price:.2f}",
-                                 ib_mode=ib_mode, ib_connected=use_ib_execution)
+                                 ib_mode=ib_mode, ib_connected=use_ib_execution,
+                                 order_type=sl_order_type,
+                                 limit_price=(float(price) if sl_order_type == "limit" else None))
             risk_handled.add(p["symbol"])
-        elif tp_trigger is not None and price >= tp_trigger:
+        elif tp_trigger is not None and price >= float(tp_trigger):
             await _sell_position(pos=p, price=price, reason=f"take_profit @ ${price:.2f}",
                                  ib_mode=ib_mode, ib_connected=use_ib_execution)
             risk_handled.add(p["symbol"])
@@ -1786,11 +2898,19 @@ async def _run_once() -> None:
     if settings.get("ai_bot_use_local_1m", True):
         max_bars = int(settings.get("ai_bot_max_context_bars", 60) or 60)
         for sym in symbols:
-            summary = await asyncio.to_thread(_summarise_1m_bars, sym, max_bars)
+            try:
+                summary = await asyncio.wait_for(
+                    asyncio.to_thread(_summarise_1m_bars, sym, max_bars),
+                    timeout=_BAR_SUMMARY_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("AI bot 1m summary timed out for %s after %.1fs", sym, _BAR_SUMMARY_TIMEOUT_S)
+                continue
             if summary:
                 bars[sym] = summary
     news = await _gather_news(symbols) if settings.get("ai_bot_use_news", True) else []
     regime_context = _build_regime_context(bars=bars, interval_s=interval_s)
+    news_context = _build_news_context(news)
 
     model = await _resolve_model(settings)
     _state["last_model"] = model
@@ -1802,6 +2922,7 @@ async def _run_once() -> None:
         use_ib_execution=use_ib_execution,
         ib_mode=ib_mode,
         regime_context=regime_context,
+        news_context=news_context,
     )
     user_prompt = _build_user_prompt(
         instruction=str(settings.get("ai_bot_prompt") or "Help me make money using the positions in watchlist."),
@@ -1809,9 +2930,19 @@ async def _run_once() -> None:
         today_actions=list(_state.get("today_actions") or []),
         runtime_constraints=runtime_constraints,
         regime_context=regime_context,
+        news_context=news_context,
     )
     decisions = await _query_model(model, _SYSTEM_PROMPT, user_prompt, settings)
     decisions = _normalize_symbol_decisions(decisions, symbols)
+    decisions = _apply_prediction_order_policy(decisions, bars=bars, quotes=quotes)
+    decisions = _apply_pm_execution_guards(
+        decisions,
+        settings=settings,
+        bars=bars,
+        positions=positions,
+        quotes=quotes,
+        account=account,
+    )
     _state["last_decisions"] = decisions
     _log_decision_batch(decisions, symbols, model)
 
@@ -1944,11 +3075,18 @@ async def run_ai_bot() -> None:
         if now - last_run < interval:
             continue
         last_run = now
+        _state["cycle_in_progress"] = True
+        _state["cycle_started_at"] = datetime.now(timezone.utc).isoformat()
+        cycle_timeout_s = max(_RUN_ONCE_TIMEOUT_MIN_S, min(float(interval * 2), _RUN_ONCE_TIMEOUT_MAX_S))
         try:
-            await _run_once()
+            await asyncio.wait_for(_run_once(), timeout=cycle_timeout_s)
             _state["session_cycle_count"] = int(_state.get("session_cycle_count") or 0) + 1
             _state["last_run_at"] = datetime.now(timezone.utc).isoformat()
             _state["last_error"] = None
+        except asyncio.TimeoutError:
+            _state["last_error"] = f"AI bot cycle timed out after {int(cycle_timeout_s)}s."
+            logger.warning("AI bot cycle timeout after %.1fs", cycle_timeout_s)
+            _pm_log(_state["last_error"])
         except httpx.ConnectError:
             _state["last_error"] = _provider_connection_error_message(settings)
             logger.warning("AI bot: model provider connection error")
@@ -1969,3 +3107,5 @@ async def run_ai_bot() -> None:
             _state["last_error"] = str(exc)
             logger.exception("AI bot run error")
             _pm_log(f"run error: {_state['last_error']}")
+        finally:
+            _state["cycle_in_progress"] = False

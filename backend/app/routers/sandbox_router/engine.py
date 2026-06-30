@@ -138,6 +138,15 @@ class PortfolioManagerSettingsRequest(BaseModel):
     ai_tag_long_tp_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     ai_tag_long_sl_value: Optional[float] = Field(default=None, ge=0.0, le=10000.0)
     ai_tag_no_loss_sell: Optional[bool] = None
+    ai_no_loss_full_alloc_only: Optional[bool] = None
+    ai_no_loss_emergency_cap_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    ai_fill_near_sl_enabled: Optional[bool] = None
+    ai_fill_near_sl_distance_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    ai_fill_near_sl_size_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    ai_sl_tp_decay_enabled: Optional[bool] = None
+    ai_sl_tp_decay_bars: Optional[int] = Field(default=None, ge=1, le=50000)
+    ai_sl_decay_total_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
+    ai_tp_decay_total_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     pending_price_drift_cancel_pct: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     pending_cancel_after_bars: Optional[int] = Field(default=None, ge=0, le=120)
     paper_buy_mkt_after_bars: Optional[int] = Field(default=None, ge=0, le=120)

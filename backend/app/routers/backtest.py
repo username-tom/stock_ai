@@ -1135,6 +1135,84 @@ async def run_sandbox_backtest_endpoint(
             detail="No watchlist symbols found in sandbox. Add positions or pass `symbols`.",
         )
 
+    if is_ai_bot_mode:
+        from app.services.ai_bot import run_ai_bot_backtest as _run_ai_backtest
+
+        ai_result = await _run_ai_backtest(
+            symbols=symbols,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            commission=req.commission,
+            data_source=effective_data_source,
+        )
+
+        metrics_out = ai_result.get("metrics") or {}
+        report_symbol = _summarize_report_symbols(symbols)
+        name = f"AI_BOT_{req.start_date}_to_{req.end_date}"
+        strategy_type_value = "sandbox_ai_bot"
+        pm_settings_snapshot = _build_pm_settings_snapshot({
+            "execution_mode": req.execution_mode,
+            "ai_bot_prompt": str(get_manager_settings().get("ai_bot_prompt") or "").strip(),
+        })
+        parameters_payload = {
+            "symbols": symbols,
+            "data_source": effective_data_source,
+            "requested_data_source": requested_data_source,
+            "execution_mode": req.execution_mode,
+            "allocation_mode": req.allocation_mode,
+            "use_shared_pool": False,
+            "pm_settings": pm_settings_snapshot,
+        }
+        result_data_payload = dict(ai_result)
+        result_data_payload.setdefault("initial_capital", req.initial_capital)
+        result_data_payload["pm_settings"] = pm_settings_snapshot
+        result_data_payload["use_sentiment_routing"] = False
+        result_data_payload["execution_mode"] = req.execution_mode
+
+        report = BacktestReport(
+            name=name,
+            symbol=report_symbol,
+            strategy_type=strategy_type_value,
+            parameters=parameters_payload,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=req.initial_capital,
+            final_value=metrics_out.get("final_value"),
+            total_return_pct=metrics_out.get("total_return_pct"),
+            annualized_return_pct=metrics_out.get("annualized_return_pct"),
+            sharpe_ratio=metrics_out.get("sharpe_ratio"),
+            max_drawdown_pct=metrics_out.get("max_drawdown_pct"),
+            win_rate_pct=metrics_out.get("win_rate_pct"),
+            total_trades=metrics_out.get("total_trades"),
+            result_data=result_data_payload,
+        )
+        db.add(report)
+        await db.commit()
+        await db.refresh(report)
+
+        offload_payload = {
+            "id": report.id,
+            "name": name,
+            "symbol": report.symbol,
+            "strategy_type": strategy_type_value,
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "initial_capital": req.initial_capital,
+            "metrics": metrics_out,
+            "result_data": result_data_payload,
+            "created_at": report.created_at.isoformat() if report.created_at else None,
+        }
+        await _offload_report_payload(db, report, offload_payload)
+
+        return {
+            "id": report.id,
+            "name": name,
+            "metrics": metrics_out,
+            "execution_mode": req.execution_mode,
+            "result": result_data_payload,
+        }
+
     verification_info: dict[str, object] = {}
     if req.day_trade:
         verification_info = await _ensure_watchlist_intraday_cache(

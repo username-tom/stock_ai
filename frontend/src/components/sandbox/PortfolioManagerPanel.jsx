@@ -345,6 +345,15 @@ function buildDraftFromSettings(settings) {
     ai_tag_long_tp_value: aiLongTpValue,
     ai_tag_long_sl_value: aiLongSlValue,
     ai_tag_no_loss_sell: settings.ai_tag_no_loss_sell ?? true,
+    ai_no_loss_full_alloc_only: settings.ai_no_loss_full_alloc_only ?? true,
+    ai_no_loss_emergency_cap_pct: settings.ai_no_loss_emergency_cap_pct ?? 10,
+    ai_fill_near_sl_enabled: settings.ai_fill_near_sl_enabled ?? false,
+    ai_fill_near_sl_distance_pct: settings.ai_fill_near_sl_distance_pct ?? 0.25,
+    ai_fill_near_sl_size_pct: settings.ai_fill_near_sl_size_pct ?? 50,
+    ai_sl_tp_decay_enabled: settings.ai_sl_tp_decay_enabled ?? false,
+    ai_sl_tp_decay_bars: settings.ai_sl_tp_decay_bars ?? 120,
+    ai_sl_decay_total_pct: settings.ai_sl_decay_total_pct ?? 50,
+    ai_tp_decay_total_pct: settings.ai_tp_decay_total_pct ?? 80,
     pm_hold_duration_days: settings.pm_hold_duration_days ?? 1,
     pm_hold_duration_bars: settings.pm_hold_duration_bars ?? 20,
     pm_hold_extended_multiplier: settings.pm_hold_extended_multiplier ?? 2.0,
@@ -1190,6 +1199,15 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
       ai_tag_long_tp_value: aiLongTpValue,
       ai_tag_long_sl_value: aiLongSlValue,
       ai_tag_no_loss_sell: draft.ai_tag_no_loss_sell,
+      ai_no_loss_full_alloc_only: !!draft.ai_no_loss_full_alloc_only,
+      ai_no_loss_emergency_cap_pct: Math.max(0, Math.min(100, Number(draft.ai_no_loss_emergency_cap_pct ?? 10) || 0)),
+      ai_fill_near_sl_enabled: !!draft.ai_fill_near_sl_enabled,
+      ai_fill_near_sl_distance_pct: Math.max(0, Math.min(100, Number(draft.ai_fill_near_sl_distance_pct ?? 0.25) || 0)),
+      ai_fill_near_sl_size_pct: Math.max(0, Math.min(100, Number(draft.ai_fill_near_sl_size_pct ?? 50) || 0)),
+      ai_sl_tp_decay_enabled: !!draft.ai_sl_tp_decay_enabled,
+      ai_sl_tp_decay_bars: Math.max(1, Math.floor(Number(draft.ai_sl_tp_decay_bars ?? 120) || 120)),
+      ai_sl_decay_total_pct: Math.max(0, Math.min(100, Number(draft.ai_sl_decay_total_pct ?? 50) || 0)),
+      ai_tp_decay_total_pct: Math.max(0, Math.min(100, Number(draft.ai_tp_decay_total_pct ?? 80) || 0)),
       pm_hold_duration_days: Math.max(0, Math.floor(Number(draft.pm_hold_duration_days ?? 1) || 0)),
       pm_hold_extended_multiplier: Math.max(0, Number(draft.pm_hold_extended_multiplier ?? 2.0) || 0),
       pm_hold_trailing_pct: Math.max(0, Number(draft.pm_hold_trailing_pct ?? 3.0) || 0),
@@ -2783,6 +2801,136 @@ export default function PortfolioManagerPanel({ profile = 'simulated', onShowOve
                       </div>
                       <span className="text-xs text-slate-300">{draft.ai_tag_no_loss_sell ? 'Enabled (block loss-making AI exits)' : 'Disabled (allow AI exits at loss)'}</span>
                     </label>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="No-Loss Scope and Emergency Cap"
+                    hint="When enabled, apply no-loss hold only after the symbol reaches full allocation. Emergency cap allows protective exit when losses exceed this threshold."
+                  >
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <div
+                          className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_no_loss_full_alloc_only ? 'bg-violet-600' : 'bg-dark-600'}`}
+                          onClick={() => {
+                            if (!editSettings) return
+                            updateDraft(d => ({ ...d, ai_no_loss_full_alloc_only: !d.ai_no_loss_full_alloc_only }))
+                          }}
+                        >
+                          <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_no_loss_full_alloc_only ? 'translate-x-4' : ''}`} />
+                        </div>
+                        <span className="text-xs text-slate-300">{draft.ai_no_loss_full_alloc_only ? 'No-loss only when fully allocated' : 'No-loss at any allocation level'}</span>
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">Emergency loss cap</span>
+                        <input
+                          type="number" min={0} max={100} step={0.1}
+                          disabled={!editSettings}
+                          value={draft.ai_no_loss_emergency_cap_pct}
+                          onChange={e => updateDraft(d => ({ ...d, ai_no_loss_emergency_cap_pct: e.target.value }))}
+                          className="input w-24 text-sm py-1.5"
+                        />
+                        <span className="text-slate-400 text-sm">%</span>
+                      </div>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Near-SL Fill (Average Down)"
+                    hint="If price approaches SL and allocation room remains, buy additional shares to reduce average cost."
+                  >
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <div
+                          className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_fill_near_sl_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                          onClick={() => {
+                            if (!editSettings) return
+                            updateDraft(d => ({ ...d, ai_fill_near_sl_enabled: !d.ai_fill_near_sl_enabled }))
+                          }}
+                        >
+                          <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_fill_near_sl_enabled ? 'translate-x-4' : ''}`} />
+                        </div>
+                        <span className="text-xs text-slate-300">{draft.ai_fill_near_sl_enabled ? 'Enabled' : 'Disabled'}</span>
+                      </label>
+                      <div className={`flex items-center gap-4 flex-wrap transition-opacity ${draft.ai_fill_near_sl_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">SL distance</span>
+                          <input
+                            type="number" min={0} max={100} step={0.01}
+                            disabled={!editSettings}
+                            value={draft.ai_fill_near_sl_distance_pct}
+                            onChange={e => updateDraft(d => ({ ...d, ai_fill_near_sl_distance_pct: e.target.value }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">%</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">Buy size</span>
+                          <input
+                            type="number" min={0} max={100} step={1}
+                            disabled={!editSettings}
+                            value={draft.ai_fill_near_sl_size_pct}
+                            onChange={e => updateDraft(d => ({ ...d, ai_fill_near_sl_size_pct: e.target.value }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">%</span>
+                        </div>
+                      </div>
+                    </div>
+                  </SettingRow>
+
+                  <SettingRow
+                    label="Linear SL/TP Decay Over Time"
+                    hint="Reduce SL and TP thresholds linearly as bars pass, so exits become easier over time."
+                  >
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <div
+                          className={`relative w-9 h-5 rounded-full transition-colors ${draft.ai_sl_tp_decay_enabled ? 'bg-violet-600' : 'bg-dark-600'}`}
+                          onClick={() => {
+                            if (!editSettings) return
+                            updateDraft(d => ({ ...d, ai_sl_tp_decay_enabled: !d.ai_sl_tp_decay_enabled }))
+                          }}
+                        >
+                          <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${draft.ai_sl_tp_decay_enabled ? 'translate-x-4' : ''}`} />
+                        </div>
+                        <span className="text-xs text-slate-300">{draft.ai_sl_tp_decay_enabled ? 'Enabled' : 'Disabled'}</span>
+                      </label>
+                      <div className={`flex items-center gap-4 flex-wrap transition-opacity ${draft.ai_sl_tp_decay_enabled ? 'opacity-100' : 'opacity-40 pointer-events-none'}`}>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">Duration</span>
+                          <input
+                            type="number" min={1} max={50000} step={1}
+                            disabled={!editSettings}
+                            value={draft.ai_sl_tp_decay_bars}
+                            onChange={e => updateDraft(d => ({ ...d, ai_sl_tp_decay_bars: e.target.value }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">bars</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">SL total decay</span>
+                          <input
+                            type="number" min={0} max={100} step={0.1}
+                            disabled={!editSettings}
+                            value={draft.ai_sl_decay_total_pct}
+                            onChange={e => updateDraft(d => ({ ...d, ai_sl_decay_total_pct: e.target.value }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">%</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <span className="text-xs text-slate-400">TP total decay</span>
+                          <input
+                            type="number" min={0} max={100} step={0.1}
+                            disabled={!editSettings}
+                            value={draft.ai_tp_decay_total_pct}
+                            onChange={e => updateDraft(d => ({ ...d, ai_tp_decay_total_pct: e.target.value }))}
+                            className="input w-24 text-sm py-1.5"
+                          />
+                          <span className="text-slate-400 text-sm">%</span>
+                        </div>
+                      </div>
+                    </div>
                   </SettingRow>
 
                   <SettingRow

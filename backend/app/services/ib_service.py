@@ -63,6 +63,8 @@ class _IBApiApp(EWrapper, EClient):
         self.market_data: dict[int, dict] = {}
         self.market_data_events: dict[int, threading.Event] = {}
 
+        self.news_bulletins: list[dict] = []
+
         self.historical_data: dict[int, list[dict]] = {}
         self.historical_data_events: dict[int, threading.Event] = {}
 
@@ -229,6 +231,19 @@ class _IBApiApp(EWrapper, EClient):
         evt = self.market_data_events.get(reqId)
         if evt is not None:
             evt.set()
+
+    def updateNewsBulletin(self, msgId: int, msgType: int, message: str, origExchange: str) -> None:
+        with self._lock:
+            self.news_bulletins.append(
+                {
+                    "msg_id": int(msgId),
+                    "msg_type": int(msgType),
+                    "message": str(message or ""),
+                    "orig_exchange": str(origExchange or ""),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self.news_bulletins[:] = self.news_bulletins[-100:]
 
     def historicalData(self, reqId: int, bar: Any) -> None:
         with self._lock:
@@ -442,6 +457,10 @@ class IBService:
             self._app = app
             self._thread = thread
             self._connected = True
+            try:
+                self._app.reqNewsBulletins(True)
+            except Exception:
+                logger.debug("IB news bulletin subscription unavailable", exc_info=True)
             logger.info("Connected to IB on %s:%s", effective_host, settings.IB_PORT)
             return {"status": "ok", "message": "Connected to Interactive Brokers."}
         except Exception as exc:
@@ -457,6 +476,10 @@ class IBService:
     async def disconnect(self) -> dict:
         if self._app is not None:
             try:
+                try:
+                    self._app.cancelNewsBulletins()
+                except Exception:
+                    pass
                 self._app.disconnect()
                 if self._thread and self._thread.is_alive():
                     await asyncio.to_thread(self._thread.join, 2)
@@ -572,10 +595,26 @@ class IBService:
         except Exception as exc:
             logger.error("get_account_pnl error: %s", exc)
             return {"error": "Failed to retrieve account PnL."}
-        finally:
+
+    async def get_news_bulletins(self, limit: int = 20) -> dict:
+        """Return the most recent IB news bulletins currently cached from the broker feed."""
+        if not self.is_connected or not self._app:
+            return {"error": "Not connected to IB.", "items": []}
+        try:
+            try:
+                self._app.reqNewsBulletins(True)
+            except Exception:
+                logger.debug("IB reqNewsBulletins call failed", exc_info=True)
             with self._app._lock:
-                self._app.pnl_events.pop(req_id, None)
-                self._app.pnl_data.pop(req_id, None)
+                items = list(self._app.news_bulletins)[-max(1, int(limit or 20)):]
+            return {
+                "items": items,
+                "count": len(items),
+                "connected": True,
+            }
+        except Exception as exc:
+            logger.error("get_news_bulletins error: %s", exc)
+            return {"error": "Failed to retrieve IB news bulletins.", "items": []}
 
     async def get_executions(self) -> list[dict]:
         """Return today's IB executions with IB's own realized PnL per fill.

@@ -167,6 +167,15 @@ _settings: dict[str, Any] = {
     "ai_tag_long_tp_value": 0.0,          # take profit $ for long-hold positions (0 = disabled)
     "ai_tag_long_sl_value": 0.0,          # stop loss  $ for long-hold positions (0 = disabled)
     "ai_tag_no_loss_sell": True,          # block AI-driven sells that would realize a loss
+    "ai_no_loss_full_alloc_only": True,   # no-loss exit guard only after a symbol reaches full allocation cap
+    "ai_no_loss_emergency_cap_pct": 10.0, # emergency loss cap (from avg cost) to override no-loss hold
+    "ai_fill_near_sl_enabled": False,     # average down when price approaches the active SL trigger
+    "ai_fill_near_sl_distance_pct": 0.25, # trigger distance from active SL (% above trigger)
+    "ai_fill_near_sl_size_pct": 50.0,     # BUY sizing (% of available allocation room)
+    "ai_sl_tp_decay_enabled": False,      # linearly soften SL/TP over time
+    "ai_sl_tp_decay_bars": 120,           # bars to reach configured total SL/TP decay
+    "ai_sl_decay_total_pct": 50.0,        # total SL decay (% reduction of configured SL threshold)
+    "ai_tp_decay_total_pct": 80.0,        # total TP decay (% reduction of configured TP threshold)
     "pending_price_drift_cancel_pct": 0.25,  # cancel/repost pending IB LMT orders when market drifts >= this % from pending limit
     "pending_cancel_after_bars": 3,       # cancel pending orders after N sentiment bars even without price drift
     "paper_buy_mkt_after_bars": 0,        # paper-only: convert hanging BUY LMT to MKT after N bars (0 = disabled)
@@ -518,6 +527,15 @@ async def _load_settings_from_db() -> None:
             _settings["ai_tag_long_tp_value"] = float(getattr(row, "ai_tag_long_tp_value", 0.0) or 0.0)
             _settings["ai_tag_long_sl_value"] = float(getattr(row, "ai_tag_long_sl_value", 0.0) or 0.0)
             _settings["ai_tag_no_loss_sell"] = bool(getattr(row, "ai_tag_no_loss_sell", True))
+            _settings["ai_no_loss_full_alloc_only"] = bool(getattr(row, "ai_no_loss_full_alloc_only", True))
+            _settings["ai_no_loss_emergency_cap_pct"] = max(0.0, min(100.0, float(getattr(row, "ai_no_loss_emergency_cap_pct", 10.0) or 0.0)))
+            _settings["ai_fill_near_sl_enabled"] = bool(getattr(row, "ai_fill_near_sl_enabled", False))
+            _settings["ai_fill_near_sl_distance_pct"] = max(0.0, min(100.0, float(getattr(row, "ai_fill_near_sl_distance_pct", 0.25) or 0.0)))
+            _settings["ai_fill_near_sl_size_pct"] = max(0.0, min(100.0, float(getattr(row, "ai_fill_near_sl_size_pct", 50.0) or 0.0)))
+            _settings["ai_sl_tp_decay_enabled"] = bool(getattr(row, "ai_sl_tp_decay_enabled", False))
+            _settings["ai_sl_tp_decay_bars"] = max(1, int(getattr(row, "ai_sl_tp_decay_bars", 120) or 120))
+            _settings["ai_sl_decay_total_pct"] = max(0.0, min(100.0, float(getattr(row, "ai_sl_decay_total_pct", 50.0) or 0.0)))
+            _settings["ai_tp_decay_total_pct"] = max(0.0, min(100.0, float(getattr(row, "ai_tp_decay_total_pct", 80.0) or 0.0)))
             _settings["pending_price_drift_cancel_pct"] = float(getattr(row, "pending_price_drift_cancel_pct", 0.25) or 0.25)
             _settings["pending_cancel_after_bars"] = int(max(0, getattr(row, "pending_cancel_after_bars", 3) or 3))
             _settings["paper_buy_mkt_after_bars"] = int(max(0, getattr(row, "paper_buy_mkt_after_bars", 0) or 0))
@@ -684,6 +702,15 @@ async def _save_settings_to_db() -> None:
         row.ai_tag_long_tp_value = float(_settings.get("ai_tag_long_tp_value", 0.0) or 0.0)
         row.ai_tag_long_sl_value = float(_settings.get("ai_tag_long_sl_value", 0.0) or 0.0)
         row.ai_tag_no_loss_sell = bool(_settings.get("ai_tag_no_loss_sell", True))
+        row.ai_no_loss_full_alloc_only = bool(_settings.get("ai_no_loss_full_alloc_only", True))
+        row.ai_no_loss_emergency_cap_pct = max(0.0, min(100.0, float(_settings.get("ai_no_loss_emergency_cap_pct", 10.0) or 0.0)))
+        row.ai_fill_near_sl_enabled = bool(_settings.get("ai_fill_near_sl_enabled", False))
+        row.ai_fill_near_sl_distance_pct = max(0.0, min(100.0, float(_settings.get("ai_fill_near_sl_distance_pct", 0.25) or 0.0)))
+        row.ai_fill_near_sl_size_pct = max(0.0, min(100.0, float(_settings.get("ai_fill_near_sl_size_pct", 50.0) or 0.0)))
+        row.ai_sl_tp_decay_enabled = bool(_settings.get("ai_sl_tp_decay_enabled", False))
+        row.ai_sl_tp_decay_bars = max(1, int(_settings.get("ai_sl_tp_decay_bars", 120) or 120))
+        row.ai_sl_decay_total_pct = max(0.0, min(100.0, float(_settings.get("ai_sl_decay_total_pct", 50.0) or 0.0)))
+        row.ai_tp_decay_total_pct = max(0.0, min(100.0, float(_settings.get("ai_tp_decay_total_pct", 80.0) or 0.0)))
         row.pending_price_drift_cancel_pct = float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.25)
         row.pending_cancel_after_bars = int(max(0, _settings.get("pending_cancel_after_bars", 3) or 3))
         row.paper_buy_mkt_after_bars = int(max(0, _settings.get("paper_buy_mkt_after_bars", 0) or 0))
@@ -736,7 +763,10 @@ def update_manager_settings(new: dict) -> dict:
               "ai_tag_action_mode", "ai_external_sentiment_weight",
               "ai_tag_long_engine_off", "ai_tag_long_tp_pct", "ai_tag_long_sl_pct",
               "ai_tag_long_tp_value", "ai_tag_long_sl_value",
-              "ai_tag_no_loss_sell", "pending_price_drift_cancel_pct",
+              "ai_tag_no_loss_sell", "ai_no_loss_full_alloc_only", "ai_no_loss_emergency_cap_pct",
+              "ai_fill_near_sl_enabled", "ai_fill_near_sl_distance_pct", "ai_fill_near_sl_size_pct",
+              "ai_sl_tp_decay_enabled", "ai_sl_tp_decay_bars", "ai_sl_decay_total_pct", "ai_tp_decay_total_pct",
+              "pending_price_drift_cancel_pct",
               "pending_cancel_after_bars", "paper_buy_mkt_after_bars",
               "pending_sell_tp_near_mode", "pending_sell_tp_near_pct", "pending_sell_tp_near_value",
               "pending_repost_cooldown_seconds",
@@ -777,6 +807,36 @@ def update_manager_settings(new: dict) -> dict:
         _settings["paper_buy_mkt_after_bars"] = max(
             0,
             int(_settings.get("paper_buy_mkt_after_bars", 0) or 0),
+        )
+    if "ai_no_loss_emergency_cap_pct" in new:
+        _settings["ai_no_loss_emergency_cap_pct"] = max(
+            0.0,
+            min(100.0, float(_settings.get("ai_no_loss_emergency_cap_pct", 10.0) or 0.0)),
+        )
+    if "ai_fill_near_sl_distance_pct" in new:
+        _settings["ai_fill_near_sl_distance_pct"] = max(
+            0.0,
+            min(100.0, float(_settings.get("ai_fill_near_sl_distance_pct", 0.25) or 0.0)),
+        )
+    if "ai_fill_near_sl_size_pct" in new:
+        _settings["ai_fill_near_sl_size_pct"] = max(
+            0.0,
+            min(100.0, float(_settings.get("ai_fill_near_sl_size_pct", 50.0) or 0.0)),
+        )
+    if "ai_sl_tp_decay_bars" in new:
+        _settings["ai_sl_tp_decay_bars"] = max(
+            1,
+            int(_settings.get("ai_sl_tp_decay_bars", 120) or 120),
+        )
+    if "ai_sl_decay_total_pct" in new:
+        _settings["ai_sl_decay_total_pct"] = max(
+            0.0,
+            min(100.0, float(_settings.get("ai_sl_decay_total_pct", 50.0) or 0.0)),
+        )
+    if "ai_tp_decay_total_pct" in new:
+        _settings["ai_tp_decay_total_pct"] = max(
+            0.0,
+            min(100.0, float(_settings.get("ai_tp_decay_total_pct", 80.0) or 0.0)),
         )
     if "pending_sell_tp_near_mode" in new:
         _mode = str(_settings.get("pending_sell_tp_near_mode", "percent") or "percent").strip().lower()
@@ -2872,7 +2932,7 @@ async def _cancel_ib_pending_orders_price_moved() -> None:
         )
 
 
-async def _cancel_bearish_pending_orders() -> None:
+async def _cancel_bearish_pending_orders(*, include_sentiment_signals: bool = True) -> None:
     """Cancel unsettled pending BUY orders when any of the following is true:
 
     1. Sentiment score (symbol or market) is bearish/crash (< -0.2).
@@ -2904,7 +2964,7 @@ async def _cancel_bearish_pending_orders() -> None:
         # AI-tag decisions must use the same gate that maintains _state["ai_tags"]
         # (matrix routing). Otherwise the cache goes stale while the UI shows live
         # classifications, causing decisions to act on an outdated tag.
-        ai_enabled = _use_matrix_sentiment_routing()
+        ai_enabled = include_sentiment_signals and _use_matrix_sentiment_routing()
         drift_threshold_pct = max(0.0, float(_settings.get("pending_price_drift_cancel_pct", 0.25) or 0.0))
         pending_cancel_after_bars = max(0, int(_settings.get("pending_cancel_after_bars", 3) or 3))
         bar_minutes = _interval_to_minutes(str(_settings.get("sentiment_interval", "1m") or "1m"))
@@ -2930,7 +2990,7 @@ async def _cancel_bearish_pending_orders() -> None:
             # ── 1. Sentiment score ────────────────────────────────────────
             sym_info = _state.get("scores", {}).get(pos.symbol, {})
             score = float(sym_info.get("score", market_score)) if sym_info else market_score
-            bearish_sentiment = score < -0.2
+            bearish_sentiment = include_sentiment_signals and (score < -0.2)
 
             # ── 2. Price already below pending fill price (pre-loss) ──────
             cp = price_map.get(pos.symbol, 0.0)
